@@ -1,14 +1,16 @@
 # Aurora DSQL Support for Temporal
 
-Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL database. This plugin enables Temporal to use DSQL as its persistence layer with full feature parity.
+Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL database. This plugin enables Temporal to use DSQL as its persistence (default) store. Visibility isn't supported on DSQL, so configure a separate visibility store.
+
+> **Status: experimental.** Open defects from the October 2026 review are tracked as [issues labelled `dsql-review-2026-10`](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+is%3Aopen+label%3Adsql-review-2026-10). Fix the critical and high ones before any production use.
 
 ## Key Capabilities
 
 - **IAM authentication** with automatic token refresh — no stored passwords
-- **Optimistic concurrency control** with automatic retry and backoff
+- **Optimistic concurrency control** — DSQL reports conflicts at commit; the transaction-level retry doesn't fire yet ([#24](https://github.com/iw/temporal-dsql/issues/24))
 - **Connection Reservoir** for rate-limit-aware connection management
-- **Distributed coordination** via DynamoDB for multi-service deployments
-- **Snowflake ID generation** replacing PostgreSQL's BIGSERIAL
+- **Distributed coordination** via DynamoDB for multi-service deployments (opt-in; see [#33](https://github.com/iw/temporal-dsql/issues/33) and [#40](https://github.com/iw/temporal-dsql/issues/40))
+- **Snowflake ID generation** for `buffered_events` IDs, which can collide across transactions ([#34](https://github.com/iw/temporal-dsql/issues/34))
 
 ## Documentation
 
@@ -23,15 +25,17 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 
 **Schema version:** 1.1
 
-**DSQL constraints handled by the plugin:**
+**How the plugin handles DSQL differences:**
 
-| PostgreSQL Feature | DSQL Support | Plugin Solution |
-|-------------------|--------------|-----------------|
-| `BIGSERIAL` | Not supported | Snowflake ID generator |
-| `CHECK` constraints | Not supported | Application-level validation |
-| Pessimistic locking | Not supported | OCC with retry logic |
-| `FOR UPDATE` on JOINs | Not supported | Split into separate queries |
-| `FOR SHARE` | Not supported | Delegated to `FOR UPDATE` |
+| PostgreSQL Feature | Aurora DSQL Today | Plugin Today |
+|-------------------|-------------------|--------------|
+| `BIGSERIAL` | Sequences and identity columns supported since February 2026 | Snowflake IDs ([#34](https://github.com/iw/temporal-dsql/issues/34)) |
+| `CHECK` constraints | Supported | Omitted from the schema; validated in the application |
+| Pessimistic locking | Not supported; conflicts surface at commit | Transaction retry doesn't fire yet ([#24](https://github.com/iw/temporal-dsql/issues/24)) |
+| `FOR UPDATE` on JOINs | Supported since August 2026 | Split into single-table queries |
+| `FOR SHARE` | Not supported; `FOR KEY SHARE` supported since August 2026 | Shard read lock is a plain `SELECT` ([#23](https://github.com/iw/temporal-dsql/issues/23)) |
+
+**DSQL limits to keep in mind:** 3,000 modified rows and 10 MiB per transaction, 1 MiB per column value, 60-minute connections, and 100 new connections per second per cluster. Range deletes ([#26](https://github.com/iw/temporal-dsql/issues/26)) and large payloads ([#27](https://github.com/iw/temporal-dsql/issues/27)) can hit these limits today.
 
 ## Architecture
 
