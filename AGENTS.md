@@ -23,6 +23,7 @@
 - Prefer incremental PRs grouped by subsystem (e.g., schema prep, persistence adapter, service wiring, tests).
 - Keep comments minimal and focused on *why* design trade‑offs were made.
 - Do not revert or overwrite local developer changes unless explicitly asked.
+- Attribute agent-assisted work. Commits made with an AI coding agent end with a `Co-Authored-By:` trailer naming the agent; Claude Code adds `Co-Authored-By: <model> <noreply@anthropic.com>` by default. Pull request descriptions end with the agent's attribution line, such as `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Keep these lines when squashing, rebasing or rewording commits. The shared `.claude/settings.json` sets Claude Code's `attribution.pr`, which also stops the deprecated `includeCoAuthoredBy: false` from turning attribution off.
 
 ## Development Flow
 1. **Understand**: read surrounding code/tests/config before coding; capture findings in issue notes or design docs.
