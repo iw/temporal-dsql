@@ -1,0 +1,16 @@
+# The SDK generator appends the paths after these three, but roots them at the
+# repository top, where they match nothing. These three do match.
+.dagger/rust/operation-manifest.json linguist-generated
+src/bin/dagger-module.rs linguist-generated
+src/dagger_generated/** linguist-generated
+/.dagger/modules/ci/.dagger/rust/operation-manifest.json linguist-generated
+/.dagger/modules/ci/src/bin/dagger-module.rs linguist-generated
+/.dagger/modules/ci/src/dagger_generated/binding-catalog.json linguist-generated
+/.dagger/modules/ci/src/dagger_generated/generated-module-assets.json linguist-generated
+/.dagger/modules/ci/src/dagger_generated/mod.rs linguist-generated
+/.dagger/modules/ci/src/dagger_generated/module-introspection.json linguist-generated
+/.dagger/modules/ci/src/dagger_generated/module_codec.rs linguist-generated
+/.dagger/modules/ci/src/dagger_generated/module_context.rs linguist-generated
+/.dagger/modules/ci/src/dagger_generated/module_descriptor.rs linguist-generated
+/.dagger/modules/ci/src/dagger_generated/module_dispatch.rs linguist-generated
+/.dagger/modules/ci/src/dagger_generated/module_registration.rs linguist-generated
