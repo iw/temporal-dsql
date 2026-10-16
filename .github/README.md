@@ -105,7 +105,7 @@ Open issues and pull requests in this repository, not in `temporalio/temporal`. 
 
 ## Built with Claude Code
 
-This project is developed with [Claude Code](https://claude.com/claude-code), [Anthropic](https://www.anthropic.com)'s agentic coding tool, and its contributions are a big part of how the project moves forward. Claude Code reviewed the DSQL plugin in October 2026, filed the findings as [issues](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+label%3Adsql-review-2026-10), and contributes changes through pull requests, including this README.
+This project is developed with [Claude Code](https://claude.com/claude-code), [Anthropic](https://www.anthropic.com)'s agentic coding tool, and its contributions are a big part of how the project moves forward.
 
 Work done with Claude Code is credited in the history. Its commits carry a `Co-Authored-By: Claude … <noreply@anthropic.com>` trailer, and its pull requests end with a "Generated with Claude Code" line. To learn more, see the [Claude Code documentation](https://code.claude.com/docs/en/overview).
 
