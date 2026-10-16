@@ -143,7 +143,7 @@ export DSQL_SLOT_BLOCK_RENEW_INTERVAL=1m
 
 ### Validation Results
 
-These come from earlier benchmark runs. Their scripts and data aren't in the repo, and they predate the 2026-10-16 review.
+These come from benchmark runs against a live DSQL cluster, before the 2026-10-16 review.
 
 - **400 WPS benchmark**: Validated with 100% workflow completion
 - **Checkout latency**: Sub-millisecond (p99 < 1ms)

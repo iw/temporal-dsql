@@ -14,7 +14,7 @@ This is a community distribution of [Temporal](https://github.com/temporalio/tem
 - IAM authentication with generated tokens, so no database password is stored
 - A connection reservoir, and optional DynamoDB coordination, for DSQL's connection-rate limits
 
-DSQL holds the persistence store only. Visibility needs a separate store, such as PostgreSQL, MySQL, SQLite or Elasticsearch.
+DSQL holds the persistence store only. Visibility needs a separate store, such as OpenSearch, Elasticsearch, PostgreSQL, MySQL or SQLite.
 
 Everything outside the plugin, its schema and its tooling is upstream Temporal code.
 
@@ -60,8 +60,8 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
            databaseName: "postgres"   # a DSQL cluster has one database, named postgres
            connectAddr: "<cluster-id>.dsql.us-east-1.on.aws:5432"
            connectProtocol: "tcp"
-           connectAttributes:
-             sslmode: "verify-full"
+           tls:
+             enabled: true
            maxConns: 20
            maxIdleConns: 20
        visibility:                    # in memory, for trying it out only
@@ -77,7 +77,7 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
            maxIdleConns: 1
    ```
 
-   The plugin connects as the DSQL `admin` role with IAM tokens and ignores `user` and `password` ([#39](https://github.com/iw/temporal-dsql/issues/39)). It reads the region from `REGION` or `AWS_REGION`, and AWS credentials from the default credential chain.
+   The plugin connects as the DSQL `admin` role with IAM tokens and ignores `user` and `password`. With `tls.enabled` alone the connection is encrypted but the server certificate isn't verified; `enableHostVerification: true` verifies it ([#39](https://github.com/iw/temporal-dsql/issues/39)). The plugin reads the region from `REGION` or `AWS_REGION`, and AWS credentials from the default credential chain.
 
 4. Start the server:
 
