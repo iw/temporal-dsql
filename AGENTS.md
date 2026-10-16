@@ -23,6 +23,7 @@
 - Prefer incremental PRs grouped by subsystem (e.g., schema prep, persistence adapter, service wiring, tests).
 - Keep comments minimal and focused on *why* design trade‑offs were made.
 - Do not revert or overwrite local developer changes unless explicitly asked.
+- Attribute agent-assisted work. Commits made with an AI coding agent end with a `Co-Authored-By:` trailer naming the agent; Claude Code adds `Co-Authored-By: <model> <noreply@anthropic.com>` by default. Pull request descriptions end with the agent's attribution line, such as `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Keep these lines when squashing, rebasing or rewording commits. The shared `.claude/settings.json` sets Claude Code's `attribution.pr`, which also stops the deprecated `includeCoAuthoredBy: false` from turning attribution off.
 
 ## Development Flow
 1. **Understand**: read surrounding code/tests/config before coding; capture findings in issue notes or design docs.
@@ -54,34 +55,36 @@
 
 ## Implementation Status
 
-### ✅ Completed
+> **Known issues (review of 2026-10-16):** 32 open defects are tracked as GitHub issues #22–#53 ([label `dsql-review-2026-10`](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+is%3Aopen+label%3Adsql-review-2026-10)). Affected items below link to their issue; check it before relying on the item.
+
+### ✅ Implemented
 
 #### Schema Compatibility
 - DSQL-compatible schema (`schema/dsql/temporal/schema.sql`)
 - BYTEA → UUID conversion for composite primary keys
-- BIGSERIAL → BIGINT with Snowflake ID generation
-- CHECK constraints removed (application-level validation)
+- BIGSERIAL → BIGINT with Snowflake ID generation (IDs can collide across transactions: [#34](https://github.com/iw/temporal-dsql/issues/34))
+- CHECK constraints omitted (DSQL now supports them)
 - INDEX ASYNC for non-blocking index creation
 
 #### Persistence Layer
 - First-class DSQL plugin (`common/persistence/sql/sqlplugin/dsql/`)
-- Optimistic Concurrency Control with retry logic
-- Compare-And-Swap (CAS) updates for shard management
-- FOR UPDATE on single table only (DSQL limitation)
-- FOR SHARE delegated to FOR UPDATE
+- Optimistic concurrency control; the transaction-level retry on SQLSTATE 40001 doesn't fire yet ([#24](https://github.com/iw/temporal-dsql/issues/24))
+- Shard updates aren't fenced on DSQL ([#22](https://github.com/iw/temporal-dsql/issues/22)); the CAS helpers in `cas_updates.go` are unused ([#49](https://github.com/iw/temporal-dsql/issues/49))
+- FOR UPDATE on single tables only (DSQL lifted this limit in August 2026)
+- Shard read lock is a plain SELECT, not FOR UPDATE ([#23](https://github.com/iw/temporal-dsql/issues/23)); DSQL now supports FOR KEY SHARE
 
 #### IAM Authentication
 - Token-refreshing driver with automatic credential refresh
-- Token cache with expiry management
+- Token cache with expiry management (can serve expired tokens around credential rotation: [#32](https://github.com/iw/temporal-dsql/issues/32))
 
 #### Connection Management
-- **Connection Reservoir** (recommended) — Channel-based buffer with continuous refiller, proactive expiry scanner, guard window, in-flight semaphore
-- **Token Bucket Rate Limiter** (recommended) — DynamoDB-backed, uses DSQL's burst capacity (1000) with 100/sec sustained
-- **Slot Block Manager** — Block-based distributed connection leasing to avoid DynamoDB hot partitions (100 blocks × 100 slots = 10k)
-- Non-reservoir fallback (pool warmup + pool keeper) retained for environments without DynamoDB
+- **Connection Reservoir** (recommended) — Channel-based buffer with continuous refiller, proactive expiry scanner, guard window, in-flight semaphore (lifetime and leak issues: [#29](https://github.com/iw/temporal-dsql/issues/29), [#30](https://github.com/iw/temporal-dsql/issues/30))
+- **Token Bucket Rate Limiter** (opt-in) — DynamoDB-backed, uses DSQL's burst capacity (1000) with 100/sec sustained (overshoots under clock skew: [#40](https://github.com/iw/temporal-dsql/issues/40))
+- **Slot Block Manager** (opt-in) — Block-based distributed connection leasing to avoid DynamoDB hot partitions (100 blocks × 100 slots = 10k) (leaks blocks: [#33](https://github.com/iw/temporal-dsql/issues/33))
+- Non-reservoir fallback (pool warmup + pool keeper), the default when `DSQL_RESERVOIR_ENABLED` is unset (hides pgx fast paths: [#38](https://github.com/iw/temporal-dsql/issues/38))
 
 #### Observability
-- DSQL-specific metrics (conflicts, retries, latency)
+- DSQL-specific metrics (latency; the conflict and retry counters stay at zero until [#24](https://github.com/iw/temporal-dsql/issues/24) is fixed)
 - Reservoir metrics (checkouts, empty events, discards, refills)
 - Connection pool metrics (open, idle, in-use)
 
@@ -98,12 +101,15 @@
 
 ### Known Constraints
 
-1. **BIGSERIAL Not Supported**: Application generates IDs via Snowflake algorithm
-2. **CHECK Constraints Not Supported**: Application-level validation
-3. **FOR SHARE Not Supported**: Delegated to FOR UPDATE
-4. **FOR UPDATE on JOINs Not Supported**: Split into separate queries
+1. **Sequences and Identity Columns**: Supported by DSQL since February 2026; the plugin still generates `buffered_events` IDs with Snowflake ([#34](https://github.com/iw/temporal-dsql/issues/34))
+2. **CHECK Constraints**: Supported by DSQL; the schema omits them and the application validates instead
+3. **FOR SHARE Not Supported**: DSQL supports FOR KEY SHARE since August 2026, which the shard read lock needs ([#23](https://github.com/iw/temporal-dsql/issues/23))
+4. **FOR UPDATE on JOINs**: Supported by DSQL since August 2026; the plugin still splits these into single-table queries
 5. **Connection Rate Limit**: 100 connections/second cluster-wide
 6. **Connection Limit**: 10,000 connections per cluster (default, can be raised)
+7. **Transaction Limits**: 3,000 modified rows and 10 MiB per transaction; range deletes can exceed this ([#26](https://github.com/iw/temporal-dsql/issues/26))
+8. **Column Size**: 1 MiB per non-indexed column value, below Temporal's 2 MiB blob limit ([#27](https://github.com/iw/temporal-dsql/issues/27))
+9. **Connection Duration**: 60 minutes maximum
 
 ### Recommended Configuration
 
@@ -117,7 +123,7 @@ export DSQL_RESERVOIR_GUARD_WINDOW=45s
 export DSQL_RESERVOIR_INFLIGHT_LIMIT=8  # Max concurrent Open() calls
 ```
 
-**Distributed Rate Limiting with Token Bucket** (recommended):
+**Distributed Rate Limiting with Token Bucket** (opt-in; see [#40](https://github.com/iw/temporal-dsql/issues/40) before enabling):
 ```bash
 export DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=true
 export DSQL_DISTRIBUTED_RATE_LIMITER_TABLE=temporal-dsql-rate-limiter
@@ -126,7 +132,7 @@ export DSQL_TOKEN_BUCKET_RATE=100       # Tokens per second (DSQL sustained rate
 export DSQL_TOKEN_BUCKET_CAPACITY=1000  # Bucket capacity (DSQL burst capacity)
 ```
 
-**Distributed Connection Limiting with Slot Blocks** (for multi-service deployments):
+**Distributed Connection Limiting with Slot Blocks** (opt-in, for multi-service deployments; see [#33](https://github.com/iw/temporal-dsql/issues/33) before enabling):
 ```bash
 export DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true
 export DSQL_DISTRIBUTED_CONN_LEASE_TABLE=temporal-dsql-conn-lease
@@ -137,6 +143,8 @@ export DSQL_SLOT_BLOCK_RENEW_INTERVAL=1m
 ```
 
 ### Validation Results
+
+These come from benchmark runs against a live DSQL cluster, before the 2026-10-16 review.
 
 - **400 WPS benchmark**: Validated with 100% workflow completion
 - **Checkout latency**: Sub-millisecond (p99 < 1ms)
