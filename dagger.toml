@@ -1,0 +1,13 @@
+# Dagger workspace: the Rust SDK and the ci module. See docs/dsql/ci.md.
+
+[modules.dagger-rust-sdk]
+source = "rust"
+
+[modules.ci]
+source = ".dagger/modules/ci"
+
+[modules.dagger-rust-sdk.as-sdk]
+name = "rust"
+
+[[modules.dagger-rust-sdk.as-sdk.modules]]
+path = ".dagger/modules/ci"

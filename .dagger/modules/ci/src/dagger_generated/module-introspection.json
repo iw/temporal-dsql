@@ -1,0 +1,684 @@
+{
+  "descriptor_digest": "sha256:7646d3c5bcec9a3ab6c2d163e19aa5e882652e62cdb1f6119ab6c1f97de08cfb",
+  "format_version": 1,
+  "types": {
+    "Ci": {
+      "deprecation": null,
+      "documentation": null,
+      "enum_values": [],
+      "fields": [],
+      "functions": [
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Target platform, such as linux/arm64; defaults to the engine's platform.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 65,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "platform"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Compiles temporal-server, temporal-dsql-tool and temporal-elasticsearch-tool.",
+          "return_type": {
+            "kind": "named",
+            "name": "Directory",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 61,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "build"
+        },
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Target platform, such as linux/arm64; defaults to the engine's platform.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 168,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "platform"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Builds the server and tool images and returns them as OCI tarballs.",
+          "return_type": {
+            "kind": "named",
+            "name": "Directory",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 164,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "images"
+        },
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Unified diff that limits golangci-lint to the lines it changes; lints everything when omitted.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 79,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "File",
+                "nullable": true
+              },
+              "wire_name": "patch"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Runs golangci-lint and the errortype vet check, as make lint-code does.",
+          "return_type": {
+            "kind": "named",
+            "name": "String",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 73,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "lint"
+        },
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Tags to push; each gets the platform's architecture appended.",
+              "ignore": [],
+              "optional": false,
+              "source": {
+                "column": 90,
+                "line": 183,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "element": {
+                  "kind": "named",
+                  "name": "String",
+                  "nullable": false
+                },
+                "kind": "list",
+                "nullable": false
+              },
+              "wire_name": "tags"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Registry token, such as a GitHub token with write:packages.",
+              "ignore": [],
+              "optional": false,
+              "source": {
+                "column": 9,
+                "line": 187,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Secret",
+                "nullable": false
+              },
+              "wire_name": "password"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Target platform, such as linux/arm64; defaults to the engine's platform.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 189,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "platform"
+            },
+            {
+              "default": "ghcr.io",
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Registry host.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 64,
+                "line": 190,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": false
+              },
+              "wire_name": "registry"
+            },
+            {
+              "default": "iw",
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Registry namespace that holds the images.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 86,
+                "line": 191,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": false
+              },
+              "wire_name": "owner"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Registry user; defaults to the owner.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 66,
+                "line": 192,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "username"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Commit recorded in the org.opencontainers.image.revision label.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 194,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "revision"
+            }
+          ],
+          "cache": {
+            "kind": "never"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Pushes the server and tool images for one platform as <tag>-<arch>.",
+          "return_type": {
+            "element": {
+              "kind": "named",
+              "name": "String",
+              "nullable": false
+            },
+            "kind": "list",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 180,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "publish"
+        },
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Tags to create from the <tag>-<arch> images.",
+              "ignore": [],
+              "optional": false,
+              "source": {
+                "column": 73,
+                "line": 219,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "element": {
+                  "kind": "named",
+                  "name": "String",
+                  "nullable": false
+                },
+                "kind": "list",
+                "nullable": false
+              },
+              "wire_name": "tags"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Registry token, such as a GitHub token with write:packages.",
+              "ignore": [],
+              "optional": false,
+              "source": {
+                "column": 9,
+                "line": 221,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Secret",
+                "nullable": false
+              },
+              "wire_name": "password"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Platforms the index lists; each must already be published.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 223,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "element": {
+                  "kind": "named",
+                  "name": "String",
+                  "nullable": false
+                },
+                "kind": "list",
+                "nullable": true
+              },
+              "wire_name": "platforms"
+            },
+            {
+              "default": "ghcr.io",
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Registry host.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 64,
+                "line": 224,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": false
+              },
+              "wire_name": "registry"
+            },
+            {
+              "default": "iw",
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Registry namespace that holds the images.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 86,
+                "line": 225,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": false
+              },
+              "wire_name": "owner"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Registry user; defaults to the owner.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 66,
+                "line": 226,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "username"
+            }
+          ],
+          "cache": {
+            "kind": "never"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Combines the per-architecture images that publish pushed into multi-platform tags.",
+          "return_type": {
+            "element": {
+              "kind": "named",
+              "name": "String",
+              "nullable": false
+            },
+            "kind": "list",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 216,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "publishIndex"
+        },
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Release version, such as v1.31.4-dsql.1; names the archives.",
+              "ignore": [],
+              "optional": false,
+              "source": {
+                "column": 9,
+                "line": 267,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": false
+              },
+              "wire_name": "version"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Platforms to package; defaults to linux/amd64, linux/arm64 and darwin/arm64.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 271,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "element": {
+                  "kind": "named",
+                  "name": "String",
+                  "nullable": false
+                },
+                "kind": "list",
+                "nullable": true
+              },
+              "wire_name": "platforms"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Packages the binaries for each platform as tar.gz archives with SHA256SUMS.",
+          "return_type": {
+            "kind": "named",
+            "name": "Directory",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 263,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "release"
+        },
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Package patterns to test instead of the default set.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 81,
+                "line": 127,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "element": {
+                  "kind": "named",
+                  "name": "String",
+                  "nullable": false
+                },
+                "kind": "list",
+                "nullable": true
+              },
+              "wire_name": "packages"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Only run tests matching this regular expression, as go test -run.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 131,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "run"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Runs the SQL persistence, DSQL plugin, schema and DSQL tool tests with the race detector.",
+          "return_type": {
+            "kind": "named",
+            "name": "String",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 124,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "test"
+        }
+      ],
+      "interfaces": [],
+      "kind": "object",
+      "source": {
+        "column": 12,
+        "line": 36,
+        "path": "src/lib.rs"
+      },
+      "wire_name": "Ci"
+    },
+    "Query": {
+      "deprecation": null,
+      "documentation": "The module query root.",
+      "enum_values": [],
+      "fields": [],
+      "functions": [
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": "/",
+              "deprecation": null,
+              "documentation": "Repository checkout; defaults to the workspace root.",
+              "ignore": [
+                ".git",
+                ".claude",
+                ".cursor",
+                ".idea",
+                ".vscode",
+                ".dagger",
+                ".buildkite",
+                "**/.DS_Store",
+                ".bin",
+                ".stamp",
+                ".tmp",
+                ".testoutput",
+                ".coverage",
+                "dist",
+                "docs",
+                "develop/docker-compose",
+                "temporal-*",
+                "tdbg",
+                "tctl*",
+                "fairsim",
+                "poolsim"
+              ],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 54,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Directory",
+                "nullable": false
+              },
+              "wire_name": "source"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": true,
+          "deprecation": null,
+          "documentation": null,
+          "return_type": {
+            "kind": "named",
+            "name": "Ci",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 12,
+            "line": 44,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "ci"
+        }
+      ],
+      "interfaces": [],
+      "kind": "object",
+      "source": {
+        "column": 12,
+        "line": 44,
+        "path": "src/lib.rs"
+      },
+      "wire_name": "Query"
+    }
+  }
+}

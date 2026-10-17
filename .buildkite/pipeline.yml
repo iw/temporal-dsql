@@ -1,0 +1,136 @@
+# CI and release pipeline for temporal-dsql. Every step runs on a Namespace
+# agent of its own architecture. .buildkite/hooks/pre-command starts the
+# pinned Dagger engine, then the step calls the module in .dagger/modules/ci.
+# Setup, secrets and the release flow are in docs/dsql/ci.md.
+#
+# Each step spells out its whole agents map. nsc-container-privileged lets the
+# job start the engine as a privileged container.
+
+env:
+  # Tells the pre-command hook to start the engine. The initial pipeline
+  # upload step doesn't set it, so that step stays cheap.
+  DAGGER_ENGINE_BOOTSTRAP: "true"
+  DAGGER_NO_NAG: "1"
+  # The only submodule holds Grafana dashboards, which no step needs.
+  BUILDKITE_GIT_SUBMODULES: "false"
+
+steps:
+  - label: ":go: build {{matrix}}"
+    key: build
+    matrix: [amd64, arm64]
+    agents:
+      queue: namespace
+      nsc-arch: "{{matrix}}"
+      nsc-shape: 8x16
+      nsc-container-privileged: "true"
+    command: dagger --progress=plain call ci build entries
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+
+  - label: ":lint-roller: lint"
+    key: lint
+    agents:
+      queue: namespace
+      nsc-arch: arm64
+      nsc-shape: 16x32
+      nsc-container-privileged: "true"
+    command: .buildkite/lint.sh
+    timeout_in_minutes: 45
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+
+  - label: ":test_tube: test {{matrix}}"
+    key: test
+    matrix: [amd64, arm64]
+    agents:
+      queue: namespace
+      nsc-arch: "{{matrix}}"
+      nsc-shape: 8x16
+      nsc-container-privileged: "true"
+    command: dagger --progress=plain call ci test
+    timeout_in_minutes: 45
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+
+  # Release tags are v<upstream version>-dsql.<n>, such as v1.31.4-dsql.1.
+  # $$ escapes the regex anchor from upload-time interpolation.
+  # Other tags run only the steps above. A release tag publishes nothing
+  # until someone unblocks this step.
+  - block: ":rocket: Release ${BUILDKITE_TAG}"
+    key: release-gate
+    if: build.tag =~ /^v[0-9]+\.[0-9]+\.[0-9]+-dsql\.[0-9]+$$/
+    depends_on: [build, lint, test]
+    prompt: Push the images to GHCR and package the release binaries for this tag?
+
+  - label: ":docker: images {{matrix}}"
+    key: images
+    if: build.tag =~ /^v[0-9]+\.[0-9]+\.[0-9]+-dsql\.[0-9]+$$/
+    depends_on: release-gate
+    matrix: [amd64, arm64]
+    agents:
+      queue: namespace
+      nsc-arch: "{{matrix}}"
+      nsc-shape: 8x16
+      nsc-container-privileged: "true"
+    command: dagger --progress=plain call ci images entries
+    timeout_in_minutes: 30
+
+  # Each architecture pushes <tag>-<arch> from its own agent, then
+  # publish-index joins them under <tag>.
+  - label: ":package: publish {{matrix}}"
+    key: publish
+    if: build.tag =~ /^v[0-9]+\.[0-9]+\.[0-9]+-dsql\.[0-9]+$$/
+    depends_on: images
+    matrix: [amd64, arm64]
+    agents:
+      queue: namespace
+      nsc-arch: "{{matrix}}"
+      nsc-shape: 8x16
+      nsc-container-privileged: "true"
+    secrets: [GHCR_TOKEN]
+    command: >-
+      dagger --progress=plain call ci publish
+      --tags "$BUILDKITE_TAG"
+      --password env://GHCR_TOKEN
+      --revision "$BUILDKITE_COMMIT"
+    timeout_in_minutes: 30
+
+  - label: ":package: publish index"
+    key: publish-index
+    if: build.tag =~ /^v[0-9]+\.[0-9]+\.[0-9]+-dsql\.[0-9]+$$/
+    depends_on: publish
+    agents:
+      queue: namespace
+      nsc-arch: amd64
+      nsc-shape: 2x4
+      nsc-container-privileged: "true"
+    secrets: [GHCR_TOKEN]
+    command: >-
+      dagger --progress=plain call ci publish-index
+      --tags "$BUILDKITE_TAG"
+      --password env://GHCR_TOKEN
+    timeout_in_minutes: 15
+
+  # Go cross-compiles, so one agent packages every platform.
+  - label: ":github: release binaries"
+    key: release
+    if: build.tag =~ /^v[0-9]+\.[0-9]+\.[0-9]+-dsql\.[0-9]+$$/
+    depends_on: release-gate
+    agents:
+      queue: namespace
+      nsc-arch: amd64
+      nsc-shape: 8x16
+      nsc-container-privileged: "true"
+    command: >-
+      dagger --progress=plain call ci release
+      --version "$BUILDKITE_TAG"
+      export --path dist/release
+    artifact_paths: dist/release/*
+    timeout_in_minutes: 30
