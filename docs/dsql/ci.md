@@ -178,7 +178,7 @@ The SDK only talks to an engine of exactly its own release, so these move togeth
 - `rev` in `.dagger/modules/ci/Cargo.toml`, and `Cargo.lock`
 - `engineVersion` in `.dagger/modules/ci/dagger-module.toml`
 
-Then run `.dagger/generate.sh`. A newer generator rejects a manifest that an older one wrote, with `OPERATION_MANIFEST_STALE`. If that happens, first delete the module's `src/dagger_generated`, `src/bin` and `.dagger` directories.
+Then run `.dagger/generate.sh`. A newer generator rejects a manifest that an older one wrote, with `OPERATION_MANIFEST_STALE`. If that happens, first delete the module's generated files: `src/dagger_generated/`, `src/bin/dagger-module.rs` and `.dagger/`.
 
 When stock engines can load the fork's Rust SDK, or when moving to a managed engine:
 
