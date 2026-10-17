@@ -91,7 +91,7 @@ Every build of a pull request, `main`, a release branch or a tag runs these step
 | lint | arm64 | `.buildkite/lint.sh`: a pull request against its merge base, other builds against the parent commit |
 | test | amd64 and arm64 | `dagger call ci test` |
 
-A tag build continues to a block step once those pass. Nothing is published until someone unblocks it. Then:
+A release tag build continues to a block step once those pass. Release tags look like `v1.31.4-dsql.1`; see [Branches and tags](#branches-and-tags). Nothing is published until someone unblocks the block step. Then:
 
 1. `images` builds both images on each architecture.
 2. `publish` pushes `<tag>-amd64` and `<tag>-arm64` from their own agents.
@@ -116,7 +116,7 @@ The `test` step will fail until two existing test problems are fixed:
 Each build uploads the `pipeline.yml` from its own commit, so any build's YAML can ask for the secret. Protect it in two ways:
 
 - leave building pull requests from forks off, which is Buildkite's default
-- give the secret an access policy that admits only this pipeline (`pipeline_id`) and its release tags (`build_branch` holds the tag name on a tag build)
+- give the secret an access policy that admits only this pipeline (`pipeline_id`) and release tags (`build_branch: "v*-dsql.*"`; on a tag build it holds the tag name)
 
 **AWS, for the DSQL integration tests to come.** Use Buildkite's OIDC tokens rather than stored keys:
 
@@ -168,7 +168,7 @@ The next step, once the numbers justify it, is one long-lived engine per archite
 
 - `main` is upstream `main` plus the DSQL work.
 - `release/v1.31-dsql` is upstream tag `v1.31.4` with `main` merged in.
-- The pipeline treats any tag as a release candidate behind the block step. A naming scheme hasn't been chosen yet.
+- Release tags are `v<upstream version>-dsql.<n>`, cut from the matching release branch. For example, `v1.31.4-dsql.1` is the first release on upstream v1.31.4, and `v1.31.4-dsql.2` the next one on the same base. Only tags of this form reach the release steps; other tags just run CI.
 
 ## Changing the Dagger release
 

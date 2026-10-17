@@ -59,16 +59,19 @@ steps:
         - exit_status: -1
           limit: 2
 
-  # Tags publish nothing until someone unblocks this step.
+  # Release tags are v<upstream version>-dsql.<n>, such as v1.31.4-dsql.1.
+  # $$ escapes the regex anchor from upload-time interpolation.
+  # Other tags run only the steps above. A release tag publishes nothing
+  # until someone unblocks this step.
   - block: ":rocket: Release ${BUILDKITE_TAG}"
     key: release-gate
-    if: build.tag != null
+    if: build.tag =~ /^v[0-9]+\.[0-9]+\.[0-9]+-dsql\.[0-9]+$$/
     depends_on: [build, lint, test]
     prompt: Push the images to GHCR and package the release binaries for this tag?
 
   - label: ":docker: images {{matrix}}"
     key: images
-    if: build.tag != null
+    if: build.tag =~ /^v[0-9]+\.[0-9]+\.[0-9]+-dsql\.[0-9]+$$/
     depends_on: release-gate
     matrix: [amd64, arm64]
     agents:
@@ -83,7 +86,7 @@ steps:
   # publish-index joins them under <tag>.
   - label: ":package: publish {{matrix}}"
     key: publish
-    if: build.tag != null
+    if: build.tag =~ /^v[0-9]+\.[0-9]+\.[0-9]+-dsql\.[0-9]+$$/
     depends_on: images
     matrix: [amd64, arm64]
     agents:
@@ -101,7 +104,7 @@ steps:
 
   - label: ":package: publish index"
     key: publish-index
-    if: build.tag != null
+    if: build.tag =~ /^v[0-9]+\.[0-9]+\.[0-9]+-dsql\.[0-9]+$$/
     depends_on: publish
     agents:
       queue: namespace
@@ -118,7 +121,7 @@ steps:
   # Go cross-compiles, so one agent packages every platform.
   - label: ":github: release binaries"
     key: release
-    if: build.tag != null
+    if: build.tag =~ /^v[0-9]+\.[0-9]+\.[0-9]+-dsql\.[0-9]+$$/
     depends_on: release-gate
     agents:
       queue: namespace
