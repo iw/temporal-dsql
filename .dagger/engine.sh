@@ -33,6 +33,8 @@ readonly SUMS_SHA256="874e09a4a52b69006ea5b0cb9f75f980202d2c6fc0d6921f4816343808
 
 
 readonly CACHE_DIR="${DAGGER_ENGINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/temporal-dsql/dagger/${VERSION}}"
+# Stock Dagger CLIs remove every other container named dagger-engine-* when
+# they connect, so the default name avoids that prefix.
 readonly CONTAINER="${DAGGER_ENGINE_CONTAINER:-temporal-dsql-dagger-${VERSION}}"
 
 log() { printf 'dagger-engine: %s\n' "$*" >&2; }
