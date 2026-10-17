@@ -1,5 +1,5 @@
 {
-  "descriptor_digest": "sha256:b4fb25b06ca74dea699c61886ef6888c3043a017f5a8b7284b4c4d5f332102c8",
+  "descriptor_digest": "sha256:ba7857d358ad2b635a7a43281b743c02fc0600221da6951f91e4034303741699",
   "format_version": 1,
   "types": {
     "Ci": {
@@ -62,7 +62,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 201,
+                "line": 203,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -87,7 +87,7 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 197,
+            "line": 199,
             "path": "src/lib.rs"
           },
           "wire_name": "images"
@@ -146,7 +146,7 @@
               "optional": false,
               "source": {
                 "column": 90,
-                "line": 216,
+                "line": 218,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -170,7 +170,7 @@
               "optional": false,
               "source": {
                 "column": 9,
-                "line": 220,
+                "line": 222,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -190,7 +190,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 222,
+                "line": 224,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -210,7 +210,7 @@
               "optional": true,
               "source": {
                 "column": 64,
-                "line": 223,
+                "line": 225,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -230,7 +230,7 @@
               "optional": true,
               "source": {
                 "column": 86,
-                "line": 224,
+                "line": 226,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -250,7 +250,7 @@
               "optional": true,
               "source": {
                 "column": 66,
-                "line": 225,
+                "line": 227,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -270,7 +270,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 227,
+                "line": 229,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -299,7 +299,7 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 213,
+            "line": 215,
             "path": "src/lib.rs"
           },
           "wire_name": "publish"
@@ -316,7 +316,7 @@
               "optional": false,
               "source": {
                 "column": 73,
-                "line": 252,
+                "line": 254,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -340,7 +340,7 @@
               "optional": false,
               "source": {
                 "column": 9,
-                "line": 254,
+                "line": 256,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -360,7 +360,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 256,
+                "line": 258,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -384,7 +384,7 @@
               "optional": true,
               "source": {
                 "column": 64,
-                "line": 257,
+                "line": 259,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -404,7 +404,7 @@
               "optional": true,
               "source": {
                 "column": 86,
-                "line": 258,
+                "line": 260,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -424,7 +424,7 @@
               "optional": true,
               "source": {
                 "column": 66,
-                "line": 259,
+                "line": 261,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -453,7 +453,7 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 249,
+            "line": 251,
             "path": "src/lib.rs"
           },
           "wire_name": "publishIndex"
@@ -470,7 +470,7 @@
               "optional": false,
               "source": {
                 "column": 9,
-                "line": 300,
+                "line": 302,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -490,7 +490,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 304,
+                "line": 306,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -519,7 +519,7 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 296,
+            "line": 298,
             "path": "src/lib.rs"
           },
           "wire_name": "release"
@@ -536,7 +536,7 @@
               "optional": true,
               "source": {
                 "column": 81,
-                "line": 160,
+                "line": 162,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -560,7 +560,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 164,
+                "line": 166,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -585,7 +585,7 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 157,
+            "line": 159,
             "path": "src/lib.rs"
           },
           "wire_name": "test"

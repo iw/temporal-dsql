@@ -137,8 +137,9 @@ impl Ci {
             linter = linter.with_file("/tmp/lint.patch", patch);
             golangci.push("--new-from-patch=/tmp/lint.patch");
         }
-        Ok(linter
-            .with_exec(golangci)
+        let linted = linter.with_exec(golangci);
+        let issues = linted.stdout().await?;
+        let vetted = linted
             .with_exec(vec![
                 "go",
                 "vet",
@@ -149,7 +150,8 @@ impl Ci {
                 "./...",
             ])
             .stdout()
-            .await?)
+            .await?;
+        Ok(format!("{issues}{vetted}"))
     }
 
     /// Runs the SQL persistence, DSQL plugin, schema and DSQL tool tests with the race detector.
