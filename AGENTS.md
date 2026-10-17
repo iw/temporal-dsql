@@ -99,7 +99,7 @@
 #### Tooling
 - `tools/poolsim/` - Discrete event simulator for reservoir behavior validation
 - `tools/dsql/` - DSQL schema management tool
-- `.dagger/modules/ci/` and `.buildkite/` - Dagger CI module and Buildkite pipeline; the module can't load until the fork's Rust SDK is fixed (`docs/dsql/ci.md`)
+- `.dagger/modules/ci/` and `.buildkite/` - Dagger CI module and Buildkite pipeline (`docs/dsql/ci.md`)
 
 ### Known Constraints
 

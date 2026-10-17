@@ -2,7 +2,7 @@
 
 temporal-dsql's CI is a [Dagger](https://dagger.io) module written with the Rust SDK from the [iw/dagger](https://github.com/iw/dagger) fork. [Buildkite](https://buildkite.com) runs it on [Namespace](https://namespace.so) agents, and the same functions run on a laptop. GitHub Actions stays off, because upstream's workflows would misfire on a fork.
 
-> **Status: the module doesn't load yet.** It's pinned to the fork's `sdk/rust/v1.0.0-beta.11.rust.4` release. That release's Rust module runtime builds the module into a cache volume and then reads the binary back out of it, which Dagger doesn't allow. Every `dagger call ci …` therefore fails with `Rust runtime finalization failed`, and so does every pipeline step. A fixed fork release unblocks it. The engine operations behind each function have been run on the rust.4 engine through the Dagger API; see [Caching](#caching) for the timings.
+The module and its engine are pinned to the fork's `sdk/rust/v1.0.0-beta.11.rust.5` release; see [Changing the Dagger release](#changing-the-dagger-release).
 
 ## Layout
 
@@ -12,7 +12,6 @@ temporal-dsql's CI is a [Dagger](https://dagger.io) module written with the Rust
 | `dagger.lock` | Base image digests that the engine records and reuses |
 | `.dagger/modules/ci/` | The module: a Cargo project whose functions are listed below |
 | `.dagger/engine.sh` | Downloads, verifies and starts the pinned engine, and prints its environment |
-| `.dagger/generate.sh` | Regenerates the module's generated code after an edit |
 | `.buildkite/pipeline.yml` | Pipeline steps |
 | `.buildkite/hooks/pre-command` | Starts the engine before each step |
 | `.buildkite/lint.sh` | Limits lint to the lines a build changes |
@@ -71,15 +70,9 @@ If your global git config rewrites `https://github.com/` to SSH, run `dagger` wi
 
 ### Changing the module
 
-Edit `.dagger/modules/ci/src/lib.rs`, then run `.dagger/generate.sh` and commit the regenerated files with it. Until you do, every `dagger` command in the workspace fails with `GENERATED_STALE`. Run it once per edit: each run changes the digests in the generated files, even when the source hasn't changed. For a quick type check, run `cargo clippy --locked` in the module directory. Point `CARGO_TARGET_DIR` outside the repository, so that a `target/` directory doesn't get uploaded with the module.
+Edit `.dagger/modules/ci/src/lib.rs` or `Cargo.toml`, then run `dagger generate` and commit the regenerated files with it. Until you do, loading the module fails with `GENERATED_STALE`. `Cargo.lock` is committed, because the engine builds the module with `--locked`.
 
-`lib.rs` contains three workarounds for the rust.4 SDK, each marked:
-
-- the generated module is declared behind a default `generated` feature, because the authoring compiler rejects a plain `pub mod dagger_generated;`
-- the declaration also re-exports the core types that the generated code names
-- functions return a local `Error` type, because returning `dagger_sdk::ModuleError` directly fails authoring
-
-`Cargo.lock` is committed. Re-resolving it fails, because the SDK pins `zip = "=8.2.0"` and crates.io has yanked that version.
+For a quick type check, run `cargo clippy --locked` in the module directory. Point `CARGO_TARGET_DIR` outside the repository, so that a `target/` directory doesn't get uploaded with the module.
 
 ## CI flow
 
@@ -130,18 +123,18 @@ No module function takes AWS credentials yet.
 
 Each step runs on a fresh Namespace agent, so it starts a fresh engine. The engine holds the Go module, Go build and golangci-lint caches as Dagger cache volumes. They speed up later operations in the same step and on a reused engine, but not across agents. `dagger.lock` pins the base images, so a cold engine resolves the same digests.
 
-Start cold and measure. These numbers come from an M1 Pro (10 cores, 10 GB OrbStack VM) running the same operations on the rust.4 engine through the Dagger API:
+Start cold and measure. These numbers come from an M1 Pro (10 cores, 10 GB OrbStack VM), running each function with `dagger call` on a newly started rust.5 engine, one after another:
 
-| Operation | Cache | Time |
+| Call | Cache | Time |
 |---|---|---|
-| Engine bootstrap | Download, verify and load | about 20 s |
-| Engine bootstrap | Container already running | about 1 s |
-| `build`, linux/arm64 | Cold | 66 s |
-| `test`, default packages | Go modules warm, race build cold | 39 s |
-| `images`, linux/arm64 | Binaries cached, Alpine cold | 14 s |
-| `lint`, one-file patch | Cold, including compiling golangci-lint | 174 s |
-| `release`, three platforms | linux/arm64 binaries cached | 126 s |
-| Module compile, before the runtime fails | Cold | 35 s |
+| `.dagger/engine.sh` | Download, verify and load | 19 s |
+| `.dagger/engine.sh` | Container already running | about 1 s |
+| `dagger functions ci` | Module compile | 68 s |
+| `build`, linux/arm64 | Cold | 69 s |
+| `test`, default packages | Go modules warm, race build cold | 42 s |
+| `images`, linux/arm64 | Binaries cached, Alpine cold | 17 s |
+| `lint`, one-file patch | Cold, including compiling golangci-lint | 248 s |
+| `release`, three platforms | linux/arm64 binaries cached | 171 s |
 
 The next step, once the numbers justify it, is one long-lived engine per architecture. Steps would point `_EXPERIMENTAL_DAGGER_RUNNER_HOST` at it instead of starting their own, so the cache volumes outlive the agents, and the engine's garbage collection bounds disk use. Avoid Namespace's persistent cache volumes (`nsc-cache-tag`) for this. They reached about 60 GB after two build generations.
 
@@ -178,12 +171,11 @@ The SDK only talks to an engine of exactly its own release, so these move togeth
 - `rev` in `.dagger/modules/ci/Cargo.toml`, and `Cargo.lock`
 - `engineVersion` in `.dagger/modules/ci/dagger-module.toml`
 
-Then run `.dagger/generate.sh`. A newer generator rejects a manifest that an older one wrote, with `OPERATION_MANIFEST_STALE`. If that happens, first delete the module's generated files: `src/dagger_generated/`, `src/bin/dagger-module.rs` and `.dagger/`.
+Then run `dagger generate`. A newer generator rejects a manifest that an older one wrote, with `OPERATION_MANIFEST_STALE`. If that happens, first delete the module's generated files: `src/dagger_generated/`, `src/bin/dagger-module.rs` and `.dagger/`.
 
 When stock engines can load the fork's Rust SDK, or when moving to a managed engine:
 
-- delete `.dagger/engine.sh`, `.dagger/generate.sh` and the pre-command hook
+- delete `.dagger/engine.sh` and the pre-command hook
 - let a stock `dagger` CLI provision its own engine
-- drop the workarounds in `lib.rs` that the new SDK fixes
 
 The functions and the pipeline commands stay the same.
