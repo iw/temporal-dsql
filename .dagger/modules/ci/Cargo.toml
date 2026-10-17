@@ -4,14 +4,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97.1"
 
-# Compiles src/dagger_generated, which the rust.4 authoring compiler must not
-# see; src/lib.rs explains why.
-[features]
-default = ["generated"]
-generated = []
-
 [dependencies]
-dagger-sdk = { git = "https://github.com/iw/dagger", rev = "620c646ce23110c85c1a5f5866141a9c1028e4fc" }
+dagger-sdk = { git = "https://github.com/iw/dagger", rev = "2b461c1d3e2daa5681b8ad216eccb00912719fd5" }
 tokio = { version = "1.35.1", default-features = false, features = ["rt", "net", "time"] }
 
 [[bin]]

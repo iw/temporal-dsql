@@ -26,10 +26,10 @@ set -euo pipefail
 
 # The release, CLI, engine and SDK move together: the SDK rev in Cargo.toml
 # must be this commit.
-readonly VERSION="v1.0.0-beta.11.rust.4"
-readonly COMMIT="620c646ce23110c85c1a5f5866141a9c1028e4fc"
+readonly VERSION="v1.0.0-beta.11.rust.5"
+readonly COMMIT="2b461c1d3e2daa5681b8ad216eccb00912719fd5"
 readonly RELEASE_URL="https://github.com/iw/dagger/releases/download/sdk/rust/${VERSION}"
-readonly SUMS_SHA256="874e09a4a52b69006ea5b0cb9f75f980202d2c6fc0d6921f48163438082d398c"
+readonly SUMS_SHA256="4b16cae4c68c35422394731cd0b283396ea78f0b2dccdaeb51ba9dec9f702307"
 
 
 readonly CACHE_DIR="${DAGGER_ENGINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/temporal-dsql/dagger/${VERSION}}"
@@ -99,8 +99,8 @@ fetch() {
 # containerd image store reports the manifest digest.
 pinned_digests() {
 	case "$1" in
-	amd64) echo "sha256:19f4555596e67cb1a8647c1e77ab3350116146283ad586e75d2bd3e4f4d5d227 sha256:23e7ebf406a493c25152df080127a2f5ae0b5a4d8b845db0fe1d8bec373c8c09" ;;
-	arm64) echo "sha256:4b4be444c5bb425ebf730f2901424a95f182adaba3d4ca905917d44f9519dd6c sha256:1ca9c125d544d4c8592ed41ad280705c07f0057efaca9bdf1a7bf7badcba8505" ;;
+	amd64) echo "sha256:1760b5fa19b521833ea18946119383b3dd308bff75f9b0353ee008a88d783e1a sha256:5596a090d169a9e4a20d9278495df068733a0541e42fa26caed2fda393449aae" ;;
+	arm64) echo "sha256:4c8a8836eff5cad573058505ad43aaead8fc80f821719eb660825c8a9b537530 sha256:0b6fd3a71614542cb7dc52680dbe22fd59351d2e8a93fb772dd299debe402155" ;;
 	esac
 }
 
@@ -167,6 +167,9 @@ ensure_container() {
 			docker rm --force "$CONTAINER" >/dev/null
 		fi
 		log "running container ${CONTAINER}"
+		# Without a volume at /var/lib/dagger, BuildKit cannot use overlayfs inside
+		# the container's own overlay root, and its fallback snapshotter copies
+		# layers until the disk fills.
 		docker run --detach --privileged --restart unless-stopped \
 			--name "$CONTAINER" \
 			--volume "${CONTAINER}-state:/var/lib/dagger" \

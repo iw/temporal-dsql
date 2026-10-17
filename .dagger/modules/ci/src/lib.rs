@@ -7,25 +7,14 @@
 // Dagger functions take their options as arguments.
 #![allow(clippy::too_many_arguments)]
 
-// Two workarounds for the rust.4 SDK. The authoring compiler rejects a declared
-// dagger_generated module, but it evaluates cfg with no features enabled, so a
-// default feature hides the module from it while cargo still compiles it. The
-// generated code also names core types through this module without
-// re-exporting them, so the wrapper re-exports the ones the functions use.
-#[cfg(feature = "generated")]
-pub mod dagger_generated {
-    pub use dagger_sdk::{Directory, File, Secret};
-
-    #[allow(clippy::get_first)]
-    #[path = "mod.rs"]
-    mod generated;
-    pub use generated::*;
-}
+// The generated dispatch indexes arguments with get(0).
+#[allow(clippy::get_first)]
+pub mod dagger_generated;
 
 use dagger_generated::ModuleContext;
 use dagger_sdk::{
-    Container, ContainerPublishOpts, ContainerWithNewFileOpts, Directory, File, IdInput, Platform,
-    QueryContainerOpts, Secret,
+    Container, ContainerPublishOpts, ContainerWithNewFileOpts, Directory, File, IdInput,
+    ModuleError, Platform, QueryContainerOpts, Secret,
 };
 
 const BUILD_TAGS: &str = "disable_grpc_modules";
@@ -42,30 +31,6 @@ const BINARIES: [(&str, &str); 3] = [
     ("temporal-elasticsearch-tool", "./cmd/tools/elasticsearch"),
 ];
 const ENTRYPOINT: &str = "#!/bin/sh\nset -eu\nexec /usr/local/bin/temporal-server \"$@\"\n";
-
-/// Failure returned to the Dagger caller; keeps the engine's exit code and output.
-/// A local type because the rust.4 authoring compiler rejects functions that
-/// return `dagger_sdk::ModuleError` directly.
-#[derive(Debug)]
-pub struct Error(dagger_sdk::ModuleError);
-
-impl Error {
-    fn new(message: impl Into<String>) -> Self {
-        Self(dagger_sdk::ModuleError::new(message))
-    }
-}
-
-impl From<dagger_sdk::QueryError> for Error {
-    fn from(error: dagger_sdk::QueryError) -> Self {
-        Self(error.into())
-    }
-}
-
-impl From<Error> for dagger_sdk::ModuleError {
-    fn from(error: Error) -> Self {
-        error.0
-    }
-}
 
 #[dagger_sdk::object(root, rename = "Ci")]
 pub struct Ci {
@@ -98,7 +63,7 @@ impl Ci {
         #[dagger(context)] ctx: ModuleContext,
         #[dagger(doc = "Target platform, such as linux/arm64; defaults to the engine's platform.")]
         platform: Option<String>,
-    ) -> Result<Directory, Error> {
+    ) -> Result<Directory, ModuleError> {
         let platform = resolve_platform(&ctx, platform).await?;
         self.binaries(&ctx, &platform).await
     }
@@ -112,7 +77,7 @@ impl Ci {
             doc = "Unified diff that limits golangci-lint to the lines it changes; lints everything when omitted."
         )]
         patch: Option<File>,
-    ) -> Result<String, Error> {
+    ) -> Result<String, ModuleError> {
         let query = ctx.query();
         let mut golangci = vec![
             "golangci-lint",
@@ -164,7 +129,7 @@ impl Ci {
         >,
         #[dagger(doc = "Only run tests matching this regular expression, as go test -run.")]
         run: Option<String>,
-    ) -> Result<String, Error> {
+    ) -> Result<String, ModuleError> {
         let mut args = strings(&[
             "go",
             "test",
@@ -201,7 +166,7 @@ impl Ci {
         #[dagger(context)] ctx: ModuleContext,
         #[dagger(doc = "Target platform, such as linux/arm64; defaults to the engine's platform.")]
         platform: Option<String>,
-    ) -> Result<Directory, Error> {
+    ) -> Result<Directory, ModuleError> {
         let platform = resolve_platform(&ctx, platform).await?;
         let mut out = ctx.query().directory();
         for (name, image) in self.image_set(&ctx, &platform, None).await? {
@@ -227,7 +192,7 @@ impl Ci {
         #[dagger(doc = "Registry user; defaults to the owner.")] username: Option<String>,
         #[dagger(doc = "Commit recorded in the org.opencontainers.image.revision label.")]
         revision: Option<String>,
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<Vec<String>, ModuleError> {
         let platform = resolve_platform(&ctx, platform).await?;
         let (_, arch) = split_platform(&platform)?;
         let username = username.unwrap_or_else(|| owner.clone());
@@ -259,7 +224,7 @@ impl Ci {
         #[dagger(doc = "Registry host.", default = "ghcr.io")] registry: String,
         #[dagger(doc = "Registry namespace that holds the images.", default = "iw")] owner: String,
         #[dagger(doc = "Registry user; defaults to the owner.")] username: Option<String>,
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<Vec<String>, ModuleError> {
         let platforms = platforms.unwrap_or_else(|| strings(&["linux/amd64", "linux/arm64"]));
         let username = username.unwrap_or_else(|| owner.clone());
         let mut refs = Vec::new();
@@ -304,7 +269,7 @@ impl Ci {
             doc = "Platforms to package; defaults to linux/amd64, linux/arm64 and darwin/arm64."
         )]
         platforms: Option<Vec<String>>,
-    ) -> Result<Directory, Error> {
+    ) -> Result<Directory, ModuleError> {
         let version = version.trim_start_matches('v');
         let platforms =
             platforms.unwrap_or_else(|| strings(&["linux/amd64", "linux/arm64", "darwin/arm64"]));
@@ -340,7 +305,7 @@ impl Ci {
 
 impl Ci {
     /// Go toolchain matching go.mod, with module and build caches and the source at /src.
-    async fn go_builder(&self, ctx: &ModuleContext) -> Result<Container, Error> {
+    async fn go_builder(&self, ctx: &ModuleContext) -> Result<Container, ModuleError> {
         let go = go_version(&self.source).await?;
         let query = ctx.query();
         Ok(query
@@ -365,7 +330,11 @@ impl Ci {
     }
 
     /// Cross-compiles the release binaries on the engine's own platform.
-    async fn binaries(&self, ctx: &ModuleContext, platform: &str) -> Result<Directory, Error> {
+    async fn binaries(
+        &self,
+        ctx: &ModuleContext,
+        platform: &str,
+    ) -> Result<Directory, ModuleError> {
         let (os, arch) = split_platform(platform)?;
         let mut builder = self
             .go_builder(ctx)
@@ -395,7 +364,7 @@ impl Ci {
         ctx: &ModuleContext,
         platform: &str,
         revision: Option<&str>,
-    ) -> Result<[(&'static str, Container); 2], Error> {
+    ) -> Result<[(&'static str, Container); 2], ModuleError> {
         let binaries = self.binaries(ctx, platform).await?;
         let server = platform_container(ctx, platform)
             .from(ALPINE)
@@ -480,21 +449,26 @@ fn strings(values: &[&str]) -> Vec<String> {
 
 /// Reads the language version from go.mod and returns its major.minor, the tag
 /// granularity of the official golang images.
-async fn go_version(source: &Directory) -> Result<String, Error> {
+async fn go_version(source: &Directory) -> Result<String, ModuleError> {
     let go_mod = source.file("go.mod").contents().await?;
     let version = go_mod
         .lines()
         .find_map(|line| line.strip_prefix("go "))
-        .ok_or_else(|| Error::new("go.mod has no go directive"))?
+        .ok_or_else(|| ModuleError::new("go.mod has no go directive"))?
         .trim();
     let mut parts = version.split('.');
     match (parts.next(), parts.next()) {
         (Some(major), Some(minor)) => Ok(format!("{major}.{minor}")),
-        _ => Err(Error::new(format!("unexpected go directive: {version}"))),
+        _ => Err(ModuleError::new(format!(
+            "unexpected go directive: {version}"
+        ))),
     }
 }
 
-async fn resolve_platform(ctx: &ModuleContext, platform: Option<String>) -> Result<String, Error> {
+async fn resolve_platform(
+    ctx: &ModuleContext,
+    platform: Option<String>,
+) -> Result<String, ModuleError> {
     match platform {
         Some(platform) => Ok(platform),
         None => Ok(ctx.query().default_platform().await?.into_inner()),
@@ -502,13 +476,13 @@ async fn resolve_platform(ctx: &ModuleContext, platform: Option<String>) -> Resu
 }
 
 /// Splits os/arch[/variant] into the GOOS and GOARCH values.
-fn split_platform(platform: &str) -> Result<(String, String), Error> {
+fn split_platform(platform: &str) -> Result<(String, String), ModuleError> {
     let mut parts = platform.split('/');
     match (parts.next(), parts.next()) {
         (Some(os), Some(arch)) if !os.is_empty() && !arch.is_empty() => {
             Ok((os.to_owned(), arch.to_owned()))
         }
-        _ => Err(Error::new(format!(
+        _ => Err(ModuleError::new(format!(
             "platform must look like linux/amd64, got {platform}"
         ))),
     }
