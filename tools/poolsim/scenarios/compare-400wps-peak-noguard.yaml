@@ -1,7 +1,8 @@
 # compare-400wps-peak.yaml with pgxpool's proposed BeforeAcquire guard turned
 # off (acquireGuard: false). Stock pgxpool retires connections past their
-# lifetime only on Release and in health checks. 50m + [0,4m) jitter plus a 5m
-# transaction still ends before DSQL's 60m cut without the guard. Only the
+# lifetime only on Release and in health checks, so an expired idle connection
+# can be handed out until the next 1m health check. 50m + [0,4m) jitter + 1m
+# still ends any transaction shorter than 5m before DSQL's 60m cut. Only the
 # pgxpool column differs from compare-400wps-peak.yaml; run it with
 # -compare pgxpool. Phase holds are stretched as in that scenario, so compare
 # phase wait percentiles between models, not as production latencies.

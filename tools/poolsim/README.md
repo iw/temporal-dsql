@@ -200,7 +200,10 @@ puddle **v2.2.2** sources. These are the modeled functions:
 The proposed acquire hook checks lifetime minus the guard window; stock pgxpool
 does not perform that lifetime check on Acquire. `pgxpool.acquireGuard: false`
 turns the hook off, leaving Release and the health check to retire connections
-past their lifetime. Under peak load the hook moves replacement into the
+past their lifetime. An expired idle connection can then be handed out until
+the next health check, so the bound becomes lifetime + jitter +
+`healthCheckPeriod` + the longest transaction: 50m + 4m + 1m leaves room for
+transactions shorter than 5m. Under peak load the hook moves replacement into the
 request path: a request that rejects a guarded idle connection creates the
 replacement itself and waits for the limiter and handshake, where Release's
 background refill would have let it take another idle connection
