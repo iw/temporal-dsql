@@ -288,7 +288,8 @@ func TestDistributedRateLimiter_JitteredBackoff(t *testing.T) {
 		BackoffBase: 25 * time.Millisecond,
 	}
 
-	now := time.Now()
+	// Mid-second, away from the boundary wait.
+	now := time.Date(2026, 1, 1, 0, 0, 0, int(500*time.Millisecond), time.UTC)
 	deadline := now.Add(5 * time.Second)
 
 	// Run multiple times to verify jitter
@@ -297,10 +298,10 @@ func TestDistributedRateLimiter_JitteredBackoff(t *testing.T) {
 		backoffs[i] = limiter.jitteredBackoff(now, deadline)
 	}
 
-	// Verify backoffs are within expected range
+	// Base plus jitter below base.
 	for i, b := range backoffs {
-		require.True(t, b >= 0, "backoff %d should be non-negative", i)
-		require.True(t, b <= 200*time.Millisecond, "backoff %d should be <= 200ms", i)
+		require.GreaterOrEqual(t, b, 25*time.Millisecond, "backoff %d", i)
+		require.Less(t, b, 50*time.Millisecond, "backoff %d", i)
 	}
 
 	// Verify there's some variation (jitter is working)
@@ -319,23 +320,17 @@ func TestDistributedRateLimiter_NearSecondBoundary(t *testing.T) {
 		BackoffBase: 25 * time.Millisecond,
 	}
 
-	// The jitteredBackoff function checks if we're within 250ms of the next second boundary.
-	// When near a boundary, it waits until the next second plus jitter.
-	// Since the function uses time.Until() internally, we can't easily test the exact
-	// boundary behavior without mocking time. Instead, we verify the general behavior:
-	// - Backoff should be bounded by 200ms max
-	// - Backoff should be non-negative
-	// - Backoff should respect the deadline
-
-	now := time.Now()
-	deadline := now.Add(5 * time.Second)
-
-	// Run multiple times to verify consistency
-	for i := 0; i < 10; i++ {
-		backoff := limiter.jitteredBackoff(time.Now(), deadline)
-		require.True(t, backoff >= 0, "backoff should be non-negative")
-		require.True(t, backoff <= 200*time.Millisecond, "backoff should be <= 200ms")
+	// Within 250ms of the next second, the backoff waits for that second plus up to 50ms of jitter.
+	now := time.Date(2026, 1, 1, 0, 0, 0, int(900*time.Millisecond), time.UTC)
+	for i := 0; i < 100; i++ {
+		backoff := limiter.jitteredBackoff(now, now.Add(5*time.Second))
+		require.GreaterOrEqual(t, backoff, 100*time.Millisecond)
+		require.Less(t, backoff, 150*time.Millisecond)
 	}
+
+	// The deadline still caps the wait.
+	require.Equal(t, 30*time.Millisecond, limiter.jitteredBackoff(now, now.Add(30*time.Millisecond)))
+	require.Zero(t, limiter.jitteredBackoff(now, now))
 }
 
 func TestDistributedRateLimiter_RequestExceedsLimit(t *testing.T) {
