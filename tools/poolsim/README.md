@@ -25,9 +25,9 @@ chooses which connection to acquire or drop.
 | Variant / `model` | Behavior |
 |---|---|
 | `reservoir` | Direct FIFO checkout/return, continuous sequential refiller, guard checks and one-second scans. The legacy path remains the default; selecting it explicitly or with `-compare` adds the cluster/limiter/instance environment. |
-| `reservoir-sql` | SQL idle connections are reused LIFO; `driver.Open` takes from the reservoir immediately or fails empty. At `maxOpen`, callers queue until release or `workload.maxWait`. SQL keeps released connections indefinitely by default. |
-| `as-deployed` | Named preset for `reservoir-sql`, forcing the three defect toggles to their deployed defaults. |
-| `option-a` | Named preset with lifetime enforcement enabled, close leaks disabled and whole-pool reconnects disabled. |
+| `reservoir-sql` | SQL idle connections are reused LIFO with session-reset pings and internal bad-connection retries; `driver.Open` takes from the reservoir immediately or fails empty. At `maxOpen`, callers queue until release or `workload.maxWait`. SQL keeps released connections indefinitely by default. |
+| `as-deployed` | Named preset for `reservoir-sql`, forcing defect toggles to their deployed defaults, including the sequential refiller. |
+| `option-a` | Named preset with lifetime enforcement and concurrent refill enabled, close leaks disabled and whole-pool reconnects disabled. |
 | `pgxpool` | Demand creation, bounded total connections including constructors, idle LIFO, release-time lifetime enforcement, periodic health checks and the proposed limiter/guard hooks. |
 
 `model` can be set at the top level or per service; a service value wins.
@@ -43,6 +43,7 @@ services:
     maxOpen: 500
     inflightLimit: 8
     enforceLifetimeInUse: false  # #29: true checks guard on SQL reuse/release
+    concurrentRefill: false     # true opens up to inflightLimit per pool
     leakOnClose: true           # #30: closed pools retain physical connections
     reconnectOnConnError: true  # #31: each dead request queues a whole-pool rebuild
     ephemeral: {pools: 2, connections: 3, duration: 1s}
@@ -53,6 +54,7 @@ services:
       maxConnLifetimeJitter: 4m
       maxConnIdleTime: 0s
       healthCheckPeriod: 1m
+      acquireGuard: true         # proposed BeforeAcquire guard; false is stock pgxpool
 ```
 
 Lifetime enforcement runs at reuse/release, never in the middle of a query.
@@ -69,13 +71,81 @@ Startup queues ephemeral work before main warmup so a large `MinConns` batch
 cannot starve startup checks. Ephemeral pools run queries for `duration` after
 the first successful acquire, then close; unsuccessful startup is bounded.
 Reservoir ephemeral settings follow the design: ready/low watermark 5, initial
-fill timeout 10s, local open limit 2 (the sequential refiller only uses one).
+fill timeout 10s, local open limit 2 (the deployed sequential refiller only uses one).
 Main reservoir workloads begin at the low watermark or after the 30s fill
 window. PgX workloads begin immediately and wait in Acquire. PgX ephemeral
 pools use `MinConns=0`, `MaxConns=ephemeral.connections`, and actually close.
 All constructors share their instance's cap, default 8; no extra cap slots are
 created for ephemeral pools. `ephemeral.pools` defaults to zero, `connections`
 to 3 and `duration` to 1s. `replicas` defaults to 1.
+
+### Reservoir fidelity corrections
+
+The deployed `reservoirRefiller.loop` in
+`common/persistence/sql/sqlplugin/dsql/driver/reservoir_refiller.go` calls
+`openOne` synchronously. `as-deployed` preserves this sequential behavior.
+Option A implements the concurrent refiller described in
+`docs/dsql/reservoir-design.md`: up to `inflightLimit` constructors per main
+pool, while `ready + constructing < targetReady`. Each failed open reserves
+its refill slot for the 250ms backoff; other slots can continue. The shared
+instance semaphore still bounds main and ephemeral handshakes together.
+This changes warmup, replacement throughput and competition for cluster slots;
+it does not reduce the independent ready buffer when SQL connections are busy.
+
+Both SQL reservoir models now model `database/sql` session resets:
+`reservoir_conn.go` forwards `ResetSession` to pgx v5.7.2's stdlib connection.
+It pings after more than one second since the previous handout, **not** since
+release. A stale idle connection detected by that ping is destroyed internally.
+Go's `database/sql.DB.retry` allows two cached attempts, then forces a new
+connection (here, a reservoir checkout) even if idle connections remain.
+Option A's lifetime check (#29) returns the same `driver.ErrBadConn` from
+`ResetSession`, so its expired-connection discards share those two attempts.
+These discards do not trigger #31 rebuilds. A latent dead connection handed
+out one second ago or less still fails the request as `dead`, triggering a
+rebuild only in `as-deployed`. As with pgxpool, ping network latency is omitted.
+
+### Workload phases
+
+Comparison main pools accept optional workload overrides:
+
+```yaml
+workload:
+  enabled: true
+  maxInUse: 30
+  holdTime: 10ms
+  holdJitter: 10ms
+  spawnEvery: 1s
+  arrivalBurst: 10
+  maxWait: 10s
+  phases:
+    - name: peak
+      at: 40m
+      ramp: 5m
+      duration: 30m
+      maxInUse: 450
+      arrivalBurst: 450
+      spawnEvery: 100ms
+      holdTime: 500ms
+      holdJitter: 1s
+```
+
+Times are measured from **simulation start**, so every service peaks together,
+and replacements or rebuilds start at the current global phase level. During
+`[at, at+ramp)`, only `maxInUse` interpolates linearly from base to phase level,
+rounded toward the base integer; all other overrides apply immediately. The
+plateau lasts `duration` after the ramp; at its end all base settings resume.
+Zero ramp gives a step. Zero or omitted workload overrides inherit base values,
+including `maxWait` and `holdJitter` (zero cannot disable base jitter).
+Existing requests drain normally; no new requests spawn at or above the
+current active-request limit, including requests waiting to acquire.
+
+Each pool has one tick chain. Every tick selects the current settings and
+schedules the earlier of `now + spawnEvery` and the next start, plateau or end
+boundary. A phase therefore starts on time even between slow base ticks.
+Ephemeral pools retain their fixed workload. Names must be nonblank, durations
+positive, ramps and offsets nonnegative, and effective `maxInUse` at least one.
+Within each service phases must be ordered and nonoverlapping; adjacent windows
+are allowed. The legacy `ReservoirWorkload` configuration rejects phases.
 
 ## Cluster and client limiters
 
@@ -128,7 +198,13 @@ puddle **v2.2.2** sources. These are the modeled functions:
 | Close idle immediately and acquired resources on their return | pgxpool `Pool.Close`; puddle `Pool.Close`, `releaseAcquiredResource` |
 
 The proposed acquire hook checks lifetime minus the guard window; stock pgxpool
-does not perform that lifetime check on Acquire. With 50m lifetime, up to 4m
+does not perform that lifetime check on Acquire. `pgxpool.acquireGuard: false`
+turns the hook off, leaving Release and the health check to retire connections
+past their lifetime. Under peak load the hook moves replacement into the
+request path: a request that rejects a guarded idle connection creates the
+replacement itself and waits for the limiter and handshake, where Release's
+background refill would have let it take another idle connection
+(`compare-400wps-peak-noguard.yaml`). With 50m lifetime, up to 4m
 jitter, 45s guard and a 5m maximum transaction, even the conservative sum is
 59m45s, below the server's 60m maximum. This protects active requests but does
 **not** imply idle connections cannot be cut: if `MinConns` cannot be restored,
@@ -143,8 +219,13 @@ Simplifications and deliberate differences:
   old/new generations during `AcquireAllIdle`. Normal LIFO and the sweep's
   reversal are retained. Semaphore wakeups use deterministic FIFO ordering;
   real goroutine scheduling and database/sql waiter selection may differ.
-- Ping has zero latency and detects a known dead connection only after >1s
-  idle, as in pgxpool's conditional ping. Busy/transaction-status rejection,
+- Ping has zero latency and detects latent dead connections only after >1s
+  idle for pgxpool, or >1s since handout for SQL reservoirs. The simulation
+  does not distinguish a latent disconnect from an already-known closed pgx
+  connection, which real `ResetSession` rejects immediately regardless of age.
+  It also starts the SQL reset clock on the first handout; real stdlib starts
+  with a zero reset timestamp, so the first reuse always pings.
+  Busy/transaction-status rejection,
   protocol framing, SQL errors other than connection loss, cancellation during
   a query, IAM refresh, distributed slot leases and visibility pools are not
   simulated. Successful queries return transaction-idle connections.
@@ -157,6 +238,10 @@ Simplifications and deliberate differences:
   regular reservoir fill window. They model the amplification of #31, not exact
   Temporal retry/backoff scheduling. No retry of a failed workload query is
   hidden from the failure counters.
+- The existing sequential refiller's scheduled failure retry can be overtaken
+  by a checkout/scan-triggered refill. The real deployed loop sleeps through
+  its backoff. This simplification is retained for `as-deployed`; Option A's
+  failed refill slots enforce their individual backoffs.
 - Reservoir lifetimes keep the existing simulator's **base + [0,jitter)**
   convention. The design document also describes symmetric jitter elsewhere;
   this simulator does not silently change its established convention.
@@ -167,9 +252,10 @@ Simplifications and deliberate differences:
 
 ## Comparison scenarios and metrics
 
-All the comparison scenarios run for three hours with ten-second CSV samples. The
-large comparison completed in about 15 seconds for all three variants on the
-provided machine; the four-instance scenarios took about 1–2 seconds each.
+All the comparison scenarios run for three hours with ten-second CSV samples.
+The original light-load scenarios take roughly 1–20 seconds for all three
+variants on the provided machine. Peak workloads have substantially more events;
+the 44-instance scenarios target at most about three minutes per comparison.
 
 | File | Topology and event |
 |---|---|
@@ -180,6 +266,32 @@ provided machine; the four-instance scenarios took about 1–2 seconds each.
 | `compare-rolling-deploy.yaml` | Replace four history instances once each, 30s apart, starting at 70m |
 | `compare-mass-drop.yaml` | Drop a seeded random 50% of all physical connections at 70m, including active ones |
 | `compare-ddb-outage.yaml` | Switch from global DDB bucket to local AIMD at 5s during startup |
+| `compare-400wps-peak.yaml` | 25,000-cap topology with synchronized 40–45m ramp, 45–75m peak, and step spikes at 100–103m and 150–153m |
+| `compare-400wps-peak-200.yaml` | 200-connection topology with every base and phase `maxInUse` scaled by 0.4 |
+| `compare-400wps-peak-warm50.yaml` | Same 500-connection peak profile, but `targetReady=minConns=50`; `maxOpen=maxConns=500` |
+| `compare-400wps-peak-noguard.yaml` | `compare-400wps-peak.yaml` with pgxpool's proposed acquire guard off; only the pgxpool column differs |
+| `compare-fleet-start-peak.yaml` | Four history replicas start into demand 450 from simulation time 0 to 30m |
+| `compare-rolling-deploy-peak.yaml` | History ramps from 60–65m, holds 450 until 95m; replacements at 70m occur inside the peak |
+| `compare-mass-drop-peak.yaml` | Same 60–95m history phase, with the 70m mass drop during the plateau |
+| `compare-ddb-outage-peak.yaml` | History ramps from 40–45m, holds 450 until 75m; the outage from 5s never ends |
+
+The 500-connection fleet's history/matching/frontend peak levels are 450/300/100;
+spikes are 600/450/150. Workers stay at base demand. Every phase ticks at 100ms
+with `arrivalBurst=maxInUse`. The peak spans pgxpool's first lifetime expiry
+wave (roughly 50–58m including warmup) and several reservoir lifetimes. Spikes
+fall in later expiry waves and put history 20% over its pool. The small warm
+buffer scenario uses the reservoir design's production recommendation of 50
+ready connections for both models. The 25,000 cap fits the 22,000 warm target,
+but reservoir buffers plus SQL-owned connections can exceed it under peak load.
+The already over-cap `compare-400wps.yaml` has no peak derivative.
+
+Phase holds are deliberately stretched from real **5–50ms** holds to
+`500ms + [0,1s)` for history/matching and `250ms + [0,500ms)` for frontend.
+This preserves the intended concurrency while reducing requests and simulation
+events. Queue waits scale with hold time: **read phase wait percentiles as
+relative comparisons between models, not production latencies**. The generator
+retains its existing nanosecond-inclusive jitter endpoint. These scenarios
+measure pool pressure, not actual WPS or database query throughput.
 
 `cold_start`, `rolling_restart` and `mass_drop` work with every model.
 `rolling_restart` repeats replacements until the horizon; `rolling_deploy`
@@ -212,6 +324,29 @@ percentiles round up to microseconds. The maximum retains full precision
 internally. The new-connection counter counts each request once if it invokes a constructor
 or queues while constructors occupy pool slots, including requests that time
 out before construction completes.
+
+`Workload start delay p50 / max` records pool start to first spawned request for
+each main pool generation that issues work, including rebuilds and replacements.
+Ephemeral pools and main pools closed before their first request are excluded.
+Reservoir initial fill can defer workload up to 30s; pgxpool starts immediately.
+This exposes the startup barrier behind otherwise lower reservoir request counts.
+
+The generator is closed-loop: a request that fails at once frees its slot, and
+the next tick (every 100ms in a phase) issues a new request in its place. A
+model that rejects fast, such as a reservoir that's empty, records up to ten
+failures a second for each slot, while one that queues records at most one per
+`maxWait`. So compare completed requests (requests minus failed) between
+models, not failure counts.
+
+Each phase name then gets four rows, aggregated across services in configuration
+order of first appearance: `<phase>: requests / failed`,
+`<phase>: failed empty / timeout / dead`, `<phase>: acquire p99 / p99.9 / max`,
+and `<phase>: waited on new connection`. Requests keep the tag from spawn time,
+including during a ramp and when acquisition/completion crosses the phase end.
+Base and ephemeral requests have no tag. Phase failed totals include every
+failure reason, including connect errors and closed pools. Phases with no
+requests still appear with zeros. The CSV columns are unchanged; these new
+breakdowns appear only in the summary.
 
 Rates use fixed simulated one-second bins. Steady averages include every
 second after `steadyAfter` (default half the run), including zero-open seconds.

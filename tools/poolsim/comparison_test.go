@@ -185,6 +185,24 @@ func TestPGXGuardAndIdleOrder(t *testing.T) {
 	require.Zero(t, r.stats.failures["dead"])
 }
 
+func TestPGXAcquireGuardOff(t *testing.T) {
+	r, p := testPool(t, "pgxpool")
+	off := false
+	p.cfg.PGX.AcquireGuard = &off
+	p.cfg.PGX.MinConns = 2
+	p.start()
+	advance(r, 2*time.Millisecond)
+	last := p.idle[len(p.idle)-1]
+	last.expires = r.sim.Now().Add(500 * time.Millisecond)
+	req := p.request(600*time.Millisecond, time.Second, nil)
+	require.Same(t, last, req.conn, "stock Acquire hands out a connection inside the guard window")
+	require.False(t, req.waitedNew)
+	advance(r, 601*time.Millisecond)
+	require.True(t, req.done)
+	require.False(t, last.alive, "Release retires it once past its lifetime")
+	require.Empty(t, r.stats.failures)
+}
+
 func TestAdaptiveAIMDAndOutage(t *testing.T) {
 	r, p := testPool(t, "pgxpool")
 	b := p.instance.adaptive

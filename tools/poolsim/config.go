@@ -180,6 +180,9 @@ func validate(cfg *Config) error {
 	}
 
 	for _, s := range cfg.Services {
+		if len(s.Workload.Phases) > 0 && !usesComparison(cfg) {
+			return fmt.Errorf("config: service %s workload phases require the comparison engine; legacy ReservoirWorkload does not support phases", s.Name)
+		}
 		if s.Name == "" {
 			return fmt.Errorf("config: each service needs a name")
 		}

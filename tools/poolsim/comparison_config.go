@@ -40,6 +40,7 @@ type PoolConfig struct {
 	MaxOpen              int             `json:"maxOpen" yaml:"maxOpen"`
 	InflightLimit        int             `json:"inflightLimit" yaml:"inflightLimit"`
 	EnforceLifetimeInUse bool            `json:"enforceLifetimeInUse" yaml:"enforceLifetimeInUse"`
+	ConcurrentRefill     bool            `json:"concurrentRefill" yaml:"concurrentRefill"`
 	LeakOnClose          *bool           `json:"leakOnClose" yaml:"leakOnClose"`
 	ReconnectOnConnError *bool           `json:"reconnectOnConnError" yaml:"reconnectOnConnError"`
 	PGX                  PGXConfig       `json:"pgxpool" yaml:"pgxpool"`
@@ -53,6 +54,8 @@ type PGXConfig struct {
 	MaxConnLifetimeJitter time.Duration `json:"maxConnLifetimeJitter" yaml:"maxConnLifetimeJitter"`
 	MaxConnIdleTime       time.Duration `json:"maxConnIdleTime" yaml:"maxConnIdleTime"`
 	HealthCheckPeriod     time.Duration `json:"healthCheckPeriod" yaml:"healthCheckPeriod"`
+	// AcquireGuard enables the proposed BeforeAcquire guard-window check; nil means true.
+	AcquireGuard *bool `json:"acquireGuard" yaml:"acquireGuard"`
 }
 
 type EphemeralConfig struct {
@@ -206,6 +209,9 @@ func validatePool(s ServiceConfig) error {
 		return fmt.Errorf("invalid ephemeral settings for %s", s.Name)
 	}
 	w := s.Workload
+	if err := w.validatePhases(); err != nil {
+		return fmt.Errorf("%s: %w", s.Name, err)
+	}
 	if w.Enabled && (w.MaxInUse < 1 || w.SpawnEvery <= 0 || w.ArrivalBurst < 1 || w.HoldTime <= 0 || w.HoldJitter < 0 || w.MaxWait <= 0) {
 		return fmt.Errorf("invalid workload for %s", s.Name)
 	}

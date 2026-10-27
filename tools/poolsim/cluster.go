@@ -50,6 +50,7 @@ type physicalConn struct {
 	id                      int64
 	pool                    *modelPool
 	born, expires, lastUsed time.Time
+	lastReset               time.Time // database/sql last handout, unlike pgxpool's release-time lastUsed
 	alive                   bool
 	borrowed                bool // owned by database/sql rather than sitting in the reservoir
 	request                 *modelRequest

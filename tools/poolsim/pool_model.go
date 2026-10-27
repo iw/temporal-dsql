@@ -15,6 +15,7 @@ type modelPool struct {
 	cfg                              ServiceConfig
 	rng                              *rand.Rand
 	stats                            *poolStats
+	startedAt                        time.Time
 	closed                           bool
 	ephemeral                        bool
 	ready, idle                      []*physicalConn
@@ -23,6 +24,7 @@ type modelPool struct {
 	waiters                          []*modelRequest
 	healthRunning, healthPending     bool
 	lifetimeDebt                     int
+	refillBackoffs                   int
 }
 
 func (p *modelPool) run() *comparisonRun { return p.instance.run }
@@ -65,7 +67,15 @@ func (p *modelPool) guarded(c *physicalConn) bool {
 	return !p.now().Before(c.expires.Add(-p.cfg.GuardWindow))
 }
 
+// pgxGuarded applies the proposed BeforeAcquire guard. Stock pgxpool has no
+// acquire-time lifetime check; with the guard off, only Release and the health
+// check retire connections past their lifetime.
+func (p *modelPool) pgxGuarded(c *physicalConn) bool {
+	return boolDefault(p.cfg.PGX.AcquireGuard, true) && p.guarded(c)
+}
+
 func (p *modelPool) start() {
+	p.startedAt = p.now()
 	if p.isPGX() {
 		// pgxpool.NewWithConfig creates MinConns asynchronously before the first
 		// backgroundHealthCheck. Constructors count against puddle MaxSize.
@@ -106,9 +116,13 @@ func (p *modelPool) createWithCancel(cancelled func() bool, done func(*physicalC
 	})
 }
 
-// Reservoir design: a sequential continuous refiller, 250ms failure backoff,
-// FIFO ready channel and one-second scanner. Checkout does not wait on opens.
+// driver/reservoir_refiller.go: reservoirRefiller.loop calls openOne synchronously.
+// As deployed this uses one slot, even when InflightLimit is greater than one.
 func (p *modelPool) refill() {
+	if p.cfg.ConcurrentRefill {
+		p.refillConcurrent()
+		return
+	}
 	if p.closed || p.constructing > 0 || len(p.ready) >= p.cfg.TargetReady {
 		return
 	}
@@ -123,6 +137,29 @@ func (p *modelPool) refill() {
 		p.ready = append(p.ready, c)
 		p.refill()
 	})
+}
+
+// docs/dsql/reservoir-design.md, "In-Flight Semaphore": Option A implements the
+// intended concurrent opens. Ready + constructing bounds the buffer independently
+// of SQL-owned connections. Each failed slot waits 250ms before opening again.
+func (p *modelPool) refillConcurrent() {
+	for !p.closed && p.constructing+p.refillBackoffs < p.cfg.InflightLimit && len(p.ready)+p.constructing < p.cfg.TargetReady {
+		p.create(func(c *physicalConn, code string) {
+			if p.closed {
+				return
+			}
+			if code != "" {
+				p.refillBackoffs++
+				p.run().sim.After(FailureBackoff, "reservoir-retry", func() {
+					p.refillBackoffs--
+					p.refill()
+				})
+				return
+			}
+			p.ready = append(p.ready, c)
+			p.refill()
+		})
+	}
 }
 
 func (p *modelPool) scan() {
@@ -167,12 +204,23 @@ func (p *modelPool) acquire(r *modelRequest) {
 		return
 	}
 	if p.model == "reservoir-sql" {
-		for len(p.idle) > 0 {
+		// reservoir_conn.go forwards ResetSession to pgx v5.7.2 stdlib.Conn:
+		// ping after >1s since the last handout, returning driver.ErrBadConn.
+		// Option A's lifetime check (#29) returns the same error from ResetSession,
+		// so both share Go database/sql.DB.retry's two cached attempts before
+		// alwaysNewConn. These internal discards never reach the #31 rebuild path.
+		for len(p.idle) > 0 && r.badConnRetries < 2 {
 			n := len(p.idle) - 1
 			c := p.idle[n]
 			p.idle = p.idle[:n]
 			if p.cfg.EnforceLifetimeInUse && p.guarded(c) {
 				p.destroy(c, true)
+				r.badConnRetries++
+				continue
+			}
+			if !c.alive && p.now().Sub(c.lastReset) > time.Second {
+				p.destroy(c, false)
+				r.badConnRetries++
 				continue
 			}
 			r.use(c)
@@ -215,7 +263,7 @@ func (p *modelPool) acquirePGX(r *modelRequest) {
 			continue
 		}
 		// Proposed BeforeAcquire hook: reject the guard window and try again.
-		if p.guarded(c) {
+		if p.pgxGuarded(c) {
 			p.destroy(c, true)
 			continue
 		}
@@ -247,7 +295,7 @@ func (p *modelPool) acquirePGX(r *modelRequest) {
 			p.dispatch()
 			return
 		}
-		if p.guarded(c) {
+		if p.pgxGuarded(c) {
 			p.destroy(c, true)
 			p.acquirePGX(r)
 			return
@@ -439,6 +487,9 @@ func (p *modelPool) close() {
 }
 
 type modelRequest struct {
+	badConnRetries                   int
+	phase                            string
+	phaseStats                       *poolStats
 	pool                             *modelPool
 	start                            time.Time
 	hold, maxWait                    time.Duration
@@ -448,7 +499,17 @@ type modelRequest struct {
 }
 
 func (p *modelPool) request(hold, maxWait time.Duration, completed func()) *modelRequest {
-	r := &modelRequest{pool: p, start: p.now(), hold: hold, maxWait: maxWait, completed: completed}
+	return p.requestInPhase(hold, maxWait, "", completed)
+}
+
+func (p *modelPool) requestInPhase(hold, maxWait time.Duration, phase string, completed func()) *modelRequest {
+	r := &modelRequest{pool: p, start: p.now(), hold: hold, maxWait: maxWait, completed: completed, phase: phase, phaseStats: p.run().stats.phases[phase]}
+	if r.phaseStats != nil {
+		r.phaseStats.requests++
+	}
+	if !p.ephemeral && p.stats.requests == 0 && !p.startedAt.IsZero() {
+		p.run().stats.startDelay.add(p.now().Sub(p.startedAt))
+	}
 	p.stats.requests++
 	p.run().stats.requests++
 	p.acquire(r)
@@ -462,6 +523,9 @@ func (r *modelRequest) waitForNew() {
 	r.waitedNew = true
 	r.pool.stats.waitedNew++
 	r.pool.run().stats.waitedNew++
+	if r.phaseStats != nil {
+		r.phaseStats.waitedNew++
+	}
 }
 
 func (r *modelRequest) armTimeout() {
@@ -480,12 +544,18 @@ func (r *modelRequest) recordWait() {
 	wait := r.pool.now().Sub(r.start)
 	r.pool.run().stats.wait.add(wait)
 	r.pool.stats.wait.add(wait)
+	if r.phaseStats != nil {
+		r.phaseStats.wait.add(wait)
+	}
 }
 
 func (r *modelRequest) use(c *physicalConn) {
 	r.acquired = true
 	r.conn = c
 	c.request = r
+	if r.pool.model == "reservoir-sql" {
+		c.lastReset = r.pool.now()
+	}
 	r.recordWait()
 	if c.alive && r.pool.onFirstAcquire != nil {
 		first := r.pool.onFirstAcquire
@@ -515,9 +585,15 @@ func (r *modelRequest) finish(reason string) {
 	if reason != "" {
 		p.stats.failures[reason]++
 		p.run().stats.failures[reason]++
+		if r.phaseStats != nil {
+			r.phaseStats.failures[reason]++
+		}
 	} else {
 		p.stats.completed++
 		p.run().stats.completed++
+		if r.phaseStats != nil {
+			r.phaseStats.completed++
+		}
 	}
 	if r.conn != nil {
 		r.conn.request = nil

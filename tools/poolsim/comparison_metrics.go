@@ -63,13 +63,16 @@ func newPoolStats() *poolStats {
 
 type comparisonStats struct {
 	poolStats
+	phaseNames                []string
+	phases                    map[string]*poolStats
+	startDelay                waitHistogram
 	attempts, opens, closures map[int]int
 	rebuilds                  int64
 	samples                   [][]string
 }
 
 func newComparisonStats() *comparisonStats {
-	return &comparisonStats{poolStats: *newPoolStats(), attempts: make(map[int]int), opens: make(map[int]int), closures: make(map[int]int)}
+	return &comparisonStats{poolStats: *newPoolStats(), phases: make(map[string]*poolStats), attempts: make(map[int]int), opens: make(map[int]int), closures: make(map[int]int)}
 }
 
 func decimal(n int64) string { return strconv.FormatInt(n, 10) }
@@ -208,7 +211,7 @@ func (r *comparisonRun) summary() [][2]string {
 	for _, v := range s.failures {
 		failureCount += v
 	}
-	return [][2]string{
+	rows := [][2]string{
 		{"Requests / completed", fmt.Sprintf("%d / %d", s.requests, s.completed)},
 		{"Acquire p50 / p99", fmt.Sprintf("%s / %s", s.wait.percentile(.5), s.wait.percentile(.99))},
 		{"Acquire p99.9 / max", fmt.Sprintf("%s / %s", s.wait.percentile(.999), s.wait.maximum.Round(time.Microsecond))},
@@ -225,7 +228,22 @@ func (r *comparisonRun) summary() [][2]string {
 		{"60m cuts idle / in use", fmt.Sprintf("%d / %d", s.cutIdle, s.cutInUse)},
 		{"Steady lifetime churn budget", fmt.Sprintf("%.2f%%", float64(s.churnOpens)/(r.cfg.Duration-r.cfg.SteadyAfter).Seconds())},
 		{"Pool rebuilds", decimal(s.rebuilds)},
+		{"Workload start delay p50 / max", fmt.Sprintf("%s / %s", s.startDelay.percentile(.5), s.startDelay.maximum.Round(time.Microsecond))},
 	}
+	for _, name := range s.phaseNames {
+		phase := s.phases[name]
+		failed := int64(0)
+		for _, count := range phase.failures {
+			failed += count
+		}
+		rows = append(rows,
+			[2]string{name + ": requests / failed", fmt.Sprintf("%d / %d", phase.requests, failed)},
+			[2]string{name + ": failed empty / timeout / dead", fmt.Sprintf("%d / %d / %d", phase.failures["empty"], phase.failures["timeout"], phase.failures["dead"])},
+			[2]string{name + ": acquire p99 / p99.9 / max", fmt.Sprintf("%s / %s / %s", phase.wait.percentile(.99), phase.wait.percentile(.999), phase.wait.maximum.Round(time.Microsecond))},
+			[2]string{name + ": waited on new connection", decimal(phase.waitedNew)},
+		)
+	}
+	return rows
 }
 
 func comparisonTable(runs []*comparisonRun) string {

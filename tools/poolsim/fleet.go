@@ -52,6 +52,14 @@ func newComparison(original *Config, variant string) (*comparisonRun, error) {
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	r := &comparisonRun{cfg: &c, name: variant, sim: NewSim(start, c.Duration), start: start, stats: newComparisonStats(), legacy: NewMetrics(), convergence: make(map[string]*convergenceState)}
 	r.sim.quiet = true
+	for _, s := range c.Services {
+		for _, phase := range s.Workload.Phases {
+			if r.stats.phases[phase.Name] == nil {
+				r.stats.phaseNames = append(r.stats.phaseNames, phase.Name)
+				r.stats.phases[phase.Name] = newPoolStats()
+			}
+		}
+	}
 	if r.name == "" {
 		r.name = c.Model
 	}
@@ -89,17 +97,20 @@ func (i *instance) newPool(suffix string, ephemeral bool) *modelPool {
 	case "as-deployed":
 		model = "reservoir-sql"
 		cfg.EnforceLifetimeInUse = false
+		cfg.ConcurrentRefill = false
 		cfg.LeakOnClose = nil
 		cfg.ReconnectOnConnError = nil
 	case "option-a":
 		model = "reservoir-sql"
 		cfg.EnforceLifetimeInUse = true
+		cfg.ConcurrentRefill = true
 		no := false
 		cfg.LeakOnClose = &no
 		cfg.ReconnectOnConnError = &no
 	default:
 	}
 	if ephemeral {
+		cfg.InflightLimit = min(2, cfg.InflightLimit)
 		cfg.TargetReady = 5
 		cfg.MaxOpen = cfg.Ephemeral.Connections
 		cfg.PGX.MinConns = 0
@@ -147,15 +158,21 @@ func (i *instance) workload(p *modelPool, w WorkloadConfig, duration time.Durati
 			p.close()
 			return
 		}
-		for n := min(w.ArrivalBurst, w.MaxInUse-active); n > 0; n-- {
-			hold := w.HoldTime
-			if w.HoldJitter > 0 {
-				hold += time.Duration(rng.Int63n(int64(w.HoldJitter) + 1))
+		elapsed := i.run.sim.Now().Sub(i.run.start)
+		level, phase, boundary := w.at(elapsed)
+		for n := min(level.ArrivalBurst, level.MaxInUse-active); n > 0; n-- {
+			hold := level.HoldTime
+			if level.HoldJitter > 0 {
+				hold += time.Duration(rng.Int63n(int64(level.HoldJitter) + 1))
 			}
 			active++
-			p.request(hold, w.MaxWait, func() { active-- })
+			p.requestInPhase(hold, level.MaxWait, phase, func() { active-- })
 		}
-		i.run.sim.After(w.SpawnEvery, "workload", tick)
+		delay := level.SpawnEvery
+		if boundary > elapsed {
+			delay = min(delay, boundary-elapsed)
+		}
+		i.run.sim.After(delay, "workload", tick)
 	}
 	begin := func() {
 		if duration > 0 {
