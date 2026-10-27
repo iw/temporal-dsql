@@ -594,7 +594,7 @@ func WorkerServiceProvider(
 }
 
 // withEphemeralPoolHint creates a copy of the persistence config with PoolSizeHint set to "ephemeral"
-// for all SQL datastores. This signals to the DSQL plugin to use a minimal connection reservoir
+// for all SQL datastores. This signals to the DSQL plugin to use a small pgxpool with no minimum connection count
 // for short-lived operations like schema version checks and metadata initialization.
 func withEphemeralPoolHint(cfg *config.Persistence) *config.Persistence {
 	// Create a shallow copy of the persistence config

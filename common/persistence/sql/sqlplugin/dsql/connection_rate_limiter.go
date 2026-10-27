@@ -2,7 +2,6 @@ package dsql
 
 import (
 	"context"
-	"math/rand"
 	"os"
 	"strconv"
 	"time"
@@ -20,20 +19,11 @@ const (
 	// DSQL cluster burst is 1000, so we default to 100 per instance.
 	DefaultConnectionBurstLimit = 100
 
-	// DefaultStaggeredStartupMaxDelay is the maximum random delay on startup.
-	DefaultStaggeredStartupMaxDelay = 5 * time.Second
-
 	// ConnectionRateLimitEnvVar overrides the default rate limit.
 	ConnectionRateLimitEnvVar = "DSQL_CONNECTION_RATE_LIMIT"
 
 	// ConnectionBurstLimitEnvVar overrides the default burst limit.
 	ConnectionBurstLimitEnvVar = "DSQL_CONNECTION_BURST_LIMIT"
-
-	// StaggeredStartupEnvVar enables/disables staggered startup (default: true).
-	StaggeredStartupEnvVar = "DSQL_STAGGERED_STARTUP"
-
-	// StaggeredStartupMaxDelayEnvVar overrides the max startup delay.
-	StaggeredStartupMaxDelayEnvVar = "DSQL_STAGGERED_STARTUP_MAX_DELAY"
 )
 
 // ConnectionRateLimiter limits the rate of new connection establishment
@@ -62,35 +52,6 @@ func (r *ConnectionRateLimiter) Wait(ctx context.Context) error {
 // Does not block or consume a token if not allowed.
 func (r *ConnectionRateLimiter) Allow() bool {
 	return r.limiter.Allow()
-}
-
-// StaggeredStartupDelay returns a random delay for staggered startup.
-// Returns 0 if staggered startup is disabled.
-func StaggeredStartupDelay() time.Duration {
-	if !isStaggeredStartupEnabled() {
-		return 0
-	}
-
-	maxDelay := getEnvDuration(StaggeredStartupMaxDelayEnvVar, DefaultStaggeredStartupMaxDelay)
-	if maxDelay <= 0 {
-		return 0
-	}
-
-	// Random delay between 0 and maxDelay
-	return time.Duration(rand.Int63n(int64(maxDelay)))
-}
-
-// isStaggeredStartupEnabled checks if staggered startup is enabled.
-func isStaggeredStartupEnabled() bool {
-	val := os.Getenv(StaggeredStartupEnvVar)
-	if val == "" {
-		return true // enabled by default
-	}
-	enabled, err := strconv.ParseBool(val)
-	if err != nil {
-		return true // default to enabled on parse error
-	}
-	return enabled
 }
 
 // getEnvInt returns an integer from environment variable or default.

@@ -74,29 +74,30 @@
 - Shard read lock uses FOR KEY SHARE, so a range renewal fails the commit of an in-flight write that read the old range
 
 #### IAM Authentication
-- Token-refreshing driver with automatic credential refresh
+- pgxpool BeforeConnect hook obtains IAM tokens from the existing cache
 - Token cache with expiry management (can serve expired tokens around credential rotation: [#32](https://github.com/iw/temporal-dsql/issues/32))
 
 #### Connection Management
-- **Connection Reservoir** (recommended) — Channel-based buffer with continuous refiller, proactive expiry scanner, guard window, in-flight semaphore (lifetime and leak issues: [#29](https://github.com/iw/temporal-dsql/issues/29), [#30](https://github.com/iw/temporal-dsql/issues/30))
-- **Token Bucket Rate Limiter** (opt-in) — DynamoDB-backed, uses DSQL's burst capacity (1000) with 100/sec sustained (overshoots under clock skew: [#40](https://github.com/iw/temporal-dsql/issues/40))
-- **Slot Block Manager** (opt-in) — Block-based distributed connection leasing to avoid DynamoDB hot partitions (100 blocks × 100 slots = 10k) (leaks blocks: [#33](https://github.com/iw/temporal-dsql/issues/33))
-- Non-reservoir fallback (pool warmup + pool keeper), the default when `DSQL_RESERVOIR_ENABLED` is unset (hides pgx fast paths: [#38](https://github.com/iw/temporal-dsql/issues/38))
+- **pgxpool** behind `database/sql` — service pools keep `MinConns == MaxConns` (configured `maxConns`, default 100); ephemeral pools use max 5/min 0. A closing connector owns pool and metrics shutdown. Connection failures do not rebuild pools.
+- Lifetime is capped at 50 minutes, with 4 minutes of jitter and 1-minute health checks. `maxIdleConns` is ignored. There are no acquire/release hooks. See the expiry and shutdown limitations in `docs/dsql/connection-pool.md`.
+- A process-wide semaphore of 8 bounds limiter/token calls before each handshake. Background fill uses the same rate limiter as on-demand connections.
+- **Token Bucket Rate Limiter** (opt-in) — DynamoDB-backed, uses DSQL's burst capacity (1000) with 100/sec sustained (overshoots under clock skew: [#40](https://github.com/iw/temporal-dsql/issues/40)). Local and distributed counter modes remain available.
+- **Slot Block Manager / connection lease** — retained but unsupported with pgxpool until [#33](https://github.com/iw/temporal-dsql/issues/33). Enabling the lease refuses to connect at startup.
 
 #### Observability
 - DSQL-specific metrics (latency, and transaction conflicts, retries and exhaustion)
-- Reservoir metrics (checkouts, empty events, discards, refills)
+- pgxpool gauges and counters (constructing, waits, new connections, lifetime destroys, canceled acquires)
 - Connection pool metrics (open, idle, in-use)
 
 #### Documentation
 - `docs/dsql/README.md` - Documentation index
 - `docs/dsql/deployment.md` - Production deployment and configuration
 - `docs/dsql/implementation.md` - Technical implementation details
-- `docs/dsql/reservoir-design.md` - Reservoir architecture and configuration
+- `docs/dsql/connection-pool.md` - Pool architecture, sizing, rollout and rollback
 - `docs/dsql/metrics.md` - Metrics reference
 
 #### Tooling
-- `tools/poolsim/` - Discrete event simulator for reservoir behavior validation
+- `tools/poolsim/` - Discrete event simulator retaining the historical reservoir model
 - `tools/dsql/` - DSQL schema management tool
 
 ### Known Constraints
@@ -113,15 +114,7 @@
 
 ### Recommended Configuration
 
-**Reservoir Mode** (recommended for production):
-```bash
-export DSQL_RESERVOIR_ENABLED=true
-export DSQL_RESERVOIR_TARGET_READY=50
-export DSQL_RESERVOIR_BASE_LIFETIME=11m
-export DSQL_RESERVOIR_LIFETIME_JITTER=2m
-export DSQL_RESERVOIR_GUARD_WINDOW=45s
-export DSQL_RESERVOIR_INFLIGHT_LIMIT=8  # Max concurrent Open() calls
-```
+**Service pool sizing:** set `maxConns` per pool and `maxConnLifetime: 50m` (or shorter). Every service pool opens its full size in the background and keeps it. The sum across all pools in all Temporal processes must fit the cluster limit (10,000 by default), allowing for rolling deployments and ephemeral pools. Remove `maxIdleConns`; it is ignored. Removed environment settings and rollout/rollback by previous image (no schema change) are documented in `docs/dsql/connection-pool.md`.
 
 **Distributed Rate Limiting with Token Bucket** (opt-in; see [#40](https://github.com/iw/temporal-dsql/issues/40) before enabling):
 ```bash
@@ -132,7 +125,7 @@ export DSQL_TOKEN_BUCKET_RATE=100       # Tokens per second (DSQL sustained rate
 export DSQL_TOKEN_BUCKET_CAPACITY=1000  # Bucket capacity (DSQL burst capacity)
 ```
 
-**Distributed Connection Limiting with Slot Blocks** (opt-in, for multi-service deployments; see [#33](https://github.com/iw/temporal-dsql/issues/33) before enabling):
+**Distributed Connection Limiting with Slot Blocks — unsupported until [#33](https://github.com/iw/temporal-dsql/issues/33).** The historical settings below are retained for reference; enabling the lease refuses startup with pgxpool:
 ```bash
 export DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true
 export DSQL_DISTRIBUTED_CONN_LEASE_TABLE=temporal-dsql-conn-lease
@@ -148,7 +141,7 @@ These come from benchmark runs against a live DSQL cluster, before the 2026-10-1
 
 - **400 WPS benchmark**: Validated with 100% workflow completion
 - **Checkout latency**: Sub-millisecond (p99 < 1ms)
-- **Zero empty events**: Reservoir always has connections available
+- **Historical zero empty events**: the former reservoir had connections available throughout the benchmark
 - **Rate limit compliance**: Never exceeds 100 connections/second
 
 ---
@@ -160,6 +153,6 @@ These come from benchmark runs against a live DSQL cluster, before the 2026-10-1
 | `docs/dsql/README.md` | Documentation index |
 | `docs/dsql/deployment.md` | Production deployment and configuration |
 | `docs/dsql/implementation.md` | Technical implementation details |
-| `docs/dsql/reservoir-design.md` | Reservoir architecture and configuration |
+| `docs/dsql/connection-pool.md` | Pool architecture, sizing, rollout and rollback |
 | `docs/dsql/metrics.md` | Metrics reference |
 | `tools/poolsim/README.md` | Pool simulator documentation |

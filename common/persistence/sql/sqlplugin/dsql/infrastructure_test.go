@@ -100,29 +100,6 @@ func TestDSQLMetricsCreation(t *testing.T) {
 	nilMetrics.StopPoolCollector()
 }
 
-// TestPoolCollectorLifecycle tests the pool collector start/stop lifecycle
-func TestPoolCollectorLifecycle(t *testing.T) {
-	handler := &noOpMetricsHandler{}
-	m := NewDSQLMetrics(handler)
-
-	// Test that starting with nil DB doesn't panic
-	// (the collector will just record zero values)
-	m.StartPoolCollector(nil, 100*time.Millisecond)
-
-	// Give it a moment to run
-	time.Sleep(50 * time.Millisecond)
-
-	// Stop should not panic
-	m.StopPoolCollector()
-
-	// Double stop should not panic
-	m.StopPoolCollector()
-
-	// Start again should work
-	m.StartPoolCollector(nil, 100*time.Millisecond)
-	m.StopPoolCollector()
-}
-
 // TestNewConditionFailedError tests the NewConditionFailedError function
 func TestNewConditionFailedError(t *testing.T) {
 	err := NewConditionFailedError(ConditionFailedUnknown, "test message with parameter")

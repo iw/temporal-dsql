@@ -2,11 +2,11 @@ package dsql
 
 import (
 	"context"
-	"database/sql"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/server/common/metrics"
 )
 
@@ -33,45 +33,13 @@ type DSQLMetrics interface {
 
 	// StartPoolCollector starts a background goroutine that periodically samples
 	// connection pool statistics and records them as metrics.
-	StartPoolCollector(db *sql.DB, interval time.Duration)
+	StartPoolCollector(pool *pgxpool.Pool, interval time.Duration)
 
 	// StopPoolCollector stops the background pool metrics collector.
 	StopPoolCollector()
 
 	// GetHandler returns the underlying metrics handler, or nil if not available
 	GetHandler() metrics.Handler
-}
-
-// ReservoirMetrics defines the interface for reservoir-specific metrics.
-// This interface is used by the reservoir components to record metrics.
-type ReservoirMetrics interface {
-	// RecordReservoirSize records the current reservoir size
-	RecordReservoirSize(size int)
-
-	// RecordReservoirTarget records the target reservoir size
-	RecordReservoirTarget(target int)
-
-	// IncReservoirCheckouts increments the counter for successful checkouts
-	IncReservoirCheckouts()
-
-	// IncReservoirEmpty increments the counter for checkout attempts when reservoir is empty
-	IncReservoirEmpty()
-
-	// IncReservoirDiscards increments the counter for discarded connections with reason
-	IncReservoirDiscards(reason string)
-
-	// IncReservoirRefills increments the counter for connections created by refiller
-	IncReservoirRefills()
-
-	// IncReservoirRefillFailures increments the counter for failed connection creates with reason
-	IncReservoirRefillFailures(reason string)
-
-	// RecordCheckoutLatency records the time taken to checkout a connection from reservoir
-	// This should be near-zero in steady state (just a channel receive)
-	RecordCheckoutLatency(d time.Duration)
-
-	// RecordRefillerInflight records the current number of in-flight Open() calls
-	RecordRefillerInflight(count int)
 }
 
 // SlotBlockMetrics defines the interface for slot block manager metrics.
@@ -95,26 +63,15 @@ type dsqlMetricsImpl struct {
 	txBackoff    metrics.TimerIface
 
 	// Connection pool metrics
-	poolMaxOpen      metrics.GaugeIface
-	poolOpen         metrics.GaugeIface
-	poolInUse        metrics.GaugeIface
-	poolIdle         metrics.GaugeIface
-	poolWaitCount    metrics.CounterIface
-	poolWaitDuration metrics.TimerIface
-
-	// Connection closure metrics (cumulative counters from db.Stats())
-	poolClosedMaxLifetime metrics.GaugeIface
-	poolClosedMaxIdleTime metrics.GaugeIface
-	poolClosedMaxIdle     metrics.GaugeIface
-
-	// Reservoir metrics
-	reservoirSize           metrics.GaugeIface
-	reservoirTarget         metrics.GaugeIface
-	reservoirCheckouts      metrics.CounterIface
-	reservoirEmpty          metrics.CounterIface
-	reservoirDiscards       metrics.CounterIface
-	reservoirRefills        metrics.CounterIface
-	reservoirRefillFailures metrics.CounterIface
+	poolMaxOpen          metrics.GaugeIface
+	poolOpen             metrics.GaugeIface
+	poolInUse            metrics.GaugeIface
+	poolIdle             metrics.GaugeIface
+	poolWaitCount        metrics.CounterIface
+	poolConstructing     metrics.GaugeIface
+	poolNewConns         metrics.CounterIface
+	poolLifetimeDestroys metrics.CounterIface
+	poolCanceledAcquires metrics.CounterIface
 
 	// Rate limiter metrics - for token bucket rate limiter
 	rateLimiterAcquires        metrics.CounterIface
@@ -124,9 +81,6 @@ type dsqlMetricsImpl struct {
 	// Slot block metrics - for distributed connection limiting
 	slotBlocksOwned    metrics.GaugeIface
 	slotBlockSlotsUsed metrics.GaugeIface
-
-	// In-flight metrics - for concurrent Open() limiting
-	refillerInflight metrics.GaugeIface
 
 	// Legacy metrics for backward compatibility
 	retryCounter              metrics.CounterIface
@@ -141,7 +95,8 @@ type dsqlMetricsImpl struct {
 	// Pool collector state
 	poolCollectorMu     sync.Mutex
 	poolCollectorCancel context.CancelFunc
-	lastWaitCount       int64
+	poolCollectorDone   chan struct{}
+	lastPoolCounters    [4]int64
 }
 
 // NewDSQLMetrics creates a new DSQLMetrics implementation.
@@ -161,26 +116,15 @@ func NewDSQLMetrics(metricsHandler metrics.Handler) DSQLMetrics {
 		txBackoff:    metricsHandler.Timer("dsql_tx_backoff"),
 
 		// Connection pool metrics
-		poolMaxOpen:      metricsHandler.Gauge("dsql_pool_max_open"),
-		poolOpen:         metricsHandler.Gauge("dsql_pool_open"),
-		poolInUse:        metricsHandler.Gauge("dsql_pool_in_use"),
-		poolIdle:         metricsHandler.Gauge("dsql_pool_idle"),
-		poolWaitCount:    metricsHandler.Counter("dsql_pool_wait_total"),
-		poolWaitDuration: metricsHandler.Timer("dsql_pool_wait_duration"),
-
-		// Connection closure metrics - cumulative counters showing WHY connections closed
-		poolClosedMaxLifetime: metricsHandler.Gauge("dsql_db_closed_max_lifetime_total"),
-		poolClosedMaxIdleTime: metricsHandler.Gauge("dsql_db_closed_max_idle_time_total"),
-		poolClosedMaxIdle:     metricsHandler.Gauge("dsql_db_closed_max_idle_total"),
-
-		// Reservoir metrics - for connection reservoir mode
-		reservoirSize:           metricsHandler.Gauge("dsql_reservoir_size"),
-		reservoirTarget:         metricsHandler.Gauge("dsql_reservoir_target"),
-		reservoirCheckouts:      metricsHandler.Counter("dsql_reservoir_checkouts_total"),
-		reservoirEmpty:          metricsHandler.Counter("dsql_reservoir_empty_total"),
-		reservoirDiscards:       metricsHandler.Counter("dsql_reservoir_discards_total"),
-		reservoirRefills:        metricsHandler.Counter("dsql_reservoir_refills_total"),
-		reservoirRefillFailures: metricsHandler.Counter("dsql_reservoir_refill_failures_total"),
+		poolMaxOpen:          metricsHandler.Gauge("dsql_pool_max_open"),
+		poolOpen:             metricsHandler.Gauge("dsql_pool_open"),
+		poolInUse:            metricsHandler.Gauge("dsql_pool_in_use"),
+		poolIdle:             metricsHandler.Gauge("dsql_pool_idle"),
+		poolWaitCount:        metricsHandler.Counter("dsql_pool_wait_total"),
+		poolConstructing:     metricsHandler.Gauge("dsql_pool_constructing"),
+		poolNewConns:         metricsHandler.Counter("dsql_pool_new_connections_total"),
+		poolLifetimeDestroys: metricsHandler.Counter("dsql_pool_lifetime_destroys_total"),
+		poolCanceledAcquires: metricsHandler.Counter("dsql_pool_canceled_acquires_total"),
 
 		// Rate limiter metrics - for token bucket rate limiter
 		rateLimiterAcquires:        metricsHandler.Counter("dsql_rate_limiter_acquires_total"),
@@ -190,9 +134,6 @@ func NewDSQLMetrics(metricsHandler metrics.Handler) DSQLMetrics {
 		// Slot block metrics - for distributed connection limiting
 		slotBlocksOwned:    metricsHandler.Gauge("dsql_slot_blocks_owned"),
 		slotBlockSlotsUsed: metricsHandler.Gauge("dsql_slot_blocks_slots_used"),
-
-		// In-flight metrics - for concurrent Open() limiting
-		refillerInflight: metricsHandler.Gauge("dsql_refiller_inflight"),
 
 		// Legacy metrics for backward compatibility
 		retryCounter:              metricsHandler.Counter("dsql_tx_retries_total"),
@@ -252,118 +193,57 @@ func (m *dsqlMetricsImpl) ObserveTxBackoff(op string, delay time.Duration) {
 	m.txBackoff.Record(delay, metrics.StringTag("operation", op))
 }
 
-// StartPoolCollector starts a background goroutine that periodically samples
-// connection pool statistics and records them as metrics.
-// Call StopPoolCollector to stop the collector when the DB is closed.
-func (m *dsqlMetricsImpl) StartPoolCollector(db *sql.DB, interval time.Duration) {
+// StartPoolCollector samples pgxpool, which owns all physical connections.
+func (m *dsqlMetricsImpl) StartPoolCollector(pool *pgxpool.Pool, interval time.Duration) {
 	m.poolCollectorMu.Lock()
 	defer m.poolCollectorMu.Unlock()
-
-	// Don't start if already running
-	if m.poolCollectorCancel != nil {
+	if m.poolCollectorCancel != nil || pool == nil {
 		return
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	m.poolCollectorCancel = cancel
-
-	go m.runPoolCollector(ctx, db, interval)
+	m.poolCollectorDone = make(chan struct{})
+	m.lastPoolCounters = [4]int64{}
+	go func() {
+		defer close(m.poolCollectorDone)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.recordPoolStats(pool.Stat())
+			}
+		}
+	}()
 }
 
-// StopPoolCollector stops the background pool metrics collector.
+// StopPoolCollector waits for the collector to exit before returning.
 func (m *dsqlMetricsImpl) StopPoolCollector() {
 	m.poolCollectorMu.Lock()
 	defer m.poolCollectorMu.Unlock()
-
 	if m.poolCollectorCancel != nil {
 		m.poolCollectorCancel()
+		<-m.poolCollectorDone
 		m.poolCollectorCancel = nil
 	}
 }
 
-// runPoolCollector is the background goroutine that samples pool stats.
-func (m *dsqlMetricsImpl) runPoolCollector(ctx context.Context, db *sql.DB, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			m.recordPoolStats(db)
+func (m *dsqlMetricsImpl) recordPoolStats(stats *pgxpool.Stat) {
+	m.poolMaxOpen.Record(float64(stats.MaxConns()))
+	m.poolOpen.Record(float64(stats.TotalConns()))
+	m.poolInUse.Record(float64(stats.AcquiredConns()))
+	m.poolIdle.Record(float64(stats.IdleConns()))
+	m.poolConstructing.Record(float64(stats.ConstructingConns()))
+	values := [4]int64{stats.EmptyAcquireCount(), stats.NewConnsCount(), stats.MaxLifetimeDestroyCount(), stats.CanceledAcquireCount()}
+	counters := [4]metrics.CounterIface{m.poolWaitCount, m.poolNewConns, m.poolLifetimeDestroys, m.poolCanceledAcquires}
+	for i, value := range values {
+		if delta := value - m.lastPoolCounters[i]; delta > 0 {
+			counters[i].Record(delta)
 		}
 	}
-}
-
-// recordPoolStats samples the current pool statistics and records them.
-func (m *dsqlMetricsImpl) recordPoolStats(db *sql.DB) {
-	stats := db.Stats()
-
-	// Record gauge metrics for current pool state
-	m.poolMaxOpen.Record(float64(stats.MaxOpenConnections))
-	m.poolOpen.Record(float64(stats.OpenConnections))
-	m.poolInUse.Record(float64(stats.InUse))
-	m.poolIdle.Record(float64(stats.Idle))
-
-	// Record wait count as a counter (delta from last sample)
-	// WaitCount is cumulative, so we track the delta
-	if stats.WaitCount > m.lastWaitCount {
-		delta := stats.WaitCount - m.lastWaitCount
-		m.poolWaitCount.Record(delta)
-	}
-	m.lastWaitCount = stats.WaitCount
-
-	// Record wait duration (cumulative, but we record the current total)
-	if stats.WaitDuration > 0 {
-		m.poolWaitDuration.Record(stats.WaitDuration)
-	}
-
-	// Record connection closure counters (cumulative totals)
-	// These tell us WHY connections are being closed:
-	// - MaxLifetimeClosed: closed due to MaxConnLifetime (expected after 55 min)
-	// - MaxIdleTimeClosed: closed due to MaxConnIdleTime (should be 0 if set to 0)
-	// - MaxIdleClosed: closed because idle pool was full (shouldn't happen if MaxIdleConns = MaxConns)
-	m.poolClosedMaxLifetime.Record(float64(stats.MaxLifetimeClosed))
-	m.poolClosedMaxIdleTime.Record(float64(stats.MaxIdleTimeClosed))
-	m.poolClosedMaxIdle.Record(float64(stats.MaxIdleClosed))
-}
-
-// ReservoirMetrics implementation methods
-
-// RecordReservoirSize records the current reservoir size
-func (m *dsqlMetricsImpl) RecordReservoirSize(size int) {
-	m.reservoirSize.Record(float64(size))
-}
-
-// RecordReservoirTarget records the target reservoir size
-func (m *dsqlMetricsImpl) RecordReservoirTarget(target int) {
-	m.reservoirTarget.Record(float64(target))
-}
-
-// IncReservoirCheckouts increments the counter for successful checkouts
-func (m *dsqlMetricsImpl) IncReservoirCheckouts() {
-	m.reservoirCheckouts.Record(1)
-}
-
-// IncReservoirEmpty increments the counter for checkout attempts when reservoir is empty
-func (m *dsqlMetricsImpl) IncReservoirEmpty() {
-	m.reservoirEmpty.Record(1)
-}
-
-// IncReservoirDiscards increments the counter for discarded connections with reason
-func (m *dsqlMetricsImpl) IncReservoirDiscards(reason string) {
-	m.reservoirDiscards.Record(1, metrics.StringTag("reason", reason))
-}
-
-// IncReservoirRefills increments the counter for connections created by refiller
-func (m *dsqlMetricsImpl) IncReservoirRefills() {
-	m.reservoirRefills.Record(1)
-}
-
-// IncReservoirRefillFailures increments the counter for failed connection creates with reason
-func (m *dsqlMetricsImpl) IncReservoirRefillFailures(reason string) {
-	m.reservoirRefillFailures.Record(1, metrics.StringTag("reason", reason))
+	m.lastPoolCounters = values
 }
 
 // Legacy methods for backward compatibility
@@ -431,105 +311,14 @@ func (m *dsqlMetricsImpl) RecordUnsupportedFeature(operation, feature string) {
 // noOpDSQLMetrics is a no-op implementation of DSQLMetrics for when metrics are disabled
 type noOpDSQLMetrics struct{}
 
-func (n *noOpDSQLMetrics) ObserveTxLatency(op string, latency time.Duration)     {}
-func (n *noOpDSQLMetrics) IncTxErrorClass(op string, errorClass string)          {}
-func (n *noOpDSQLMetrics) IncTxExhausted(op string)                              {}
-func (n *noOpDSQLMetrics) IncTxConflict(op string)                               {}
-func (n *noOpDSQLMetrics) IncTxRetry(op string, attempt int)                     {}
-func (n *noOpDSQLMetrics) ObserveTxBackoff(op string, delay time.Duration)       {}
-func (n *noOpDSQLMetrics) StartPoolCollector(db *sql.DB, interval time.Duration) {}
-func (n *noOpDSQLMetrics) StopPoolCollector()                                    {}
-
-// noOpReservoirMetrics is a no-op implementation of ReservoirMetrics for when metrics are disabled
-type noOpReservoirMetrics struct{}
-
-func (n *noOpReservoirMetrics) RecordReservoirSize(size int)             {}
-func (n *noOpReservoirMetrics) RecordReservoirTarget(target int)         {}
-func (n *noOpReservoirMetrics) IncReservoirCheckouts()                   {}
-func (n *noOpReservoirMetrics) IncReservoirEmpty()                       {}
-func (n *noOpReservoirMetrics) IncReservoirDiscards(reason string)       {}
-func (n *noOpReservoirMetrics) IncReservoirRefills()                     {}
-func (n *noOpReservoirMetrics) IncReservoirRefillFailures(reason string) {}
-func (n *noOpReservoirMetrics) RecordCheckoutLatency(d time.Duration)    {}
-func (n *noOpReservoirMetrics) RecordRefillerInflight(count int)         {}
-
-// NewReservoirMetrics creates a new ReservoirMetrics implementation.
-// If metricsHandler is nil, returns a no-op implementation.
-func NewReservoirMetrics(metricsHandler metrics.Handler) ReservoirMetrics {
-	if metricsHandler == nil {
-		return &noOpReservoirMetrics{}
-	}
-
-	return &reservoirMetricsImpl{
-		reservoirSize:            metricsHandler.Gauge("dsql_reservoir_size"),
-		reservoirTarget:          metricsHandler.Gauge("dsql_reservoir_target"),
-		reservoirCheckouts:       metricsHandler.Counter("dsql_reservoir_checkouts_total"),
-		reservoirEmpty:           metricsHandler.Counter("dsql_reservoir_empty_total"),
-		reservoirDiscards:        metricsHandler.Counter("dsql_reservoir_discards_total"),
-		reservoirRefills:         metricsHandler.Counter("dsql_reservoir_refills_total"),
-		reservoirRefillFailures:  metricsHandler.Counter("dsql_reservoir_refill_failures_total"),
-		reservoirCheckoutLatency: metricsHandler.Timer("dsql_reservoir_checkout_latency"),
-		refillerInflight:         metricsHandler.Gauge("dsql_refiller_inflight"),
-	}
-}
-
-// reservoirMetricsImpl implements the ReservoirMetrics interface
-type reservoirMetricsImpl struct {
-	reservoirSize            metrics.GaugeIface
-	reservoirTarget          metrics.GaugeIface
-	reservoirCheckouts       metrics.CounterIface
-	reservoirEmpty           metrics.CounterIface
-	reservoirDiscards        metrics.CounterIface
-	reservoirRefills         metrics.CounterIface
-	reservoirRefillFailures  metrics.CounterIface
-	reservoirCheckoutLatency metrics.TimerIface
-	refillerInflight         metrics.GaugeIface
-}
-
-// RecordReservoirSize records the current reservoir size
-func (m *reservoirMetricsImpl) RecordReservoirSize(size int) {
-	m.reservoirSize.Record(float64(size))
-}
-
-// RecordReservoirTarget records the target reservoir size
-func (m *reservoirMetricsImpl) RecordReservoirTarget(target int) {
-	m.reservoirTarget.Record(float64(target))
-}
-
-// IncReservoirCheckouts increments the counter for successful checkouts
-func (m *reservoirMetricsImpl) IncReservoirCheckouts() {
-	m.reservoirCheckouts.Record(1)
-}
-
-// IncReservoirEmpty increments the counter for checkout attempts when reservoir is empty
-func (m *reservoirMetricsImpl) IncReservoirEmpty() {
-	m.reservoirEmpty.Record(1)
-}
-
-// IncReservoirDiscards increments the counter for discarded connections with reason
-func (m *reservoirMetricsImpl) IncReservoirDiscards(reason string) {
-	m.reservoirDiscards.Record(1, metrics.StringTag("reason", reason))
-}
-
-// IncReservoirRefills increments the counter for connections created by refiller
-func (m *reservoirMetricsImpl) IncReservoirRefills() {
-	m.reservoirRefills.Record(1)
-}
-
-// IncReservoirRefillFailures increments the counter for failed connection creates with reason
-func (m *reservoirMetricsImpl) IncReservoirRefillFailures(reason string) {
-	m.reservoirRefillFailures.Record(1, metrics.StringTag("reason", reason))
-}
-
-// RecordCheckoutLatency records the time taken to checkout a connection from reservoir
-func (m *reservoirMetricsImpl) RecordCheckoutLatency(d time.Duration) {
-	m.reservoirCheckoutLatency.Record(d)
-}
-
-// RecordRefillerInflight records the current number of in-flight Open() calls
-func (m *reservoirMetricsImpl) RecordRefillerInflight(count int) {
-	m.refillerInflight.Record(float64(count))
-}
+func (n *noOpDSQLMetrics) ObserveTxLatency(op string, latency time.Duration)             {}
+func (n *noOpDSQLMetrics) IncTxErrorClass(op string, errorClass string)                  {}
+func (n *noOpDSQLMetrics) IncTxExhausted(op string)                                      {}
+func (n *noOpDSQLMetrics) IncTxConflict(op string)                                       {}
+func (n *noOpDSQLMetrics) IncTxRetry(op string, attempt int)                             {}
+func (n *noOpDSQLMetrics) ObserveTxBackoff(op string, delay time.Duration)               {}
+func (n *noOpDSQLMetrics) StartPoolCollector(pool *pgxpool.Pool, interval time.Duration) {}
+func (n *noOpDSQLMetrics) StopPoolCollector()                                            {}
 
 // DSQLOperationMetrics provides operation-specific metrics recording (legacy)
 type DSQLOperationMetrics struct {

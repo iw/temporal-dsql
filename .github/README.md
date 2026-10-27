@@ -12,7 +12,7 @@ This is a community distribution of [Temporal](https://github.com/temporalio/tem
 - A `dsql` SQL persistence plugin for Temporal's default store, in [`common/persistence/sql/sqlplugin/dsql`](../common/persistence/sql/sqlplugin/dsql)
 - A DSQL schema, in [`schema/dsql`](../schema/dsql), and a schema tool, `temporal-dsql-tool`
 - IAM authentication with generated tokens, so no database password is stored
-- A connection reservoir, and optional DynamoDB coordination, for DSQL's connection-rate limits
+- pgxpool connection management and optional DynamoDB rate limiting; connection leasing is unsupported until #33
 
 DSQL holds the persistence store only. Visibility needs a separate store, such as OpenSearch, Elasticsearch, PostgreSQL, MySQL or SQLite.
 
@@ -92,7 +92,7 @@ For production settings, see the [deployment guide](../docs/dsql/deployment.md).
 - [DSQL documentation index](../docs/dsql/README.md)
 - [Deployment guide](../docs/dsql/deployment.md)
 - [Implementation details](../docs/dsql/implementation.md)
-- [Connection reservoir design](../docs/dsql/reservoir-design.md)
+- [Connection pool design, rollout and rollback](../docs/dsql/connection-pool.md)
 - [Metrics reference](../docs/dsql/metrics.md)
 
 ## Releases

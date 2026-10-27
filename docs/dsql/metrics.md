@@ -29,329 +29,94 @@ The `error_class` label can have these values:
 
 ## Connection Pool Metrics
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `dsql_pool_max_open` | Gauge | Maximum allowed open connections |
-| `dsql_pool_open` | Gauge | Current number of open connections |
-| `dsql_pool_in_use` | Gauge | Connections currently in use |
-| `dsql_pool_idle` | Gauge | Idle connections in pool |
-| `dsql_pool_wait_total` | Counter | Times a connection was waited for |
-| `dsql_pool_wait_duration` | Timer | Total time spent waiting for connections |
+The connector samples `pgxpool.Stat()` every 15 seconds. Gauges are snapshots; counters record increases since the last sample, including the first sample from zero. Collection stops and is joined when the DB closes.
 
-### Pool Keeper Metrics (non-reservoir mode only)
+| Metric | Type | pgxpool source / meaning |
+|---|---|---|
+| `dsql_pool_open` | Gauge | `TotalConns`: idle + acquired + constructing |
+| `dsql_pool_in_use` | Gauge | `AcquiredConns` |
+| `dsql_pool_idle` | Gauge | `IdleConns` |
+| `dsql_pool_max_open` | Gauge | `MaxConns` |
+| `dsql_pool_constructing` | Gauge | `ConstructingConns` |
+| `dsql_pool_wait_total` | Counter | Increase in `EmptyAcquireCount`: successful acquires that found no idle resource and waited |
+| `dsql_pool_new_connections_total` | Counter | Increase in `NewConnsCount` |
+| `dsql_pool_lifetime_destroys_total` | Counter | Increase in `MaxLifetimeDestroyCount` |
+| `dsql_pool_canceled_acquires_total` | Counter | Increase in `CanceledAcquireCount` |
 
-These metrics are only emitted when reservoir mode is disabled (`DSQL_RESERVOIR_ENABLED=false`):
+In pgx v5.7.2, `NewConnsCount` increments before `BeforeConnect`, so it includes failed construction attempts, not just successful handshakes. `TotalConns` includes constructing connections; subtract `dsql_pool_constructing` to estimate established connections. Canceled acquires are counted separately from successful waits.
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `dsql_pool_keeper_topup_total` | Counter | Connections created by Pool Keeper |
-| `dsql_pool_keeper_topup_failures_total` | Counter | Failed connection creation attempts |
-| `dsql_pool_keeper_current_size` | Gauge | Current pool size as seen by keeper |
+Service pools retain their full configured size. Ephemeral startup pools have max 5/min 0. The sum of every service pool's `maxConns` across all Temporal processes must fit the cluster limit (10,000 by default). `database/sql` statistics describe only the outer adapter, so they are not the source for these DSQL pool metrics.
 
-### Connection Closure Metrics
+## Rate Limiter Metrics
 
-These metrics track WHY connections are being closed by `database/sql`, helping diagnose pool decay. In reservoir mode, `MaxConnLifetime` and `MaxConnIdleTime` are both set to 0 (the reservoir manages lifecycle), so these counters should remain at 0.
+Existing rate-limiter metric names are retained:
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `dsql_db_closed_max_lifetime_total` | Gauge | Connections closed due to `MaxConnLifetime` (expected — normal rotation) |
-| `dsql_db_closed_max_idle_time_total` | Gauge | Connections closed due to `MaxConnIdleTime` (should be 0 if configured correctly) |
-| `dsql_db_closed_max_idle_total` | Gauge | Connections closed because idle pool was full (shouldn't happen if `MaxIdleConns = MaxConns`) |
+| Metric | Type | Meaning |
+|---|---|---|
+| `dsql_rate_limiter_acquires_total` | Counter | Limiter acquisitions |
+| `dsql_rate_limiter_acquire_failures_total` | Counter | Limiter acquisition failures |
+| `dsql_rate_limiter_wait_time` | Timer | Limiter wait time |
 
-**Interpreting closure metrics (non-reservoir mode):**
+Their existing recording behavior is unchanged. Use limiter logs and connection errors alongside them. The eight-slot process-wide semaphore bounds limiter/token calls, not handshakes.
 
-- **`dsql_db_closed_max_lifetime_total` increasing**: Normal — connections are being rotated after `MaxConnLifetime` (default: 10 min, override via `TEMPORAL_SQL_MAX_CONN_LIFETIME`)
-- **`dsql_db_closed_max_idle_time_total` increasing**: Problem - `MaxConnIdleTime` should be 0 to prevent pool decay
-- **`dsql_db_closed_max_idle_total` increasing**: Problem - `MaxIdleConns` should equal `MaxConns`
-- **Pool shrinking but closure counters flat**: Server/network is closing connections (check DSQL logs, network issues)
+## Migration notes
 
-In reservoir mode, all three counters should be 0. If they're increasing, something is overriding the reservoir's pool settings.
+Removed metrics: `dsql_reservoir_*`, `dsql_refiller_inflight`, `dsql_db_closed_*`, the old pool keeper metrics (`dsql_pool_keeper_*`), and `dsql_pool_wait_duration`. pgx v5.7.2 exposes cumulative acquire duration, which includes successful immediate acquires as well as waits; it is not a faithful replacement for the old wait-duration timer. Update dashboards and alerts instead of reusing that name.
 
-Pool metrics are sampled every 15 seconds by a background collector.
+Slot-block gauges (`dsql_slot_blocks_owned`, `dsql_slot_blocks_slots_used`) remain defined for the retained lease implementation, but the connection path no longer uses it. Enabling the lease refuses startup until #33.
 
-## Reservoir Metrics
-
-When reservoir mode is enabled (`DSQL_RESERVOIR_ENABLED=true`), these additional metrics are available:
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `dsql_reservoir_size` | Gauge | `service` | Current reservoir size |
-| `dsql_reservoir_target` | Gauge | `service` | Target reservoir size |
-| `dsql_reservoir_checkouts_total` | Counter | `service` | Successful checkouts from reservoir |
-| `dsql_reservoir_empty_total` | Counter | `service` | Checkout attempts when reservoir is empty |
-| `dsql_reservoir_discards_total` | Counter | `service`, `reason` | Discarded connections |
-| `dsql_reservoir_refills_total` | Counter | `service` | Connections created by refiller |
-| `dsql_reservoir_refill_failures_total` | Counter | `service`, `reason` | Failed connection creates |
-
-### Discard Reasons
-
-The `reason` label on `dsql_reservoir_discards_total` can have these values:
-
-| Value | Description |
-|-------|-------------|
-| `insufficient_remaining_lifetime` | Connection too close to expiry (within guard window) |
-| `expired_on_checkout` | Connection already expired when checked out |
-| `expired_on_return` | Connection expired while in use |
-| `expired_on_wait` | Connection expired during brief wait |
-| `reservoir_full` | Reservoir at capacity, connection discarded |
-
-### Refill Failure Reasons
-
-The `reason` label on `dsql_reservoir_refill_failures_total` can have these values:
-
-| Value | Description |
-|-------|-------------|
-| `lease_acquire` | Failed to acquire global connection lease |
-| `rate_limit` | Rate limiter timeout |
-| `token_provider` | Failed to get IAM token |
-| `dsn_inject` | Failed to inject token into DSN |
-| `connection_open` | Failed to open physical connection |
-
-### Reservoir Health Indicators
+## Monitoring and alerts
 
 ```promql
-# Reservoir fill ratio (should be close to 1.0)
-dsql_reservoir_size / dsql_reservoir_target
-
-# Empty reservoir rate (should be 0 in steady state)
-rate(dsql_reservoir_empty_total[5m])
-
-# Discard rate by reason
-sum by (reason) (rate(dsql_reservoir_discards_total[5m]))
-
-# Refill success rate
-rate(dsql_reservoir_refills_total[5m]) / 
-(rate(dsql_reservoir_refills_total[5m]) + rate(dsql_reservoir_refill_failures_total[5m]))
-```
-
-### Reservoir Alerting
-
-```yaml
-# Reservoir below target
-- alert: DSQLReservoirLow
-  expr: dsql_reservoir_size / dsql_reservoir_target < 0.5
-  for: 5m
-  labels:
-    severity: warning
-  annotations:
-    summary: "DSQL reservoir below 50% capacity"
-
-# Reservoir empty events
-- alert: DSQLReservoirEmpty
-  expr: rate(dsql_reservoir_empty_total[5m]) > 0
-  for: 2m
-  labels:
-    severity: warning
-  annotations:
-    summary: "DSQL reservoir experiencing empty events"
-
-# High discard rate
-- alert: DSQLReservoirHighDiscards
-  expr: rate(dsql_reservoir_discards_total[5m]) > 1
-  for: 5m
-  labels:
-    severity: info
-  annotations:
-    summary: "DSQL reservoir discarding connections"
-```
-
-## Slot Block Metrics
-
-When slot block connection limiting is enabled (`DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true`), these metrics are available:
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `dsql_slot_blocks_owned` | Gauge | Number of slot blocks owned by this service |
-| `dsql_slot_blocks_slots_used` | Gauge | Number of slots currently in use |
-
-### Slot Block Health Indicators
-
-```promql
-# Slot utilization (should be < 1.0)
-dsql_slot_blocks_slots_used / (dsql_slot_blocks_owned * 100)
-
-# Available slots
-(dsql_slot_blocks_owned * 100) - dsql_slot_blocks_slots_used
-```
-
-## Refiller Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `dsql_refiller_inflight` | Gauge | Current number of in-flight Open() calls |
-
-### Refiller Health Indicators
-
-```promql
-# In-flight connections (should be <= DSQL_RESERVOIR_INFLIGHT_LIMIT)
-dsql_refiller_inflight
-
-# High in-flight may indicate slow handshakes or rate limiter contention
-dsql_refiller_inflight > 6
-```
-
-## Derived Metrics
-
-### Pool Saturation
-
-```promql
-# Pool saturation ratio (0-1)
+# Saturation: alert on a sustained ratio above your service's baseline.
 dsql_pool_in_use / dsql_pool_max_open
 
-# Alert when pool is >80% saturated
-dsql_pool_in_use / dsql_pool_max_open > 0.8
-```
-
-### Connection Contention
-
-```promql
-# Connection wait rate (per second)
+# Contention and canceled acquires.
 rate(dsql_pool_wait_total[5m])
+rate(dsql_pool_canceled_acquires_total[5m])
 
-# Average wait time per connection
-rate(dsql_pool_wait_duration_sum[5m]) / rate(dsql_pool_wait_total[5m])
-```
+# Established connections and attempts to refill.
+dsql_pool_open - dsql_pool_constructing
+rate(dsql_pool_new_connections_total[5m])
+rate(dsql_pool_lifetime_destroys_total[5m])
 
-### OCC Conflict Rate
-
-```promql
-# Conflict rate per operation
+# OCC conflicts, retries and exhaustion.
 rate(dsql_tx_conflict_total[5m])
-
-# Conflict ratio (conflicts / total transactions)
-rate(dsql_tx_conflict_total[5m]) / rate(dsql_tx_latency_count[5m])
-```
-
-### Retry Effectiveness
-
-```promql
-# Retry exhaustion rate (failures after max retries)
+rate(dsql_tx_retry_total[5m])
 rate(dsql_tx_exhausted_total[5m])
 
-# Average retries per conflict
+# Conflict ratio, and retries per conflict.
+rate(dsql_tx_conflict_total[5m]) / rate(dsql_tx_latency_count[5m])
 rate(dsql_tx_retry_total[5m]) / rate(dsql_tx_conflict_total[5m])
+
+# Transaction latency (timer units depend on the metrics exporter).
+histogram_quantile(0.99, rate(dsql_tx_latency_bucket[5m]))
 ```
 
-## Alerting Recommendations
-
-### Critical Alerts
+Investigate sustained acquisition cancellation, waits with a saturated pool, or an established-connection deficit after startup. A high construction-attempt rate without growth can indicate throttling, IAM failures or network failures. Check logs and the cluster-wide connection budget before increasing pool size. A full pool with rising waits suggests workload pressure; additional replicas also consume their full pool allocation.
 
 ```yaml
-# High conflict rate - indicates contention issues
-- alert: DSQLHighConflictRate
-  expr: rate(dsql_tx_conflict_total[5m]) > 10
-  for: 5m
-  labels:
-    severity: warning
-  annotations:
-    summary: "High DSQL serialization conflict rate"
-
-# Retry exhaustion - operations failing after all retries
-- alert: DSQLRetryExhaustion
-  expr: rate(dsql_tx_exhausted_total[5m]) > 0
-  for: 2m
-  labels:
-    severity: critical
-  annotations:
-    summary: "DSQL operations failing after retry exhaustion"
-
-# Pool saturation
 - alert: DSQLPoolSaturation
   expr: dsql_pool_in_use / dsql_pool_max_open > 0.9
   for: 5m
   labels:
     severity: warning
   annotations:
-    summary: "DSQL connection pool >90% saturated"
-
-# Connection wait time
-- alert: DSQLConnectionWait
-  expr: rate(dsql_pool_wait_duration_sum[5m]) / rate(dsql_pool_wait_total[5m]) > 1
+    summary: "DSQL pool above 90% utilization"
+- alert: DSQLAcquireCancellation
+  expr: rate(dsql_pool_canceled_acquires_total[5m]) > 0
   for: 5m
   labels:
     severity: warning
   annotations:
-    summary: "Average connection wait time >1s"
-```
-
-### Informational Alerts
-
-```yaml
-# Transaction latency
-- alert: DSQLHighLatency
-  expr: histogram_quantile(0.99, rate(dsql_tx_latency_bucket[5m])) > 0.5
-  for: 10m
+    summary: "DSQL pool acquisition cancellations"
+- alert: DSQLRetryExhaustion
+  expr: rate(dsql_tx_exhausted_total[5m]) > 0
+  for: 2m
   labels:
-    severity: info
+    severity: critical
   annotations:
-    summary: "DSQL p99 latency >500ms"
+    summary: "DSQL transaction retry budget exhausted"
 ```
 
-## Grafana Dashboard Queries
-
-### Transaction Overview
-
-```promql
-# Transaction rate by operation
-sum by (operation) (rate(dsql_tx_latency_count[5m]))
-
-# P50/P95/P99 latency
-histogram_quantile(0.50, rate(dsql_tx_latency_bucket[5m]))
-histogram_quantile(0.95, rate(dsql_tx_latency_bucket[5m]))
-histogram_quantile(0.99, rate(dsql_tx_latency_bucket[5m]))
-
-# Error rate by class
-sum by (error_class) (rate(dsql_tx_error_class_total[5m]))
-```
-
-### Connection Pool
-
-```promql
-# Pool utilization over time
-dsql_pool_in_use
-dsql_pool_idle
-dsql_pool_max_open
-
-# Connection churn
-rate(dsql_pool_wait_total[5m])
-
-# Connection closures by reason (helps diagnose pool decay)
-dsql_db_closed_max_lifetime_total   # Expected: increases every MaxConnLifetime interval
-dsql_db_closed_max_idle_time_total  # Should be 0 if MaxConnIdleTime=0
-dsql_db_closed_max_idle_total       # Should be 0 if MaxIdleConns=MaxConns
-```
-
-### OCC Performance
-
-```promql
-# Conflicts vs successful transactions
-rate(dsql_tx_conflict_total[5m])
-rate(dsql_tx_latency_count[5m]) - rate(dsql_tx_conflict_total[5m])
-
-# Retry distribution
-sum by (attempt) (rate(dsql_tx_retry_total[5m]))
-
-# Backoff time spent
-rate(dsql_tx_backoff_sum[5m])
-```
-
-## Metric Collection
-
-Metrics are collected via Temporal's standard metrics system and exported to your configured metrics backend (Prometheus, StatsD, etc.).
-
-### Prometheus Scrape Config
-
-```yaml
-scrape_configs:
-  - job_name: 'temporal'
-    static_configs:
-      - targets: ['temporal-frontend:9090', 'temporal-history:9090', 
-                  'temporal-matching:9090', 'temporal-worker:9090']
-```
-
-### Key Metrics to Monitor
-
-1. **`dsql_tx_conflict_total`** - Primary indicator of OCC contention
-2. **`dsql_pool_in_use / dsql_pool_max_open`** - Pool saturation
-3. **`dsql_tx_exhausted_total`** - Failed operations after retries
-4. **`dsql_tx_latency`** - Overall database performance
+Metrics use Temporal's configured backend and inherited service tags. Review [connection pool](connection-pool.md) for rollout, rollback and expiry limitations.

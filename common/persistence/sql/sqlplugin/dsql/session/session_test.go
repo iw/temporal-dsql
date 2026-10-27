@@ -238,23 +238,11 @@ func (m *mockServiceResolver) Resolve(addr string) []string {
 	return []string{m.addr}
 }
 
-// Tests for DSQL-optimized pool configuration defaults
+// Tests for legacy direct-session pool defaults
 
 func TestDSQLPoolDefaults(t *testing.T) {
-	// MaxConnLifetime is 10 minutes (~70% of 15-minute token TTL).
-	// Go's pool closes connections older than this; Pool Keeper refills.
 	require.Equal(t, 10*time.Minute, DefaultMaxConnLifetime, "MaxConnLifetime should be 10m (aligned to token TTL)")
 	require.Equal(t, time.Duration(0), DefaultMaxConnIdleTime, "MaxConnIdleTime should be 0 (disabled to prevent pool decay)")
 	require.Equal(t, 100, DefaultMaxConns, "DefaultMaxConns should be 100 (for high-throughput workloads)")
 	require.Equal(t, 100, DefaultMaxIdleConns, "DefaultMaxIdleConns should be 100 (MUST equal MaxConns to prevent pool decay)")
-}
-
-func TestDSQLPoolDefaults_PoolKeeperManagesRefill(t *testing.T) {
-	// With MaxConnLifetime=10m, Go's database/sql closes connections after 10 minutes.
-	// Pool Keeper continuously tops up the pool to maintain target size.
-	// Staggered warmup ensures connections expire at different times (no thundering herd).
-	require.Equal(t, 10*time.Minute, DefaultMaxConnLifetime,
-		"DefaultMaxConnLifetime should be 10m - Go handles closure, Pool Keeper handles refill")
-	require.Equal(t, time.Duration(0), DefaultMaxConnIdleTime,
-		"DefaultMaxConnIdleTime should be 0 - pool must stay at max size always")
 }

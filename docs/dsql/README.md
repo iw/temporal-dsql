@@ -8,8 +8,8 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 
 - **IAM authentication** with automatic token refresh — no stored passwords
 - **Optimistic concurrency control** — DSQL reports conflicts at commit, and the plugin retries the whole transaction
-- **Connection Reservoir** for rate-limit-aware connection management
-- **Distributed coordination** via DynamoDB for multi-service deployments (opt-in; see [#33](https://github.com/iw/temporal-dsql/issues/33) and [#40](https://github.com/iw/temporal-dsql/issues/40))
+- **pgxpool connection pooling** for rate-limit-aware connection management
+- **Distributed rate limiting** via DynamoDB (opt-in; see [#40](https://github.com/iw/temporal-dsql/issues/40)); connection leasing is unsupported until [#33](https://github.com/iw/temporal-dsql/issues/33)
 - **Per-run buffered event IDs**, allocated inside the transaction that writes them
 
 ## Documentation
@@ -17,7 +17,7 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 | Document | Description |
 |----------|-------------|
 | [Deployment Guide](deployment.md) | Production deployment: schema setup, configuration, and operational guidance |
-| [Reservoir Design](reservoir-design.md) | Connection reservoir architecture, internals, and troubleshooting |
+| [Connection Pool](connection-pool.md) | Pool sizing, lifetime, rollout and rollback |
 | [Implementation Details](implementation.md) | Code structure, schema changes, OCC handling, CAS updates |
 | [Metrics Reference](metrics.md) | All emitted metrics with alerting recommendations |
 
@@ -45,9 +45,9 @@ Temporal Services (Frontend, History, Matching, Worker)
                     ▼
          DSQL Persistence Layer
     ┌────────────┬────────────┬──────────────┐
-    │ IAM Auth   │ Reservoir  │ OCC Retry    │
-    │ + Token    │ + Refiller │ + Backoff    │
-    │   Refresh  │ + Leasing  │ + Metrics    │
+    │ IAM Auth   │ pgxpool    │ OCC Retry    │
+    │ + Token    │ + Limiter  │ + Backoff    │
+    │   Refresh  │ + Metrics  │ + Metrics    │
     └────────────┴────────────┴──────────────┘
                     │
                     ▼

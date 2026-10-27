@@ -1,6 +1,6 @@
 # Deploying Temporal with Aurora DSQL
 
-This guide covers deploying Temporal with Aurora DSQL as the persistence layer, using the Connection Reservoir for production workloads.
+This guide covers deploying Temporal with Aurora DSQL as the persistence layer, using pgxpool for connection management.
 
 ## Prerequisites
 
@@ -77,12 +77,12 @@ persistence:
         databaseName: "temporal"
         connectAddr: "${CLUSTER_ENDPOINT}:5432"
         maxConns: 50
-        maxIdleConns: 50
+        maxConnLifetime: "50m"
 ```
 
-`maxIdleConns` must equal `maxConns` to prevent pool decay. When using reservoir mode, the plugin automatically sets `MaxConnLifetime` and `MaxConnIdleTime` to 0 — the reservoir manages connection lifecycle instead of `database/sql`. See [Reservoir Design — Ephemeral Pool](reservoir-design.md#ephemeral-pool-design) for why.
+`maxIdleConns` is ignored. Service pools open and keep `maxConns` connections in the background (100 if unset). `maxConnLifetime` is capped at 50 minutes; shorter positive values apply. The pool uses four minutes of lifetime jitter and one-minute health checks. See [connection pool](connection-pool.md) for lifecycle details and limitations.
 
-Pool sizing can also be set via environment variables (`TEMPORAL_SQL_MAX_CONNS`, `TEMPORAL_SQL_MAX_IDLE_CONNS`), which is the typical approach for ECS/Docker deployments.
+Pool sizing can also use `TEMPORAL_SQL_MAX_CONNS` where the deployment template maps it to `maxConns`. Count every pool in every Temporal process: their total must fit the cluster connection limit (10,000 by default), with headroom for startup pools and rolling replacements.
 
 ## 3. Dynamic Configuration
 
@@ -133,56 +133,17 @@ history.cacheNonUserContextLockTimeout:
 
 See `temporal-dsql-deploy-ecs/docker/config/dynamicconfig-bench.yaml` for the complete bench configuration including matching tuning, frontend rate limits, and task queue partitioning.
 
-## 4. Connection Reservoir (Production)
+## 4. Connection Pool
 
-The Connection Reservoir is the recommended connection management mode for production. It maintains a buffer of pre-created connections so that `driver.Open()` never blocks on rate limiters.
+pgxpool is always used. Startup performs a single bounded ping and returns while the service pool fills in the background. A process-wide semaphore permits eight concurrent limiter/token calls across all pools and releases before handshakes. The existing limiter paces startup and replacement connections.
 
-See [Reservoir Design](reservoir-design.md) for architecture details.
+IAM settings remain `REGION` or `AWS_REGION`, `CLUSTER_ENDPOINT` (or the configured address), and `DSQL_TOKEN_DURATION` (default 15 minutes). Token duration does not determine established connection lifetime.
 
-### Core Settings
-
-```bash
-# Enable reservoir mode
-DSQL_RESERVOIR_ENABLED=true
-
-# Connections to keep ready (match maxConns)
-DSQL_RESERVOIR_TARGET_READY=50
-
-# Connection lifetime before replacement (must be < DSQL's 60min limit)
-DSQL_RESERVOIR_BASE_LIFETIME=11m
-
-# Jitter to prevent synchronized expiry (actual lifetime: 10m–12m)
-DSQL_RESERVOIR_LIFETIME_JITTER=2m
-
-# Discard connections with less than this remaining lifetime
-DSQL_RESERVOIR_GUARD_WINDOW=45s
-```
-
-The in-flight semaphore (`DSQL_RESERVOIR_INFLIGHT_LIMIT`, default: 8) limits concurrent connection handshakes in the refiller. The default is appropriate for most deployments.
-
-### IAM Token Settings
-
-```bash
-CLUSTER_ENDPOINT="your-cluster.dsql.us-east-1.on.aws"
-REGION="us-east-1"
-DSQL_TOKEN_DURATION="14m"   # Token validity (default: 14 minutes)
-```
-
-### Expected Startup Behavior
-
-On startup, the refiller creates connections sequentially until the reservoir is full:
-
-```
-DSQL reservoir starting  target_ready=50 base_lifetime=11m0s jitter=2m0s guard_window=45s
-DSQL reservoir refiller started
-DSQL reservoir initial fill complete  ready=50 elapsed=5.2s
-```
-
-If these logs are missing, the pool will grow on-demand, causing rate limit pressure.
+The old reservoir, pool warmup and pool keeper settings are ignored with one warning listing those present. See the [complete removed-variable list and rollout instructions](connection-pool.md#migration-from-the-old-layer).
 
 ## 5. Distributed Coordination (Multi-Service)
 
-For production deployments with multiple Temporal services sharing a DSQL cluster, enable DynamoDB-backed coordination.
+DynamoDB-backed rate limiting can coordinate multiple Temporal processes. It remains opt-in; review [#40](https://github.com/iw/temporal-dsql/issues/40) for known token-bucket clock-skew and failure behavior before enabling it.
 
 ### Token Bucket Rate Limiting
 
@@ -233,18 +194,7 @@ aws dynamodb update-time-to-live \
 
 ### Slot Block Connection Limiting
 
-Coordinates the global connection count (DSQL default: 10,000) using block-based allocation to avoid DynamoDB hot partitions.
-
-```bash
-DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true
-DSQL_DISTRIBUTED_CONN_LEASE_TABLE=temporal-dsql-conn-lease
-DSQL_SLOT_BLOCK_SIZE=100    # Slots per block
-DSQL_SLOT_BLOCK_COUNT=100   # Total blocks (100 × 100 = 10k slots)
-DSQL_SLOT_BLOCK_TTL=3m      # TTL for crash recovery
-DSQL_SLOT_BLOCK_RENEW_INTERVAL=1m
-```
-
-See [Reservoir Design — Slot Block Manager](reservoir-design.md#slot-block-manager-recommended) for architecture details.
+Unsupported with pgxpool until [#33](https://github.com/iw/temporal-dsql/issues/33). `DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true` refuses to connect at startup and names #33. The slot-block and lease code remains unwired. Resolve reliance on the old global cap before upgrading; use a capacity budget covering every pool and replica.
 
 ## 6. Complete Production Configuration
 
@@ -258,14 +208,6 @@ DSQL_TOKEN_DURATION="14m"
 
 # Connection pool (per service instance — scale per service type)
 TEMPORAL_SQL_MAX_CONNS=50
-TEMPORAL_SQL_MAX_IDLE_CONNS=50
-
-# Reservoir
-DSQL_RESERVOIR_ENABLED=true
-DSQL_RESERVOIR_TARGET_READY=50
-DSQL_RESERVOIR_BASE_LIFETIME=11m
-DSQL_RESERVOIR_LIFETIME_JITTER=2m
-DSQL_RESERVOIR_GUARD_WINDOW=45s
 
 # Distributed rate limiting (token bucket)
 DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=true
@@ -274,31 +216,15 @@ DSQL_TOKEN_BUCKET_ENABLED=true
 DSQL_TOKEN_BUCKET_RATE=100
 DSQL_TOKEN_BUCKET_CAPACITY=1000
 
-# Distributed connection limiting (slot blocks)
-DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true
-DSQL_DISTRIBUTED_CONN_LEASE_TABLE=temporal-dsql-conn-lease
-DSQL_SLOT_BLOCK_SIZE=100
-DSQL_SLOT_BLOCK_COUNT=100
-DSQL_SLOT_BLOCK_TTL=3m
 ```
 
 ### Per-Service Pool Sizing
 
-Connection pool size should be tuned per service type. The bench environment (800 WPS target) uses:
-
-| Service | `max_conns` | Replicas | Total Connections |
-|---------|-------------|----------|-------------------|
-| History | 220 | 16 | 3,520 |
-| Matching | 100 | 16 | 1,600 |
-| Frontend | 80 | 9 | 720 |
-| Worker | 40 | 3 | 120 |
-| **Total** | | | **~5,960** |
-
-For lower throughput (100 WPS), 50 connections per service instance is a reasonable starting point.
+Each service pool opens its full `maxConns` allocation at startup and keeps it. A process can own several pools, so `maxConns × replicas` alone can undercount. Sum all pools across all processes, and reserve capacity for overlapping old/new replicas during rollout. Do not exceed the cluster connection limit (10,000 by default). Ephemeral pools add at most five connections each while startup work runs.
 
 ### ECS Task Definition
 
-This matches the actual terraform module (`modules/temporal-service`):
+Example environment for a deployment template that maps these variables to SQL config:
 
 ```hcl
 environment = [
@@ -313,24 +239,12 @@ environment = [
 
   # Connection pool
   { name = "TEMPORAL_SQL_MAX_CONNS",                  value = "50" },
-  { name = "TEMPORAL_SQL_MAX_IDLE_CONNS",             value = "50" },
   { name = "TEMPORAL_SQL_CONNECTION_TIMEOUT",          value = "30s" },
-
-  # Reservoir
-  { name = "DSQL_RESERVOIR_ENABLED",                  value = "true" },
-  { name = "DSQL_RESERVOIR_TARGET_READY",             value = "50" },
-  { name = "DSQL_RESERVOIR_BASE_LIFETIME",            value = "11m" },
-  { name = "DSQL_RESERVOIR_LIFETIME_JITTER",          value = "2m" },
-  { name = "DSQL_RESERVOIR_GUARD_WINDOW",             value = "45s" },
 
   # Distributed rate limiting
   { name = "DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED",   value = "true" },
   { name = "DSQL_DISTRIBUTED_RATE_LIMITER_TABLE",     value = var.dsql_rate_limiter_table },
 
-  # Distributed connection leasing
-  { name = "DSQL_DISTRIBUTED_CONN_LEASE_ENABLED",     value = "true" },
-  { name = "DSQL_DISTRIBUTED_CONN_LEASE_TABLE",       value = var.dsql_conn_lease_table },
-  { name = "DSQL_DISTRIBUTED_CONN_LIMIT",             value = "9500" },
 ]
 ```
 
@@ -340,11 +254,9 @@ environment = [
 services:
   temporal-history:
     environment:
-      DSQL_RESERVOIR_ENABLED: "true"
-      DSQL_RESERVOIR_TARGET_READY: "50"
-      DSQL_RESERVOIR_BASE_LIFETIME: "11m"
-      DSQL_RESERVOIR_LIFETIME_JITTER: "2m"
-      DSQL_RESERVOIR_GUARD_WINDOW: "45s"
+      TEMPORAL_SQL_MAX_CONNS: "50"
+      AWS_REGION: "us-east-1"
+      CLUSTER_ENDPOINT: "your-cluster.dsql.us-east-1.on.aws"
 ```
 
 ## Verification
@@ -380,14 +292,14 @@ Key metrics to watch in production:
 
 | Metric | Healthy | Alert If |
 |--------|---------|----------|
-| `dsql_reservoir_size / dsql_reservoir_target` | > 0.9 | < 0.5 for 5 min |
-| `rate(dsql_reservoir_empty_total[5m])` | 0 | > 0 for 2 min |
+| `dsql_pool_open - dsql_pool_constructing` | Near expected service size | Sustained deficit |
+| `rate(dsql_pool_canceled_acquires_total[5m])` | Low | Sustained increase |
 | `dsql_tx_conflict_total` | Low, stable | Sustained spike |
 | `dsql_pool_in_use / dsql_pool_max_open` | < 0.8 | > 0.9 for 5 min |
 
 See [Metrics Reference](metrics.md) for the complete list and alerting recommendations.
 
-See [Reservoir Design — Troubleshooting](reservoir-design.md#troubleshooting) for diagnostic procedures.
+Use pool waits, constructing connections and rate-limiter logs to distinguish saturation from failed connection creation.
 
 ## Troubleshooting
 
@@ -398,7 +310,7 @@ See [Reservoir Design — Troubleshooting](reservoir-design.md#troubleshooting) 
 | "REGION or AWS_REGION must be set" | Missing env var | Set `REGION` or `AWS_REGION` |
 | "failed to resolve AWS credentials" | IAM misconfiguration | Check role/credentials, verify `dsql:DbConnectAdmin` |
 | "connection rate limit exceeded" | Too many new connections | Check distributed rate limiter, stagger restarts |
-| `ErrReservoirEmpty` | Reservoir temporarily drained | Transient — refiller will catch up. If persistent, see [reservoir troubleshooting](reservoir-design.md#common-issues-and-solutions) |
+| `ResourceExhausted` / 53300 / 53400 | Connection not attempted or refused at admission | Inspect limiter and cluster connection budget |
 
 ### Serialization Conflicts
 
@@ -407,16 +319,8 @@ OCC conflicts are expected under concurrent load. The retry logic handles them a
 - Monitor `dsql_tx_conflict_total` — a sustained spike may indicate hot-spot access patterns
 - Monitor `dsql_tx_exhausted_total` — retries exhausted means the conflict rate exceeds retry budget
 
-### Rollback to PostgreSQL
+### Rollout and rollback
 
-Update the persistence configuration and restart services:
+Follow the [pool rollout checklist](connection-pool.md#rollout-and-rollback): budget every pool and overlapping replica, remove ignored settings, resolve reliance on leasing, then replace one process at a time while checking pool fill and waits. Startup does not wait for a full pool.
 
-```yaml
-persistence:
-  defaultStore: postgres-default
-  datastores:
-    postgres-default:
-      sql:
-        pluginName: "postgres12"
-        connectAddr: "postgres-host:5432"
-```
+Rollback by deploying the previous image and restoring its previous connection configuration. This connection-layer change requires no schema migration or rollback.

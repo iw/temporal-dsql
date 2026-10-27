@@ -3,10 +3,12 @@ package dsql
 import (
 	"context"
 	"database/sql"
-	"fmt"
-	"time"
-
+	sqldriver "database/sql/driver"
 	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"syscall"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
@@ -39,15 +41,12 @@ type db struct {
 	dbName   string
 	dbDriver driver.Driver
 
-	plugin          *plugin
-	cfg             *config.SQL
-	resolver        resolver.ServiceResolver
-	converter       DataConverter
-	retryManager    *RetryManager
-	poolMetrics     DSQLMetrics             // Pool metrics collector (only for main DB, not transactions)
-	reservoirHandle *driver.ReservoirHandle // Reservoir handle for lifecycle management (only for main DB) - DEPRECATED, use reservoirHolder
-	reservoirHolder *reservoirHandleHolder  // Holder for reservoir handle that survives reconnects
-	logger          log.Logger              // Logger for assertions and error reporting
+	plugin       *plugin
+	cfg          *config.SQL
+	resolver     resolver.ServiceResolver
+	converter    DataConverter
+	retryManager *RetryManager
+	logger       log.Logger // Logger for assertions and error reporting
 
 	handle *sqlplugin.DatabaseHandle
 	tx     *sqlx.Tx
@@ -95,14 +94,6 @@ func newDBWithDependencies(
 		db, err := handle.DB()
 		if err == nil && db != nil {
 			mdb.retryManager = NewRetryManager(db.DB, retryConfig, logger, metricsHandler)
-
-			// Start pool metrics collector for non-transaction DB instances
-			// Only start for the main DB, not for transaction-level instances
-			if tx == nil {
-				dsqlMetrics := NewDSQLMetrics(metricsHandler)
-				dsqlMetrics.StartPoolCollector(db.DB, 15*time.Second)
-				mdb.poolMetrics = dsqlMetrics
-			}
 		}
 	}
 
@@ -121,39 +112,41 @@ func (pdb *db) conn() sqlplugin.Conn {
 	return pdb.handle.Conn()
 }
 
-// maybeConvertError preserves raw pg errors for tx-boundary retry classification.
-// Specifically, SQLSTATE 40001 (serialization/OCC conflict) and 0A000 (unsupported feature)
-// must remain visible to the SqlStore tx retry policy.
-// SQLSTATE 54000 is a non-retryable transaction or value size limit.
-// All other errors are converted using the Temporal sql handle.
-//
-// IMPORTANT: ErrReservoirEmpty is handled specially - it's a transient backpressure signal
-// that should NOT trigger DatabaseHandle.ConvertError (which would recreate the entire pool).
-// Instead, report overload: the operation definitely did not commit.
+// maybeConvertError preserves transaction classification without rebuilding the pool.
 func (pdb *db) maybeConvertError(err error) error {
 	if err == nil {
 		return nil
 	}
-
-	// Handle reservoir empty as transient backpressure - do NOT pass to handle.ConvertError
-	// which would trigger pool recreation and cause cascading reservoir creation.
-	if errors.Is(err, driver.ErrReservoirEmpty) {
-		return &serviceerror.ResourceExhausted{
-			Cause:   enumspb.RESOURCE_EXHAUSTED_CAUSE_SYSTEM_OVERLOADED,
-			Message: "dsql reservoir empty: transient backpressure, retry",
-		}
+	if errors.Is(err, errConnectThrottled) {
+		return connectionNotAttempted(err)
 	}
-
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		switch pgErr.SQLState() {
+		switch pgErr.Code {
 		case "40001", "0A000":
 			return err
 		case "54000":
 			return &persistence.TransactionSizeLimitError{Msg: err.Error()}
+		case "53400", "53300":
+			return connectionNotAttempted(err)
 		}
 	}
-	return pdb.handle.ConvertError(err)
+
+	var connectErr *pgconn.ConnectError
+	if errors.Is(err, sqldriver.ErrBadConn) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.As(err, &connectErr) || (pgErr != nil && strings.HasPrefix(pgErr.Code, "08")) ||
+		strings.Contains(strings.ToLower(err.Error()), "access denied") {
+		return serviceerror.NewUnavailablef("database connection lost: %s", err.Error())
+	}
+	return err
+}
+
+func connectionNotAttempted(err error) error {
+	return &serviceerror.ResourceExhausted{
+		Cause:   enumspb.RESOURCE_EXHAUSTED_CAUSE_SYSTEM_OVERLOADED,
+		Message: fmt.Sprintf("dsql connection not attempted: %s", err),
+	}
 }
 
 // BeginTx starts a new transaction and returns a reference to the Tx object
@@ -185,17 +178,6 @@ func (pdb *db) BeginTx(ctx context.Context) (sqlplugin.Tx, error) {
 
 // Close closes the connection to the dsql db
 func (pdb *db) Close() error {
-	// Stop reservoir refiller if running (prevents goroutine leak)
-	// Use the holder if available (preferred), otherwise fall back to direct handle
-	if pdb.reservoirHolder != nil {
-		pdb.reservoirHolder.Stop()
-	} else if pdb.reservoirHandle != nil {
-		pdb.reservoirHandle.Stop()
-	}
-	// Stop pool metrics collector if running
-	if pdb.poolMetrics != nil {
-		pdb.poolMetrics.StopPoolCollector()
-	}
 	pdb.handle.Close()
 	return nil
 }

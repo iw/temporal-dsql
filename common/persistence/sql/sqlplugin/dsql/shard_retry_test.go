@@ -16,7 +16,6 @@ import (
 	"go.temporal.io/server/common/persistence/serialization"
 	persistencesql "go.temporal.io/server/common/persistence/sql"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql"
-	dsqldriver "go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/driver"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/postgresql"
 )
 
@@ -40,11 +39,11 @@ func TestUpdateShardTxRetry(t *testing.T) {
 			}{
 				{name: "commit_conflicts_then_success", commitErrors: []error{conflict, conflict}, attempts: 3, commits: 3},
 				{name: "commit_conflicts_exhausted", commitError: conflict, exhausted: true, attempts: dsql.DefaultRetryConfig().MaxRetries + 1, commits: dsql.DefaultRetryConfig().MaxRetries + 1},
-				{name: "empty_reservoir", beginErrors: []error{dsqldriver.ErrReservoirEmpty}, exhausted: true, attempts: 1},
+				{name: "connection_throttled", beginErrors: []error{&pgconn.PgError{Code: "53400"}}, exhausted: true, attempts: 1},
 				{name: "typed_error_survives_cancellation", staleOwner: true, attempts: 1, rollbacks: 1},
 				{name: "begin_conflicts_then_success", beginErrors: []error{conflict, conflict}, attempts: 3, commits: 1},
 				{name: "body_conflicts_then_success", execErrors: []error{conflict, conflict}, attempts: 3, commits: 1, rollbacks: 2},
-				{name: "body_empty_reservoir", execErrors: []error{dsqldriver.ErrReservoirEmpty}, exhausted: true, attempts: 1, rollbacks: 1},
+				{name: "body_connection_throttled", execErrors: []error{&pgconn.PgError{Code: "53400"}}, exhausted: true, attempts: 1, rollbacks: 1},
 				{name: "commit_conflict_with_cancellation", commitError: conflict, cancelCommit: true, exhausted: true, attempts: 1, commits: 1},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
