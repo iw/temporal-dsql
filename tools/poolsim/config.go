@@ -13,7 +13,8 @@ import (
 
 // Config is the simulation configuration.
 type Config struct {
-	Seed int64 `json:"seed" yaml:"seed"`
+	ComparisonConfig `yaml:",inline"`
+	Seed             int64 `json:"seed" yaml:"seed"`
 
 	Endpoint string `json:"endpoint" yaml:"endpoint"`
 
@@ -35,7 +36,8 @@ type Config struct {
 
 // ServiceConfig configures a single service's reservoir behavior.
 type ServiceConfig struct {
-	Name string `json:"name" yaml:"name"`
+	PoolConfig `yaml:",inline"`
+	Name       string `json:"name" yaml:"name"`
 
 	// Reservoir configuration (matches reservoir_config.go)
 	TargetReady  int           `json:"targetReady" yaml:"targetReady"`   // Target reservoir size
@@ -52,7 +54,9 @@ type ServiceConfig struct {
 
 // ScenarioConfig configures the simulation scenario.
 type ScenarioConfig struct {
-	Kind string `json:"kind" yaml:"kind"` // cold_start | rolling_restart | mass_drop
+	StartWindow time.Duration `json:"startWindow" yaml:"startWindow"`
+	EventAt     time.Duration `json:"eventAt" yaml:"eventAt"`
+	Kind        string        `json:"kind" yaml:"kind"` // cold_start | rolling_restart | mass_drop
 
 	// Rolling restart
 	RollEvery time.Duration `json:"rollEvery" yaml:"rollEvery"`
@@ -192,10 +196,11 @@ func validate(cfg *Config) error {
 
 	switch cfg.Scenario.Kind {
 	case "cold_start":
-	case "rolling_restart":
+	case "rolling_restart", "rolling_deploy":
 		if cfg.Scenario.RollEvery == 0 {
 			cfg.Scenario.RollEvery = 60 * time.Second
 		}
+	case "fleet_start", "ddb_outage":
 	case "mass_drop":
 		if cfg.Scenario.DropAt == 0 {
 			cfg.Scenario.DropAt = 5 * time.Minute
@@ -207,6 +212,9 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("config: unknown scenario.kind %q", cfg.Scenario.Kind)
 	}
 
+	if usesComparison(cfg) {
+		return validateComparison(cfg)
+	}
 	return nil
 }
 

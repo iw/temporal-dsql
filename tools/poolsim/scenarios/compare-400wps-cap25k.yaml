@@ -1,0 +1,127 @@
+# compare-400wps.yaml with DSQL's connection cap raised to 25,000, so the
+# 44 instances x 500 connections (22,000) all fit. Everything else is unchanged.
+# Use this to compare the models when every pool can reach its target.
+seed: 42
+model: reservoir-sql
+limiter: tokenBucket
+duration: 3h
+sampleEvery: 10s
+steadyAfter: 90m
+cluster:
+  maxConnections: 25000
+  handshake: {min: 50ms, max: 200ms}
+limiterLatency: {min: 5ms, max: 10ms}
+# A bucket permits bursts above 100/s; an oversubscribed target cannot converge.
+# Disable these legacy assertions explicitly, retain counters for comparison.
+assertMaxConnectsPerSec: -1
+assertConvergeWithin: -1s
+assertMaxClosurePerSec: -1
+assertZeroEmptyEvents: false
+assertZeroDSQLRejections: false
+assertZeroDeadRequests: false
+scenario: {kind: cold_start}
+services:
+  - name: history
+    replicas: 16
+    targetReady: 500
+    maxOpen: 500
+    inflightLimit: 8
+    baseLifetime: 11m
+    jitter: 2m
+    guardWindow: 45s
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 500
+      minConns: 500
+      # 50m + [0,4m) jitter + 45s guard + 5m transaction < 60m.
+      # Even a full 5-minute transaction at the latest allowed acquire is safe.
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 30
+      holdTime: 10ms
+      holdJitter: 10ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+  - name: matching
+    replicas: 16
+    targetReady: 500
+    maxOpen: 500
+    inflightLimit: 8
+    baseLifetime: 11m
+    jitter: 2m
+    guardWindow: 45s
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 500
+      minConns: 500
+      # 50m + [0,4m) jitter + 45s guard + 5m transaction < 60m.
+      # Even a full 5-minute transaction at the latest allowed acquire is safe.
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 20
+      holdTime: 5ms
+      holdJitter: 5ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+  - name: frontend
+    replicas: 9
+    targetReady: 500
+    maxOpen: 500
+    inflightLimit: 8
+    baseLifetime: 11m
+    jitter: 2m
+    guardWindow: 45s
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 500
+      minConns: 500
+      # 50m + [0,4m) jitter + 45s guard + 5m transaction < 60m.
+      # Even a full 5-minute transaction at the latest allowed acquire is safe.
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 15
+      holdTime: 5ms
+      holdJitter: 5ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+  - name: worker
+    replicas: 3
+    targetReady: 500
+    maxOpen: 500
+    inflightLimit: 8
+    baseLifetime: 11m
+    jitter: 2m
+    guardWindow: 45s
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 500
+      minConns: 500
+      # 50m + [0,4m) jitter + 45s guard + 5m transaction < 60m.
+      # Even a full 5-minute transaction at the latest allowed acquire is safe.
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 10
+      holdTime: 20ms
+      holdJitter: 10ms
+      spawnEvery: 1s
+      arrivalBurst: 5
+      maxWait: 10s
