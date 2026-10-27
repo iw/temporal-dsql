@@ -135,7 +135,7 @@ func (l *DistributedRateLimiter) Acquire(ctx context.Context, n int64) error {
 			return fmt.Errorf("dsql connect limiter: timeout acquiring permit (endpoint=%s n=%d)", l.endpoint, n)
 		}
 
-		sleep := l.jitteredBackoff(now, deadline)
+		sleep := l.jitteredBackoff(time.Now(), deadline)
 		select {
 		case <-time.After(sleep):
 		case <-ctx.Done():
@@ -200,9 +200,10 @@ func (l *DistributedRateLimiter) tryAcquireOnce(ctx context.Context, sec int64, 
 	return true, nil
 }
 
-// jitteredBackoff calculates the next backoff duration with jitter.
+// jitteredBackoff calculates the next backoff duration with jitter. It reads the
+// time only from now, so tests can pin it.
 func (l *DistributedRateLimiter) jitteredBackoff(now time.Time, deadline time.Time) time.Duration {
-	remaining := time.Until(deadline)
+	remaining := deadline.Sub(now)
 	if remaining <= 0 {
 		return 0
 	}
@@ -214,7 +215,7 @@ func (l *DistributedRateLimiter) jitteredBackoff(now time.Time, deadline time.Ti
 
 	// If we're near the next second boundary, wait for it (plus small jitter).
 	nextSec := now.Truncate(time.Second).Add(time.Second)
-	untilNext := time.Until(nextSec)
+	untilNext := nextSec.Sub(now)
 	if untilNext > 0 && untilNext < 250*time.Millisecond {
 		j := randDuration(0, 50*time.Millisecond)
 		return minDuration(untilNext+j, remaining)
