@@ -602,7 +602,7 @@ install-schema-dsql: temporal-sql-tool
 	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl dsql --db $(TEMPORAL_DB) drop -f
 	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl dsql --db $(TEMPORAL_DB) create
 	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl dsql --db $(TEMPORAL_DB) setup-schema -v 0.0
-	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl dsql --db $(TEMPORAL_DB) update-schema -d ./schema/dsql/v12/temporal/versioned
+	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl dsql --db $(TEMPORAL_DB) update-schema -d ./schema/dsql/temporal/versioned
 
 install-schema-es: temporal-elasticsearch-tool
 	@printf $(COLOR) "Install Elasticsearch schema..."

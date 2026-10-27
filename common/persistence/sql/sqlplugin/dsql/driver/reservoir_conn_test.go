@@ -121,7 +121,7 @@ func TestReservoirConn_Close_BadConnection(t *testing.T) {
 	// so the bad connection should be discarded, not returned to the reservoir.
 	require.Equal(t, 0, res.Len())
 	require.Equal(t, int64(1), metrics.discards.Load())
-	require.Contains(t, metrics.discardReasons, "expired_on_return")
+	require.Contains(t, metrics.getDiscardReasons(), "expired_on_return")
 }
 
 // TestReservoirConn_DoubleClose tests that double close is idempotent

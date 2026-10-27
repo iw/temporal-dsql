@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -296,14 +297,15 @@ func TestReservoirRefiller_HandlesLeaseAcquireFailure(t *testing.T) {
 	refiller.Start()
 	defer refiller.Stop()
 
-	// Wait a bit for refiller to attempt
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the expected refill failure.
+	require.Eventually(t, func() bool {
+		return slices.Contains(metrics.getRefillFailReasons(), "lease_acquire")
+	}, 5*time.Second, 50*time.Millisecond)
 
 	// Reservoir should remain empty due to lease failures
 	require.Equal(t, 0, res.Len())
 	require.Greater(t, leaseManager.acquireCalls.Load(), int64(0))
 	require.Greater(t, metrics.refillFailures.Load(), int64(0))
-	require.Contains(t, metrics.refillFailReasons, "lease_acquire")
 }
 
 // TestReservoirRefiller_GracefulShutdown tests graceful shutdown
@@ -389,13 +391,14 @@ func TestReservoirRefiller_TokenProviderFailure(t *testing.T) {
 	refiller.Start()
 	defer refiller.Stop()
 
-	// Wait a bit for refiller to attempt
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the expected refill failure.
+	require.Eventually(t, func() bool {
+		return slices.Contains(metrics.getRefillFailReasons(), "token_provider")
+	}, 5*time.Second, 50*time.Millisecond)
 
 	// Reservoir should remain empty due to token failures
 	require.Equal(t, 0, res.Len())
 	require.Greater(t, metrics.refillFailures.Load(), int64(0))
-	require.Contains(t, metrics.refillFailReasons, "token_provider")
 }
 
 // TestReservoirRefiller_ConnectionOpenFailure tests connection open failure handling
@@ -431,13 +434,14 @@ func TestReservoirRefiller_ConnectionOpenFailure(t *testing.T) {
 	refiller.Start()
 	defer refiller.Stop()
 
-	// Wait a bit for refiller to attempt
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the expected refill failure.
+	require.Eventually(t, func() bool {
+		return slices.Contains(metrics.getRefillFailReasons(), "connection_open")
+	}, 5*time.Second, 50*time.Millisecond)
 
 	// Reservoir should remain empty due to connection failures
 	require.Equal(t, 0, res.Len())
 	require.Greater(t, metrics.refillFailures.Load(), int64(0))
-	require.Contains(t, metrics.refillFailReasons, "connection_open")
 }
 
 // NOTE: Tests for steadyStateInterval() and calculateRefillInterval() were removed
@@ -484,13 +488,14 @@ func TestReservoirRefiller_LeaseReleasedOnRateLimitFailure(t *testing.T) {
 	refiller.Start()
 	defer refiller.Stop()
 
-	// Wait for refiller to attempt
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the expected refill failure.
+	require.Eventually(t, func() bool {
+		return slices.Contains(metrics.getRefillFailReasons(), "rate_limit")
+	}, 5*time.Second, 50*time.Millisecond)
 
 	// Lease should be released when rate limit fails
 	require.Greater(t, leaseManager.acquireCalls.Load(), int64(0))
 	require.Greater(t, leaseManager.releaseCalls.Load(), int64(0))
-	require.Contains(t, metrics.refillFailReasons, "rate_limit")
 }
 
 // TestSleepOrStop tests the sleepOrStop helper function
@@ -808,13 +813,14 @@ func TestReservoirRefiller_DSNInjectFailure(t *testing.T) {
 	refiller.Start()
 	defer refiller.Stop()
 
-	// Wait for refiller to attempt
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the expected refill failure.
+	require.Eventually(t, func() bool {
+		return slices.Contains(metrics.getRefillFailReasons(), "dsn_inject")
+	}, 5*time.Second, 50*time.Millisecond)
 
 	// Reservoir should remain empty due to DSN injection failures
 	require.Equal(t, 0, res.Len())
 	require.Greater(t, metrics.refillFailures.Load(), int64(0))
-	require.Contains(t, metrics.refillFailReasons, "dsn_inject")
 }
 
 // TestReservoirRefiller_LeaseReleasedOnTokenFailure tests lease release on token failure
@@ -992,12 +998,13 @@ func TestReservoirRefiller_RateLimiterContextCancellation(t *testing.T) {
 	refiller.Start()
 	defer refiller.Stop()
 
-	// Wait for refiller to attempt
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the expected refill failure.
+	require.Eventually(t, func() bool {
+		return slices.Contains(metrics.getRefillFailReasons(), "rate_limit")
+	}, 5*time.Second, 50*time.Millisecond)
 
 	// Should have rate limit failures
 	require.Greater(t, metrics.refillFailures.Load(), int64(0))
-	require.Contains(t, metrics.refillFailReasons, "rate_limit")
 }
 
 // TestSleepOrStop_ZeroDuration tests sleepOrStop with zero duration

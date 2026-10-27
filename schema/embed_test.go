@@ -28,7 +28,7 @@ func TestSchemaDirs(t *testing.T) {
 
 	dirs = PathsByDir("dsql")
 	requireContains(t, []string{
-		"dsql/v12/temporal",
+		"dsql/temporal",
 	}, dirs)
 }
 
