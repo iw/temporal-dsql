@@ -19,10 +19,6 @@ func TestFencedUpdateMethodsExist(t *testing.T) {
 		assert.NotNil(t, db.UpdateTaskQueuesWithFencing)
 	})
 
-	t.Run("UpdateNamespaceWithFencing_exists", func(t *testing.T) {
-		assert.NotNil(t, db.UpdateNamespaceWithFencing)
-	})
-
 	// Test that primary update methods still exist (backward compatibility)
 	t.Run("UpdateShards_exists", func(t *testing.T) {
 		assert.NotNil(t, db.UpdateShards)
