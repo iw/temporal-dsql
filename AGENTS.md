@@ -71,7 +71,7 @@
 - Optimistic concurrency control; transactions that fail with SQLSTATE 40001 are retried through the opt-in `sqlplugin.TxRetryPolicy` hook
 - Shard updates are fenced by the range check in `lockShard`, as upstream; the CAS helpers in `cas_updates.go` are unused ([#49](https://github.com/iw/temporal-dsql/issues/49))
 - FOR UPDATE on single tables only (DSQL lifted this limit in August 2026)
-- Shard read lock is a plain SELECT, not FOR UPDATE ([#23](https://github.com/iw/temporal-dsql/issues/23)); DSQL now supports FOR KEY SHARE
+- Shard read lock uses FOR KEY SHARE, so a range renewal fails the commit of an in-flight write that read the old range
 
 #### IAM Authentication
 - Token-refreshing driver with automatic credential refresh
@@ -103,7 +103,7 @@
 
 1. **Sequences and Identity Columns**: Supported by DSQL since February 2026; the plugin still generates `buffered_events` IDs with Snowflake ([#34](https://github.com/iw/temporal-dsql/issues/34))
 2. **CHECK Constraints**: Supported by DSQL; the schema omits them and the application validates instead
-3. **FOR SHARE Not Supported**: DSQL supports FOR KEY SHARE since August 2026, which the shard read lock needs ([#23](https://github.com/iw/temporal-dsql/issues/23))
+3. **FOR SHARE Not Supported**: The shard read lock uses FOR KEY SHARE instead, which DSQL has supported since August 2026
 4. **FOR UPDATE on JOINs**: Supported by DSQL since August 2026; the plugin still splits these into single-table queries
 5. **Connection Rate Limit**: 100 connections/second cluster-wide
 6. **Connection Limit**: 10,000 connections per cluster (default, can be raised)

@@ -228,7 +228,7 @@ func (pdb *db) LockCurrentExecutionsJoinExecutions(ctx context.Context, filter .
 
 ### FOR SHARE Not Supported
 
-DSQL doesn't support `FOR SHARE` (read locks). All read-lock methods delegate to write-lock or use optimistic reads.
+DSQL doesn't support `FOR SHARE`. `ReadLockExecutions` delegates to `WriteLockExecutions`, and `ReadLockShards` uses `FOR KEY SHARE`, which DSQL has supported since August 2026.
 
 **ReadLockExecutions** (`execution.go`):
 
@@ -244,23 +244,12 @@ func (pdb *db) ReadLockExecutions(ctx context.Context, filter ...) (int64, int64
 **ReadLockShards** (`shard.go`):
 
 ```go
-// DSQL-compatible query without FOR SHARE
-const dsqlReadLockShardQry = `SELECT range_id FROM shards WHERE shard_id = $1`
-
-func (pdb *db) ReadLockShards(ctx context.Context, filter ...) (int64, error) {
-    // Use retry manager for OCC handling
-    if pdb.tx == nil && pdb.retryManager != nil {
-        result, err := pdb.retryManager.RunTx(ctx, "ReadLockShards", func(tx *sql.Tx) (interface{}, error) {
-            var rangeID int64
-            err := tx.QueryRowContext(ctx, dsqlReadLockShardQry, filter.ShardID).Scan(&rangeID)
-            return rangeID, err
-        })
-        return result.(int64), err
-    }
-    // Direct execution for transaction contexts
-    return pdb.GetContext(ctx, &rangeID, dsqlReadLockShardQry, filter.ShardID)
-}
+const readLockShardQry = `SELECT range_id FROM shards WHERE shard_id = $1 FOR KEY SHARE`
 ```
+
+Every workflow write reads the shard row with this query before it writes. `UpdateShard` takes `FOR UPDATE` on the same row, and the two conflict at commit. If a new owner renews the range while an old owner's write is in flight, whichever transaction commits second fails with SQLSTATE 40001. When the write is retried, it reads the new range and fails with `ShardOwnershipLostError`. Key-share readers don't conflict with each other.
+
+`TestReadLockShardsForKeyShareIntegration` checks both behaviours against a live cluster; its doc comment gives the command to run it.
 
 ## Optimistic Concurrency Control (OCC)
 

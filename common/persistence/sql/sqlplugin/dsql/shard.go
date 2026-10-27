@@ -22,9 +22,8 @@ const (
  SET range_id = $1, data = $2, data_encoding = $3 
  WHERE shard_id = $4`
 
-	lockShardQry = `SELECT range_id FROM shards WHERE shard_id = $1 FOR UPDATE`
-	// NOTE: readLockShardQry removed - read-lock clause is not supported by DSQL
-	// Use ReadLockShards method which implements DSQL-compatible optimistic reads
+	lockShardQry     = `SELECT range_id FROM shards WHERE shard_id = $1 FOR UPDATE`
+	readLockShardQry = `SELECT range_id FROM shards WHERE shard_id = $1 FOR KEY SHARE`
 )
 
 // InsertIntoShards inserts one or more rows into shards table
@@ -44,11 +43,11 @@ func (pdb *db) InsertIntoShards(
 // UpdateShards updates one or more rows into shards table.
 //
 // DSQL behavior:
-// - In transaction contexts (pdb.tx != nil), this method must preserve upstream semantics:
-//   the caller has already acquired the shard row via FOR UPDATE and relies on the
-//   transaction as the fence. We therefore perform the unfenced UPDATE.
-// - Outside a transaction (pdb.tx == nil), we perform an auto-fenced conditional update
-//   using the currently observed range_id as the expected fencing token.
+//   - In transaction contexts (pdb.tx != nil), this method must preserve upstream semantics:
+//     the caller has already acquired the shard row via FOR UPDATE and relies on the
+//     transaction as the fence. We therefore perform the unfenced UPDATE.
+//   - Outside a transaction (pdb.tx == nil), we perform an auto-fenced conditional update
+//     using the currently observed range_id as the expected fencing token.
 func (pdb *db) UpdateShards(
 	ctx context.Context,
 	row *sqlplugin.ShardsRow,
@@ -102,21 +101,18 @@ func (pdb *db) SelectFromShards(
 	return &row, nil
 }
 
-// ReadLockShards acquires a read lock on a single row in shards table
-// DSQL Override: Removes read-lock clause and uses optimistic reads.
-// Call-site contract: Used only for range_id validation, no subsequent writes in same transaction.
+// ReadLockShards acquires a read lock on a single row in shards table.
+// FOR KEY SHARE fences subsequent writes against concurrent shard ownership changes
+// using FOR UPDATE, without conflicting with other key-share readers.
 func (pdb *db) ReadLockShards(
 	ctx context.Context,
 	filter sqlplugin.ShardsFilter,
 ) (int64, error) {
-	// DSQL-compatible query without read-lock clause.
-	const dsqlReadLockShardQry = `SELECT range_id FROM shards WHERE shard_id = $1`
-
 	// Use retry manager if available (for non-transaction contexts).
 	if pdb.tx == nil && pdb.retryManager != nil {
 		result, err := pdb.retryManager.RunTx(ctx, "ReadLockShards", func(tx *sql.Tx) (interface{}, error) {
 			var rangeID int64
-			err := tx.QueryRowContext(ctx, dsqlReadLockShardQry, filter.ShardID).Scan(&rangeID)
+			err := tx.QueryRowContext(ctx, readLockShardQry, filter.ShardID).Scan(&rangeID)
 			return rangeID, err
 		})
 		if err != nil {
@@ -129,7 +125,7 @@ func (pdb *db) ReadLockShards(
 	var rangeID int64
 	err := pdb.GetContext(ctx,
 		&rangeID,
-		dsqlReadLockShardQry,
+		readLockShardQry,
 		filter.ShardID,
 	)
 	return rangeID, err

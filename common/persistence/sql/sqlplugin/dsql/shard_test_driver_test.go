@@ -15,7 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const shardTestLockQuery = "SELECT range_id FROM shards WHERE shard_id = $1 FOR UPDATE"
+const (
+	shardTestLockQuery     = "SELECT range_id FROM shards WHERE shard_id = $1 FOR UPDATE"
+	shardTestReadLockQuery = "SELECT range_id FROM shards WHERE shard_id = $1 FOR KEY SHARE"
+)
 
 var shardTestDriverID atomic.Int64
 
@@ -88,10 +91,12 @@ func (c *shardTestConn) Begin() (driver.Tx, error) {
 }
 
 func (c *shardTestConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
-	if c.db.record(query) != shardTestLockQuery {
+	switch c.db.record(query) {
+	case shardTestLockQuery, shardTestReadLockQuery, "SELECT range_id FROM shards WHERE shard_id = $1":
+		return &shardTestRows{rangeID: c.db.rangeID}, nil
+	default:
 		return nil, fmt.Errorf("unexpected query: %s", query)
 	}
-	return &shardTestRows{rangeID: c.db.rangeID}, nil
 }
 
 func (c *shardTestConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
