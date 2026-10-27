@@ -356,15 +356,19 @@ func classifyError(err error) ErrorType {
 
 ### Transaction Retry Policy (`tx_retry_policy.go`)
 
-Exposes retry policy to Temporal's SqlStore for transaction-boundary retries:
+The DSQL `db` implements `sqlplugin.TxRetryPolicy`, an opt-in hook that Temporal's SqlStore uses to retry a whole transaction:
 
 ```go
-func (pdb *db) TxRetryPolicy() persistsql.TxRetryPolicy {
-    if pdb.retryManager == nil {
-        return nil
-    }
-    return NewDSQLTxRetryPolicy(pdb.retryManager)
+type TxRetryPolicy interface {
+    IsRetryableTxError(err error) bool
+    TxRetryBackoff(operation string, attempt int, err error) (time.Duration, bool)
 }
+```
+
+`txExecute` checks the raw error from `BeginTx`, the transaction body and `Commit` before converting it. On SQLSTATE 40001 it runs the whole transaction again, with exponential backoff and jitter from `DefaultRetryConfig`: 100 ms base delay, 5 retries. When the retries run out, or the context ends while waiting, it returns `ResourceExhausted` with cause `SYSTEM_OVERLOADED`, which history treats as not committed. An empty connection reservoir returns the same error.
+
+```go
+var _ sqlplugin.TxRetryPolicy = (*db)(nil)
 ```
 
 ## Compare-And-Swap (CAS) Updates

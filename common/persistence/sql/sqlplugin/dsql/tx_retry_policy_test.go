@@ -6,150 +6,107 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/server/common/metrics/metricstest"
+	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 )
 
 func TestDSQLTxRetryPolicy_Creation(t *testing.T) {
-	cfg := RetryConfig{
-		MaxRetries:   3,
-		BaseDelay:    50 * time.Millisecond,
-		MaxDelay:     2 * time.Second,
-		JitterFactor: 0.1,
-	}
-	rm := &RetryManager{config: cfg}
-	
-	policy := NewDSQLTxRetryPolicy(rm)
-	require.NotNil(t, policy)
-	
-	dsqlPolicy, ok := policy.(*dsqlTxRetryPolicy)
-	require.True(t, ok)
-	
-	assert.Equal(t, 3, dsqlPolicy.MaxRetries())
-	assert.Equal(t, 50*time.Millisecond, dsqlPolicy.baseDelay)
-	assert.Equal(t, 2*time.Second, dsqlPolicy.maxDelay)
-	assert.Equal(t, 0.1, dsqlPolicy.jitterFactor)
-}
-
-func TestDSQLTxRetryPolicy_MaxRetries(t *testing.T) {
-	cfg := RetryConfig{MaxRetries: 5}
-	rm := &RetryManager{config: cfg}
-	policy := NewDSQLTxRetryPolicy(rm)
-	
-	assert.Equal(t, 5, policy.MaxRetries())
+	cfg := RetryConfig{MaxRetries: 3, BaseDelay: 50 * time.Millisecond, MaxDelay: 2 * time.Second, JitterFactor: 0.1}
+	policy := NewDSQLTxRetryPolicy(&RetryManager{config: cfg})
+	require.Equal(t, 3, policy.maxRetries)
+	require.Equal(t, 50*time.Millisecond, policy.baseDelay)
+	require.Equal(t, 2*time.Second, policy.maxDelay)
+	require.InDelta(t, 0.1, policy.jitterFactor, 0.0001)
 }
 
 func TestDSQLTxRetryPolicy_Backoff(t *testing.T) {
-	cfg := RetryConfig{
-		BaseDelay:    100 * time.Millisecond,
-		MaxDelay:     1 * time.Second,
-		JitterFactor: 0, // No jitter for predictable testing
-	}
-	rm := &RetryManager{config: cfg}
-	policy := NewDSQLTxRetryPolicy(rm)
-	
-	tests := []struct {
-		attempt  int
-		expected time.Duration
+	cfg := RetryConfig{MaxRetries: 6, BaseDelay: 100 * time.Millisecond, MaxDelay: time.Second}
+	var policy sqlplugin.TxRetryPolicy = NewDSQLTxRetryPolicy(&RetryManager{config: cfg})
+	conflict := createPgError("40001", "serialization failure")
+	for _, tc := range []struct {
+		attempt int
+		delay   time.Duration
+		retry   bool
 	}{
-		{0, 100 * time.Millisecond},
-		{1, 200 * time.Millisecond},
-		{2, 400 * time.Millisecond},
-		{3, 800 * time.Millisecond},
-		{4, 1 * time.Second}, // Capped at maxDelay
-		{5, 1 * time.Second}, // Still capped
-	}
-	
-	for _, tt := range tests {
-		t.Run(fmt.Sprintf("attempt_%d", tt.attempt), func(t *testing.T) {
-			delay := policy.Backoff(tt.attempt)
-			assert.Equal(t, tt.expected, delay)
+		{1, 100 * time.Millisecond, true},
+		{2, 200 * time.Millisecond, true},
+		{3, 400 * time.Millisecond, true},
+		{4, 800 * time.Millisecond, true},
+		{5, time.Second, true},
+		{6, time.Second, true},
+		{7, 0, false},
+	} {
+		t.Run(fmt.Sprintf("attempt_%d", tc.attempt), func(t *testing.T) {
+			delay, retry := policy.TxRetryBackoff("test", tc.attempt, conflict)
+			require.Equal(t, tc.retry, retry)
+			require.Equal(t, tc.delay, delay)
 		})
 	}
 }
 
-func TestDSQLTxRetryPolicy_RetryableTxError(t *testing.T) {
-	cfg := DefaultRetryConfig()
-	rm := &RetryManager{config: cfg}
-	policy := NewDSQLTxRetryPolicy(rm)
-	
-	tests := []struct {
-		name     string
-		err      error
-		expected bool
+func TestDSQLTxRetryPolicy_NoRetries(t *testing.T) {
+	policy := NewDSQLTxRetryPolicy(&RetryManager{config: RetryConfig{MaxRetries: 0}})
+	delay, retry := policy.TxRetryBackoff("test", 1, createPgError("40001", "conflict"))
+	require.False(t, retry)
+	require.Zero(t, delay)
+}
+
+func TestDSQLTxRetryPolicy_IsRetryableTxError(t *testing.T) {
+	policy := NewDSQLTxRetryPolicy(&RetryManager{config: DefaultRetryConfig()})
+	conflict := createPgError("40001", "serialization failure")
+	condition := NewConditionFailedError(ConditionFailedShard, "test")
+	for _, tc := range []struct {
+		name      string
+		err       error
+		retryable bool
 	}{
-		{
-			name:     "nil error",
-			err:      nil,
-			expected: false,
-		},
-		{
-			name:     "condition failed error - not retryable",
-			err:      NewConditionFailedError(ConditionFailedShard, "test"),
-			expected: false,
-		},
-		{
-			name:     "serialization failure - retryable",
-			err:      createPgError("40001", "serialization failure"),
-			expected: true,
-		},
-		{
-			name:     "unsupported feature - not retryable",
-			err:      createPgError("0A000", "feature not supported"),
-			expected: false,
-		},
-		{
-			name:     "other postgres error - not retryable",
-			err:      createPgError("23505", "unique violation"),
-			expected: false,
-		},
-		{
-			name:     "generic error - not retryable",
-			err:      errors.New("generic error"),
-			expected: false,
-		},
-	}
-	
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := policy.RetryableTxError(tt.err)
-			assert.Equal(t, tt.expected, result)
+		{"nil", nil, false},
+		{"condition_failed", condition, false},
+		{"wrapped_condition_failed", fmt.Errorf("wrapped: %w", condition), false},
+		{"condition_and_conflict", errors.Join(condition, conflict), false},
+		{"serialization_failure", conflict, true},
+		{"wrapped_serialization_failure", fmt.Errorf("wrapped: %w", conflict), true},
+		{"unsupported_feature", createPgError("0A000", "unsupported"), false},
+		{"unique_violation", createPgError("23505", "duplicate"), false},
+		{"occ_code", createPgError("OC000", "conflict"), false},
+		{"generic", errors.New("SQLSTATE 40001"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.retryable, policy.IsRetryableTxError(tc.err))
 		})
 	}
 }
 
 func TestDSQLTxRetryPolicy_BackoffWithJitter(t *testing.T) {
-	cfg := RetryConfig{
-		BaseDelay:    100 * time.Millisecond,
-		MaxDelay:     1 * time.Second,
-		JitterFactor: 0.25, // 25% jitter
+	cfg := RetryConfig{MaxRetries: 5, BaseDelay: 100 * time.Millisecond, MaxDelay: time.Second, JitterFactor: 0.25}
+	policy := NewDSQLTxRetryPolicy(&RetryManager{config: cfg})
+	for range 100 {
+		delay, retry := policy.TxRetryBackoff("test", 2, createPgError("40001", "conflict"))
+		require.True(t, retry)
+		require.GreaterOrEqual(t, delay, 150*time.Millisecond)
+		require.LessOrEqual(t, delay, 250*time.Millisecond)
 	}
-	rm := &RetryManager{config: cfg}
-	policy := NewDSQLTxRetryPolicy(rm)
-	
-	// Test that jitter produces different values
-	delays := make([]time.Duration, 10)
-	for i := 0; i < 10; i++ {
-		delays[i] = policy.Backoff(1) // attempt 1 should be ~200ms with jitter
+}
+
+func TestDSQLTxRetryPolicy_Metrics(t *testing.T) {
+	handler := metricstest.NewCaptureHandler()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+	cfg := RetryConfig{MaxRetries: 1, BaseDelay: time.Millisecond}
+	policy := NewDSQLTxRetryPolicy(&RetryManager{config: cfg, metrics: NewDSQLMetrics(handler)})
+	conflict := createPgError("40001", "conflict")
+	delay, retry := policy.TxRetryBackoff("UpdateShard", 1, conflict)
+	require.True(t, retry)
+	require.Equal(t, time.Millisecond, delay)
+	_, retry = policy.TxRetryBackoff("UpdateShard", 2, conflict)
+	require.False(t, retry)
+	recordings := capture.Snapshot()
+	for _, name := range []string{"dsql_tx_conflict_total", "dsql_tx_retry_total", "dsql_tx_backoff", "dsql_tx_error_class_total", "dsql_tx_exhausted_total"} {
+		require.Len(t, recordings[name], 1, name)
+		require.Equal(t, "UpdateShard", recordings[name][0].Tags["operation"])
 	}
-	
-	// Check that we get some variation (not all the same)
-	allSame := true
-	for i := 1; i < len(delays); i++ {
-		if delays[i] != delays[0] {
-			allSame = false
-			break
-		}
-	}
-	assert.False(t, allSame, "Expected jitter to produce different delay values")
-	
-	// Check that all delays are within reasonable bounds (base ± jitter)
-	baseDelay := 200 * time.Millisecond // 2^1 * 100ms
-	minDelay := time.Duration(float64(baseDelay) * 0.75) // -25% jitter
-	maxDelay := time.Duration(float64(baseDelay) * 1.25) // +25% jitter
-	
-	for i, delay := range delays {
-		assert.GreaterOrEqual(t, delay, minDelay, "Delay %d too small: %v", i, delay)
-		assert.LessOrEqual(t, delay, maxDelay, "Delay %d too large: %v", i, delay)
-	}
+	require.Equal(t, "1", recordings["dsql_tx_retry_total"][0].Tags["attempt"])
+	require.Equal(t, ErrorTypeRetryable.String(), recordings["dsql_tx_error_class_total"][0].Tags["error_class"])
+	require.Equal(t, time.Millisecond, recordings["dsql_tx_backoff"][0].Value)
 }

@@ -34,7 +34,6 @@ func TestRetryManager_Basic(t *testing.T) {
 	// Test that RetryManager is created with correct config
 	assert.Equal(t, 2, rm.config.MaxRetries)
 	assert.Equal(t, 1*time.Millisecond, rm.config.BaseDelay)
-	assert.NotNil(t, rm.rng)
 }
 
 func TestRetryManager_SuccessfulOperation(t *testing.T) {
@@ -49,7 +48,6 @@ func TestRetryManager_SuccessfulOperation(t *testing.T) {
 	// Verify the retry manager was created with correct configuration
 	assert.Equal(t, 2, rm.config.MaxRetries)
 	assert.Equal(t, 1*time.Millisecond, rm.config.BaseDelay)
-	assert.NotNil(t, rm.rng)
 }
 
 func TestRetryManager_ConditionFailedError_NoRetry(t *testing.T) {

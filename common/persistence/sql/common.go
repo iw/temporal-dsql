@@ -8,9 +8,9 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
-
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
@@ -19,49 +19,19 @@ import (
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 )
 
-type TxRetryPolicy interface {
-	MaxRetries() int
-	Backoff(attempt int) time.Duration
-	RetryableTxError(err error) bool
-}
-
-// TxRetryMetrics is an optional interface that TxRetryPolicy implementations can
-// implement to receive callbacks for metrics recording. This allows plugins like
-// DSQL to record retry metrics without modifying the core retry loop.
-type TxRetryMetrics interface {
-	// OnRetry is called when a retry attempt is about to be made
-	OnRetry(operation string, attempt int, err error, backoff time.Duration)
-	// OnExhausted is called when all retry attempts have been exhausted
-	OnExhausted(operation string, attempts int, err error)
-	// OnSuccess is called when the operation succeeds (with attempt count)
-	OnSuccess(operation string, attempts int)
-}
-
-type TxRetryPolicyProvider interface {
-	TxRetryPolicy() TxRetryPolicy
-}
-
 // TODO: Rename all SQL Managers to Stores
 type SqlStore struct {
 	DB         sqlplugin.DB
 	logger     log.Logger
 	serializer serialization.Serializer
-
-	// txRetryPolicy is optional. When nil, txExecute behavior is unchanged.
-	// DSQL plugin provides a policy to enable tx-boundary retry on SQLSTATE 40001.
-	txRetryPolicy TxRetryPolicy
 }
 
 func NewSQLStore(db sqlplugin.DB, logger log.Logger, serializer serialization.Serializer) SqlStore {
-	store := SqlStore{
+	return SqlStore{
 		DB:         db,
 		logger:     logger,
 		serializer: serializer,
 	}
-	if p, ok := db.(TxRetryPolicyProvider); ok {
-		store.txRetryPolicy = p.TxRetryPolicy()
-	}
-	return store
 }
 
 func (m *SqlStore) GetName() string {
@@ -81,10 +51,52 @@ func (m *SqlStore) Close() {
 	}
 }
 
-func (m *SqlStore) txExecuteOnce(ctx context.Context, operation string, f func(tx sqlplugin.Tx) error) error {
+func (m *SqlStore) txExecute(ctx context.Context, operation string, f func(tx sqlplugin.Tx) error) error {
+	policy, ok := m.DB.(sqlplugin.TxRetryPolicy)
+	if !ok {
+		_, err := m.txExecuteOnce(ctx, operation, f, nil)
+		return err
+	}
+	for attempt := 1; ; attempt++ {
+		retryable, err := m.txExecuteOnce(ctx, operation, f, policy)
+		if !retryable {
+			return err
+		}
+
+		delay, retry := policy.TxRetryBackoff(operation, attempt, err)
+		if retry && ctx.Err() == nil {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+			}
+			timer.Stop()
+			if ctx.Err() == nil {
+				continue
+			}
+		}
+		return &serviceerror.ResourceExhausted{
+			Cause:   enumspb.RESOURCE_EXHAUSTED_CAUSE_SYSTEM_OVERLOADED,
+			Message: fmt.Sprintf("%s failed. Transaction retries stopped after %d attempts. Error: %v", operation, attempt, err),
+		}
+	}
+}
+
+func (m *SqlStore) txExecuteOnce(
+	ctx context.Context,
+	operation string,
+	f func(tx sqlplugin.Tx) error,
+	policy sqlplugin.TxRetryPolicy,
+) (retryable bool, err error) {
 	tx, err := m.DB.BeginTx(ctx)
 	if err != nil {
-		return serviceerror.NewUnavailablef("%s failed. Failed to start transaction. Error: %v", operation, err)
+		if policy != nil && policy.IsRetryableTxError(err) {
+			return true, err
+		}
+		if _, ok := err.(*serviceerror.ResourceExhausted); ok {
+			return false, err
+		}
+		return false, serviceerror.NewUnavailablef("%s failed. Failed to start transaction. Error: %v", operation, err)
 	}
 	err = f(tx)
 	if err != nil {
@@ -93,6 +105,9 @@ func (m *SqlStore) txExecuteOnce(ctx context.Context, operation string, f func(t
 			m.logger.Error("transaction rollback error", tag.Error(rollBackErr))
 		}
 
+		if policy != nil && policy.IsRetryableTxError(err) {
+			return true, err
+		}
 		switch err.(type) {
 		case *persistence.ConditionFailedError,
 			*persistence.CurrentWorkflowConditionFailedError,
@@ -100,68 +115,20 @@ func (m *SqlStore) txExecuteOnce(ctx context.Context, operation string, f func(t
 			*serviceerror.NamespaceAlreadyExists,
 			*persistence.ShardOwnershipLostError,
 			*serviceerror.Unavailable,
+			*serviceerror.ResourceExhausted,
 			*serviceerror.NotFound:
-			return err
+			return false, err
 		default:
-			return serviceerror.NewUnavailablef("%v: %v", operation, err)
+			return false, serviceerror.NewUnavailablef("%v: %v", operation, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return serviceerror.NewUnavailablef("%s operation failed. Failed to commit transaction. Error: %v", operation, err)
+		if policy != nil && policy.IsRetryableTxError(err) {
+			return true, err
+		}
+		return false, serviceerror.NewUnavailablef("%s operation failed. Failed to commit transaction. Error: %v", operation, err)
 	}
-	return nil
-}
-
-func (m *SqlStore) txExecute(ctx context.Context, operation string, f func(tx sqlplugin.Tx) error) error {
-	// Default behavior for existing SQL plugins (Postgres/MySQL/etc.) remains unchanged.
-	if m.txRetryPolicy == nil {
-		return m.txExecuteOnce(ctx, operation, f)
-	}
-
-	// Check if policy supports metrics callbacks
-	metricsPolicy, hasMetrics := m.txRetryPolicy.(TxRetryMetrics)
-
-	maxRetries := m.txRetryPolicy.MaxRetries()
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		err := m.txExecuteOnce(ctx, operation, f)
-		if err == nil {
-			// Record success with attempt count (attempt is 0-indexed, so +1 for human-readable count)
-			if hasMetrics {
-				metricsPolicy.OnSuccess(operation, attempt+1)
-			}
-			return nil
-		}
-		lastErr = err
-
-		// Do not retry context cancellation.
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-
-		// Only retry when policy says it's retryable.
-		if !m.txRetryPolicy.RetryableTxError(err) || attempt == maxRetries {
-			// Record exhausted if we hit max retries on a retryable error
-			if hasMetrics && m.txRetryPolicy.RetryableTxError(err) && attempt == maxRetries {
-				metricsPolicy.OnExhausted(operation, attempt+1, err)
-			}
-			return err
-		}
-
-		delay := m.txRetryPolicy.Backoff(attempt)
-
-		// Record retry attempt
-		if hasMetrics {
-			metricsPolicy.OnRetry(operation, attempt+1, err, delay)
-		}
-
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return lastErr
+	return false, nil
 }
 
 func gobSerialize(x any) ([]byte, error) {
