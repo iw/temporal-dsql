@@ -5,10 +5,22 @@ import (
 	"database/sql"
 	"strconv"
 	"strings"
+	"time"
 
 	p "go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 )
+
+// DSQL returns host_id as UUID text; membership callers require its 16-byte representation.
+type dsqlClusterMembershipRow struct {
+	HostID        string        `db:"host_id"`
+	RPCAddress    string        `db:"rpc_address"`
+	RPCPort       uint16        `db:"rpc_port"`
+	Role          p.ServiceType `db:"role"`
+	SessionStart  time.Time     `db:"session_start"`
+	LastHeartbeat time.Time     `db:"last_heartbeat"`
+	RecordExpiry  time.Time     `db:"record_expiry"`
+}
 
 const constMetadataPartition = 0
 const constMembershipPartition = 0
@@ -238,17 +250,24 @@ func (pdb *db) GetClusterMembers(
 
 	compiledQryString := queryString.String()
 
-	var rows []sqlplugin.ClusterMembershipRow
-	err := pdb.SelectContext(ctx, &rows,
+	var dsqlRows []dsqlClusterMembershipRow
+	err := pdb.SelectContext(ctx, &dsqlRows,
 		compiledQryString,
 		operands...)
 	if err != nil {
 		return nil, err
 	}
-	for i := range rows {
-		rows[i].SessionStart = pdb.converter.FromPostgreSQLDateTime(rows[i].SessionStart)
-		rows[i].LastHeartbeat = pdb.converter.FromPostgreSQLDateTime(rows[i].LastHeartbeat)
-		rows[i].RecordExpiry = pdb.converter.FromPostgreSQLDateTime(rows[i].RecordExpiry)
+	rows := make([]sqlplugin.ClusterMembershipRow, len(dsqlRows))
+	for i, row := range dsqlRows {
+		rows[i] = sqlplugin.ClusterMembershipRow{
+			HostID:        uuidStringToBytes(row.HostID),
+			RPCAddress:    row.RPCAddress,
+			RPCPort:       row.RPCPort,
+			Role:          row.Role,
+			SessionStart:  pdb.converter.FromPostgreSQLDateTime(row.SessionStart),
+			LastHeartbeat: pdb.converter.FromPostgreSQLDateTime(row.LastHeartbeat),
+			RecordExpiry:  pdb.converter.FromPostgreSQLDateTime(row.RecordExpiry),
+		}
 	}
 	return rows, nil
 }

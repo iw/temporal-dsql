@@ -197,19 +197,25 @@ func (pdb *db) SelectFromHistoryTree(
 	return rows, err
 }
 
-// PaginateBranchesFromHistoryTree reads up to page.Limit rows from the history_tree table sorted by their primary key,
-// while skipping the first page.Offset rows.
+// PaginateBranchesFromHistoryTree reads up to page.Limit rows after the supplied primary key.
 func (pdb *db) PaginateBranchesFromHistoryTree(
 	ctx context.Context,
 	page sqlplugin.HistoryTreeBranchPage,
 ) ([]sqlplugin.HistoryTreeRow, error) {
+	treeID, branchID := NilUUID, NilUUID
+	if len(page.TreeID) > 0 {
+		treeID = UUIDToString(page.TreeID)
+	}
+	if len(page.BranchID) > 0 {
+		branchID = UUIDToString(page.BranchID)
+	}
 	var rows []sqlplugin.HistoryTreeRow
 	err := pdb.SelectContext(ctx,
 		&rows,
 		paginateBranchesQuery,
 		page.ShardID,
-		UUIDToString(page.TreeID),
-		UUIDToString(page.BranchID),
+		treeID,
+		branchID,
 		page.Limit,
 	)
 	return rows, err
