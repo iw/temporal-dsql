@@ -6,6 +6,8 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +24,8 @@ const (
 
 var shardTestDriverID atomic.Int64
 
+var notificationVersionCondition = regexp.MustCompile(`\bnotification_version\s*=\s*\$(\d+)`)
+
 type shardTestDriver struct {
 	mu           sync.Mutex
 	rangeID      int64
@@ -35,6 +39,8 @@ type shardTestDriver struct {
 	execErrors   []error
 	onCommit     func()
 	onRollback   func()
+	arguments    [][]driver.Value
+	versions     map[string]int64
 }
 
 func newShardTestDB(t *testing.T, rangeID int64) (*sqlx.DB, *shardTestDriver) {
@@ -52,12 +58,23 @@ func (d *shardTestDriver) Open(string) (driver.Conn, error) {
 	return &shardTestConn{db: d}, nil
 }
 
-func (d *shardTestDriver) record(query string) string {
+func (d *shardTestDriver) record(query string, args ...driver.NamedValue) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	query = strings.Join(strings.Fields(query), " ")
 	d.statements = append(d.statements, query)
+	values := make([]driver.Value, len(args))
+	for i, arg := range args {
+		values[i] = arg.Value
+	}
+	d.arguments = append(d.arguments, values)
 	return query
+}
+
+func (d *shardTestDriver) statementArgs(index int) []driver.Value {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]driver.Value(nil), d.arguments[index]...)
 }
 
 func (d *shardTestDriver) snapshot() (statements []string, commits, rollbacks int) {
@@ -90,17 +107,25 @@ func (c *shardTestConn) Begin() (driver.Tx, error) {
 	return &shardTestTx{db: c.db}, nil
 }
 
-func (c *shardTestConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
-	switch c.db.record(query) {
+func (c *shardTestConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	query = c.db.record(query, args...)
+	c.db.mu.Lock()
+	defer c.db.mu.Unlock()
+	switch query {
 	case shardTestLockQuery, shardTestReadLockQuery, "SELECT range_id FROM shards WHERE shard_id = $1":
-		return &shardTestRows{rangeID: c.db.rangeID}, nil
+		return &shardTestRows{column: "range_id", value: c.db.rangeID}, nil
+	case "SELECT notification_version FROM namespace_metadata WHERE partition_id=$1 FOR UPDATE":
+		return &shardTestRows{column: "notification_version", value: c.db.versions["namespace_metadata"]}, nil
 	default:
 		return nil, fmt.Errorf("unexpected query: %s", query)
 	}
 }
 
-func (c *shardTestConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
-	if !strings.HasPrefix(c.db.record(query), "UPDATE shards ") {
+func (c *shardTestConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	query = c.db.record(query, args...)
+	if !strings.HasPrefix(query, "UPDATE shards ") &&
+		!strings.HasPrefix(query, "UPDATE namespaces ") &&
+		!strings.HasPrefix(query, "UPDATE namespace_metadata ") {
 		return nil, fmt.Errorf("unexpected exec: %s", query)
 	}
 	c.db.mu.Lock()
@@ -110,6 +135,20 @@ func (c *shardTestConn) ExecContext(_ context.Context, query string, _ []driver.
 		c.db.execErrors = c.db.execErrors[1:]
 		if err != nil {
 			return nil, err
+		}
+	}
+	// Model only version predicates against the fixture's stored table versions.
+	table := strings.Fields(query)[1]
+	if version, ok := c.db.versions[table]; ok {
+		_, where, _ := strings.Cut(query, " WHERE ")
+		if match := notificationVersionCondition.FindStringSubmatch(where); match != nil {
+			index, err := strconv.Atoi(match[1])
+			if err != nil || index < 1 || index > len(args) {
+				return nil, fmt.Errorf("invalid notification_version argument: %s", match[1])
+			}
+			if args[index-1].Value != version {
+				return driver.RowsAffected(0), nil
+			}
 		}
 	}
 	return driver.RowsAffected(1), nil
@@ -145,18 +184,19 @@ func (tx *shardTestTx) Rollback() error {
 }
 
 type shardTestRows struct {
-	rangeID int64
-	done    bool
+	column string
+	value  int64
+	done   bool
 }
 
-func (r *shardTestRows) Columns() []string { return []string{"range_id"} }
+func (r *shardTestRows) Columns() []string { return []string{r.column} }
 func (r *shardTestRows) Close() error      { return nil }
 
 func (r *shardTestRows) Next(values []driver.Value) error {
 	if r.done {
 		return io.EOF
 	}
-	values[0] = r.rangeID
+	values[0] = r.value
 	r.done = true
 	return nil
 }
