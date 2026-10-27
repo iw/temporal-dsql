@@ -92,9 +92,6 @@ common/persistence/sql/sqlplugin/dsql/
 └── session/
     └── session.go                 # Connection session management
 
-common/persistence/sql/sqlplugin/
-└── idgenerator.go                 # Snowflake ID generator (shared, used by DSQL for buffered_events)
-
 tools/poolsim/                     # Discrete event simulator for reservoir behavior
 ├── main.go                        # Entry point and simulation runner
 ├── config.go                      # Configuration loading and defaults
@@ -166,7 +163,7 @@ runIDStr := row.RunID.String()
 
 ### BIGSERIAL Removal
 
-DSQL doesn't support auto-increment columns. The `buffered_events.id` column was changed from `BIGSERIAL` to `BIGINT` with application-level ID generation:
+The `buffered_events.id` column was changed from `BIGSERIAL` to `BIGINT`, and the plugin allocates the IDs itself:
 
 ```sql
 -- PostgreSQL
@@ -176,20 +173,7 @@ id BIGSERIAL NOT NULL
 id BIGINT NOT NULL
 ```
 
-**Snowflake ID Generator** (defined in `common/persistence/sql/sqlplugin/idgenerator.go`, shared across plugins):
-
-```go
-type SnowflakeIDGenerator struct {
-    nodeID     int64  // 10 bits: 0-1023
-    sequence   int64  // 12 bits: 0-4095
-    lastTime   int64  // 41 bits: milliseconds
-}
-
-// Generates 4096 unique IDs per millisecond per node
-func (g *SnowflakeIDGenerator) NextID(ctx context.Context, table string) (int64, error)
-```
-
-The DSQL plugin initializes the generator in `db.go` using a hostname-derived node ID for distributed uniqueness, with a random ID generator as fallback.
+**Per-run IDs** (`InsertIntoBufferedEvents` in `execution.go`): the ID only orders a run's buffered events, so the plugin numbers them per run. Inside the caller's transaction, it reads `COALESCE(MAX(id), 0)` for the run and numbers the new rows from there. The same transaction updates the run's executions row, so two transactions appending to the same run conflict at commit and one of them is retried. Schema 1.2 dropped the global unique index on `buffered_events(id)`.
 
 ### Other Schema Changes
 

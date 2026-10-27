@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	shardTestLockQuery     = "SELECT range_id FROM shards WHERE shard_id = $1 FOR UPDATE"
-	shardTestReadLockQuery = "SELECT range_id FROM shards WHERE shard_id = $1 FOR KEY SHARE"
+	shardTestLockQuery         = "SELECT range_id FROM shards WHERE shard_id = $1 FOR UPDATE"
+	shardTestReadLockQuery     = "SELECT range_id FROM shards WHERE shard_id = $1 FOR KEY SHARE"
+	bufferedEventsTestMaxQuery = "SELECT COALESCE(MAX(id), 0) FROM buffered_events WHERE shard_id = $1 AND namespace_id = $2 AND workflow_id = $3 AND run_id = $4"
 )
 
 var shardTestDriverID atomic.Int64
@@ -27,20 +28,29 @@ var shardTestDriverID atomic.Int64
 var notificationVersionCondition = regexp.MustCompile(`\bnotification_version\s*=\s*\$(\d+)`)
 
 type shardTestDriver struct {
-	mu           sync.Mutex
-	rangeID      int64
-	statements   []string
-	commits      int
-	rollbacks    int
-	begins       int
-	beginErrors  []error
-	commitErrors []error
-	commitError  error
-	execErrors   []error
-	onCommit     func()
-	onRollback   func()
-	arguments    [][]driver.Value
-	versions     map[string]int64
+	mu                  sync.Mutex
+	rangeID             int64
+	statements          []string
+	commits             int
+	rollbacks           int
+	begins              int
+	beginErrors         []error
+	commitErrors        []error
+	commitError         error
+	execErrors          []error
+	onCommit            func()
+	onRollback          func()
+	arguments           [][]driver.Value
+	versions            map[string]int64
+	bufferedEventMaxIDs map[bufferedEventsTestRun]int64
+	queryErrors         []error
+}
+
+type bufferedEventsTestRun struct {
+	shardID     int64
+	namespaceID string
+	workflowID  string
+	runID       string
 }
 
 func newShardTestDB(t *testing.T, rangeID int64) (*sqlx.DB, *shardTestDriver) {
@@ -111,7 +121,22 @@ func (c *shardTestConn) QueryContext(_ context.Context, query string, args []dri
 	query = c.db.record(query, args...)
 	c.db.mu.Lock()
 	defer c.db.mu.Unlock()
+	if len(c.db.queryErrors) > 0 {
+		err := c.db.queryErrors[0]
+		c.db.queryErrors = c.db.queryErrors[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	switch query {
+	case bufferedEventsTestMaxQuery:
+		run := bufferedEventsTestRun{
+			shardID:     args[0].Value.(int64),
+			namespaceID: args[1].Value.(string),
+			workflowID:  args[2].Value.(string),
+			runID:       args[3].Value.(string),
+		}
+		return &shardTestRows{column: "coalesce", value: c.db.bufferedEventMaxIDs[run]}, nil
 	case shardTestLockQuery, shardTestReadLockQuery, "SELECT range_id FROM shards WHERE shard_id = $1":
 		return &shardTestRows{column: "range_id", value: c.db.rangeID}, nil
 	case "SELECT notification_version FROM namespace_metadata WHERE partition_id=$1 FOR UPDATE":
@@ -125,7 +150,8 @@ func (c *shardTestConn) ExecContext(_ context.Context, query string, args []driv
 	query = c.db.record(query, args...)
 	if !strings.HasPrefix(query, "UPDATE shards ") &&
 		!strings.HasPrefix(query, "UPDATE namespaces ") &&
-		!strings.HasPrefix(query, "UPDATE namespace_metadata ") {
+		!strings.HasPrefix(query, "UPDATE namespace_metadata ") &&
+		!strings.HasPrefix(query, "INSERT INTO buffered_events(") {
 		return nil, fmt.Errorf("unexpected exec: %s", query)
 	}
 	c.db.mu.Lock()

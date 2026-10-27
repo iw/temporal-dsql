@@ -7,10 +7,10 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 ## Key Capabilities
 
 - **IAM authentication** with automatic token refresh — no stored passwords
-- **Optimistic concurrency control** — DSQL reports conflicts at commit; the transaction-level retry doesn't fire yet ([#24](https://github.com/iw/temporal-dsql/issues/24))
+- **Optimistic concurrency control** — DSQL reports conflicts at commit, and the plugin retries the whole transaction
 - **Connection Reservoir** for rate-limit-aware connection management
 - **Distributed coordination** via DynamoDB for multi-service deployments (opt-in; see [#33](https://github.com/iw/temporal-dsql/issues/33) and [#40](https://github.com/iw/temporal-dsql/issues/40))
-- **Snowflake ID generation** for `buffered_events` IDs, which can collide across transactions ([#34](https://github.com/iw/temporal-dsql/issues/34))
+- **Per-run buffered event IDs**, allocated inside the transaction that writes them
 
 ## Documentation
 
@@ -23,13 +23,13 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 
 ## Quick Reference
 
-**Schema version:** 1.1
+**Schema version:** 1.2
 
 **How the plugin handles DSQL differences:**
 
 | PostgreSQL Feature | Aurora DSQL Today | Plugin Today |
 |-------------------|-------------------|--------------|
-| `BIGSERIAL` | Sequences and identity columns supported since February 2026 | Snowflake IDs ([#34](https://github.com/iw/temporal-dsql/issues/34)) |
+| `BIGSERIAL` | Sequences and identity columns supported since February 2026 | `buffered_events` IDs allocated per run |
 | `CHECK` constraints | Supported | Omitted from the schema; validated in the application |
 | Pessimistic locking | Not supported; conflicts surface at commit | Transactions that fail with SQLSTATE 40001 are retried |
 | `FOR UPDATE` on JOINs | Supported since August 2026 | Split into single-table queries |

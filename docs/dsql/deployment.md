@@ -11,7 +11,7 @@ This guide covers deploying Temporal with Aurora DSQL as the persistence layer, 
 
 ## 1. Schema Setup
 
-**Current schema version: 1.1**
+**Current schema version: 1.2**
 
 ```bash
 export CLUSTER_ENDPOINT="your-cluster.dsql.us-east-1.on.aws"
@@ -23,7 +23,7 @@ export REGION="us-east-1"
     --region "$REGION" \
     setup-schema \
     --schema-name "dsql/temporal" \
-    --version 1.1
+    --version 1.2
 
 # Full reset (drops and recreates — use with caution)
 ./temporal-dsql-tool \
@@ -31,11 +31,26 @@ export REGION="us-east-1"
     --region "$REGION" \
     setup-schema \
     --schema-name "dsql/temporal" \
-    --version 1.1 \
+    --version 1.2 \
     --overwrite
 ```
 
 The tool uses IAM authentication automatically and has the DSQL schema embedded.
+
+### Upgrading from v1.1
+
+Apply the schema change before you deploy the new server:
+
+```bash
+./temporal-dsql-tool \
+    --endpoint "$CLUSTER_ENDPOINT" \
+    --region "$REGION" \
+    update-schema \
+    --schema-name "dsql/temporal" \
+    --target-version 1.2
+```
+
+v1.2 drops the global unique index on `buffered_events(id)`, so the server can number each run's buffered events from 1. The previous server version also runs on a 1.2 schema, and the new version refuses to start until the schema is at 1.2.
 
 ### Upgrading from v1.0
 
@@ -45,10 +60,10 @@ The tool uses IAM authentication automatically and has the DSQL schema embedded.
     --region "$REGION" \
     update-schema \
     --schema-name "dsql/temporal" \
-    --target-version 1.1
+    --target-version 1.2
 ```
 
-v1.1 adds the `current_chasm_executions` table for CHASM support (standalone activities, schedulers).
+v1.1 adds the `current_chasm_executions` table for CHASM support (standalone activities, schedulers). This upgrade currently fails at the v1.1 step ([#28](https://github.com/iw/temporal-dsql/issues/28)).
 
 ## 2. Static Configuration
 

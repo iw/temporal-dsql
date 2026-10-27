@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"time"
 
 	"errors"
@@ -13,7 +12,6 @@ import (
 	"github.com/jmoiron/sqlx"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
-	"go.temporal.io/server/common/clock"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
@@ -46,7 +44,6 @@ type db struct {
 	resolver        resolver.ServiceResolver
 	converter       DataConverter
 	retryManager    *RetryManager
-	idGenerator     sqlplugin.IDGenerator   // ID generator for tables without BIGSERIAL support
 	poolMetrics     DSQLMetrics             // Pool metrics collector (only for main DB, not transactions)
 	reservoirHandle *driver.ReservoirHandle // Reservoir handle for lifecycle management (only for main DB) - DEPRECATED, use reservoirHolder
 	reservoirHolder *reservoirHandleHolder  // Holder for reservoir handle that survives reconnects
@@ -91,18 +88,6 @@ func newDBWithDependencies(
 		logger:   logger,
 	}
 	mdb.converter = &converter{}
-
-	// Initialize Snowflake ID generator for DSQL (no BIGSERIAL support)
-	// Use hostname-based node ID for distributed uniqueness
-	hostname, _ := os.Hostname()
-	nodeID := sqlplugin.GetNodeIDFromHostname(hostname)
-	idGen, err := sqlplugin.NewSnowflakeIDGenerator(nodeID, clock.NewRealTimeSource())
-	if err != nil {
-		// Fallback to random ID generator if Snowflake fails
-		mdb.idGenerator = sqlplugin.NewRandomIDGenerator()
-	} else {
-		mdb.idGenerator = idGen
-	}
 
 	// Initialize RetryManager if we have logger and metrics
 	// CRITICAL FIX: Remove the tx == nil condition to enable retry for transactions

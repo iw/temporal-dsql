@@ -76,9 +76,6 @@ CREATE TABLE buffered_events (
   PRIMARY KEY (shard_id, namespace_id, workflow_id, run_id, id)
 );
 
--- Create unique index for id field (replaces UNIQUE constraint)
-CREATE UNIQUE INDEX ASYNC idx_buffered_events_id ON buffered_events(id);
-
 CREATE TABLE tasks (
   range_hash BIGINT NOT NULL,
   task_queue_id UUID NOT NULL, -- Changed from BYTEA to UUID
