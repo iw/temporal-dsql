@@ -3,6 +3,8 @@ package driver
 import (
 	"context"
 	"database/sql/driver"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,19 +14,29 @@ import (
 
 // mockLeaseReleaser is a test implementation of LeaseReleaser
 type mockLeaseReleaser struct {
+	mu           sync.Mutex
 	releaseCalls atomic.Int64
 	releaseErr   error
 	releasedIDs  []string
 }
 
 func (m *mockLeaseReleaser) Release(ctx context.Context, leaseID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.releaseCalls.Add(1)
 	m.releasedIDs = append(m.releasedIDs, leaseID)
 	return m.releaseErr
 }
 
+func (m *mockLeaseReleaser) getReleasedIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.releasedIDs)
+}
+
 // mockReservoirMetrics is a test implementation of ReservoirMetrics
 type mockReservoirMetrics struct {
+	mu                sync.Mutex
 	sizeRecorded      atomic.Int64
 	targetRecorded    atomic.Int64
 	checkouts         atomic.Int64
@@ -44,19 +56,37 @@ func (m *mockReservoirMetrics) RecordReservoirTarget(target int) {
 func (m *mockReservoirMetrics) IncReservoirCheckouts() { m.checkouts.Add(1) }
 func (m *mockReservoirMetrics) IncReservoirEmpty()     { m.emptyHits.Add(1) }
 func (m *mockReservoirMetrics) IncReservoirDiscards(reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.discards.Add(1)
 	m.discardReasons = append(m.discardReasons, reason)
 }
 func (m *mockReservoirMetrics) IncReservoirRefills() { m.refills.Add(1) }
 func (m *mockReservoirMetrics) IncReservoirRefillFailures(reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.refillFailures.Add(1)
 	m.refillFailReasons = append(m.refillFailReasons, reason)
 }
 func (m *mockReservoirMetrics) RecordCheckoutLatency(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.checkoutLatencies = append(m.checkoutLatencies, d)
 }
 func (m *mockReservoirMetrics) RecordRefillerInflight(count int) {
 	// No-op for tests
+}
+
+func (m *mockReservoirMetrics) getDiscardReasons() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.discardReasons)
+}
+
+func (m *mockReservoirMetrics) getRefillFailReasons() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.refillFailReasons)
 }
 
 // TestPhysicalConn_ExpiresAt tests the ExpiresAt method
@@ -203,7 +233,7 @@ func TestReservoir_Return_Full(t *testing.T) {
 	// Reservoir should still be at capacity
 	require.Equal(t, 1, res.Len())
 	require.Equal(t, int64(1), metrics.discards.Load())
-	require.Contains(t, metrics.discardReasons, "reservoir_full")
+	require.Contains(t, metrics.getDiscardReasons(), "reservoir_full")
 	require.Equal(t, int64(1), leaseRel.releaseCalls.Load())
 }
 
@@ -227,7 +257,7 @@ func TestReservoir_GuardWindow_Checkout(t *testing.T) {
 	require.False(t, ok)
 	require.Nil(t, checkedOut)
 	require.Equal(t, int64(1), metrics.discards.Load())
-	require.Contains(t, metrics.discardReasons, "insufficient_remaining_lifetime")
+	require.Contains(t, metrics.getDiscardReasons(), "insufficient_remaining_lifetime")
 }
 
 // TestReservoir_GuardWindow_Return tests guard window enforcement on return
@@ -247,7 +277,7 @@ func TestReservoir_GuardWindow_Return(t *testing.T) {
 	// Connection should be discarded, not returned
 	require.Equal(t, 0, res.Len())
 	require.Equal(t, int64(1), metrics.discards.Load())
-	require.Contains(t, metrics.discardReasons, "insufficient_remaining_lifetime_on_return")
+	require.Contains(t, metrics.getDiscardReasons(), "insufficient_remaining_lifetime_on_return")
 }
 
 // TestReservoir_WaitCheckout tests the WaitCheckout method
@@ -303,7 +333,7 @@ func TestReservoir_ExpiredOnCheckout(t *testing.T) {
 	require.False(t, ok)
 	require.Nil(t, checkedOut)
 	require.Equal(t, int64(1), metrics.discards.Load())
-	require.Contains(t, metrics.discardReasons, "expired_on_checkout")
+	require.Contains(t, metrics.getDiscardReasons(), "expired_on_checkout")
 }
 
 // TestReservoir_NilConnection tests handling of nil connection
@@ -348,7 +378,7 @@ func TestReservoir_LeaseRelease(t *testing.T) {
 	res.TryCheckout(now)
 
 	require.Equal(t, int64(1), leaseRel.releaseCalls.Load())
-	require.Contains(t, leaseRel.releasedIDs, "test-lease-123")
+	require.Contains(t, leaseRel.getReleasedIDs(), "test-lease-123")
 }
 
 // TestReservoir_Discard_ClosesConnection tests that discarded connections are closed
