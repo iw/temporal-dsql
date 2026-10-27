@@ -58,6 +58,9 @@ func (m *sqlExecutionStore) AppendHistoryNodes(
 				Msg: err.Error(),
 			}
 		default:
+			if _, ok := err.(*p.TransactionSizeLimitError); ok {
+				return err
+			}
 			if m.DB.IsDupEntryError(err) {
 				return &p.ConditionFailedError{Msg: fmt.Sprintf("AppendHistoryNodes: row already exist: %v", err)}
 			}
@@ -344,36 +347,35 @@ func (m *sqlExecutionStore) DeleteHistoryBranch(
 		return err
 	}
 
-	return m.txExecute(ctx, "DeleteHistoryBranch", func(tx sqlplugin.Tx) error {
-		_, err = tx.DeleteFromHistoryTree(ctx, sqlplugin.HistoryTreeDeleteFilter{
-			TreeID:   treeIDBytes,
-			BranchID: branchIDBytes,
-			ShardID:  request.ShardID,
-		})
+	// Keep the tree row until all nodes are deleted so retries and the scavenger
+	// can find partially deleted branches. Each range can commit bounded batches.
+	for _, br := range request.BranchRanges {
+		branchIDBytes, err := primitives.ParseUUID(br.BranchId)
 		if err != nil {
 			return err
 		}
 
-		// delete each branch range
-		for _, br := range request.BranchRanges {
-			branchIDBytes, err := primitives.ParseUUID(br.BranchId)
-			if err != nil {
-				return err
-			}
-
-			deleteFilter := sqlplugin.HistoryNodeDeleteFilter{
-				ShardID:   request.ShardID,
-				TreeID:    treeIDBytes,
-				BranchID:  branchIDBytes,
-				MinNodeID: br.BeginNodeId,
-			}
-			_, err = tx.RangeDeleteFromHistoryNode(ctx, deleteFilter)
-			if err != nil {
-				return err
-			}
+		deleteFilter := sqlplugin.HistoryNodeDeleteFilter{
+			ShardID:   request.ShardID,
+			TreeID:    treeIDBytes,
+			BranchID:  branchIDBytes,
+			MinNodeID: br.BeginNodeId,
 		}
-		return nil
+		_, err = m.DB.RangeDeleteFromHistoryNode(ctx, deleteFilter)
+		if err != nil {
+			return serviceerror.NewUnavailablef("DeleteHistoryBranch: %v", err)
+		}
+	}
+
+	_, err = m.DB.DeleteFromHistoryTree(ctx, sqlplugin.HistoryTreeDeleteFilter{
+		TreeID:   treeIDBytes,
+		BranchID: branchIDBytes,
+		ShardID:  request.ShardID,
 	})
+	if err != nil {
+		return serviceerror.NewUnavailablef("DeleteHistoryBranch: %v", err)
+	}
+	return nil
 }
 
 // getAllHistoryTreeBranchesPaginationToken represents the primary key of the latest row in the history_tree table that

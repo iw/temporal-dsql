@@ -124,6 +124,7 @@ func (pdb *db) conn() sqlplugin.Conn {
 // maybeConvertError preserves raw pg errors for tx-boundary retry classification.
 // Specifically, SQLSTATE 40001 (serialization/OCC conflict) and 0A000 (unsupported feature)
 // must remain visible to the SqlStore tx retry policy.
+// SQLSTATE 54000 is a non-retryable transaction or value size limit.
 // All other errors are converted using the Temporal sql handle.
 //
 // IMPORTANT: ErrReservoirEmpty is handled specially - it's a transient backpressure signal
@@ -148,6 +149,8 @@ func (pdb *db) maybeConvertError(err error) error {
 		switch pgErr.SQLState() {
 		case "40001", "0A000":
 			return err
+		case "54000":
+			return &persistence.TransactionSizeLimitError{Msg: err.Error()}
 		}
 	}
 	return pdb.handle.ConvertError(err)

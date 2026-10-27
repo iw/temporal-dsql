@@ -35,7 +35,7 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 | `FOR UPDATE` on JOINs | Supported since August 2026 | Split into single-table queries |
 | `FOR SHARE` | Not supported; `FOR KEY SHARE` supported since August 2026 | Shard read lock uses `FOR KEY SHARE` |
 
-**DSQL limits to keep in mind:** 3,000 modified rows and 10 MiB per transaction, 1 MiB per column value, 60-minute connections, and 100 new connections per second per cluster. Range deletes ([#26](https://github.com/iw/temporal-dsql/issues/26)) and large payloads ([#27](https://github.com/iw/temporal-dsql/issues/27)) can hit these limits today.
+**DSQL limits to keep in mind:** 3,000 modified rows and 10 MiB per transaction, 1 MiB per column value, 60-minute connections, and 100 new connections per second per cluster. The plugin deletes in batches to stay within the row limit, and reports a statement over a limit as `TransactionSizeLimitError`, which history doesn't retry.
 
 ## Architecture
 
