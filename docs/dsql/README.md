@@ -31,9 +31,9 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 |-------------------|-------------------|--------------|
 | `BIGSERIAL` | Sequences and identity columns supported since February 2026 | Snowflake IDs ([#34](https://github.com/iw/temporal-dsql/issues/34)) |
 | `CHECK` constraints | Supported | Omitted from the schema; validated in the application |
-| Pessimistic locking | Not supported; conflicts surface at commit | Transaction retry doesn't fire yet ([#24](https://github.com/iw/temporal-dsql/issues/24)) |
+| Pessimistic locking | Not supported; conflicts surface at commit | Transactions that fail with SQLSTATE 40001 are retried |
 | `FOR UPDATE` on JOINs | Supported since August 2026 | Split into single-table queries |
-| `FOR SHARE` | Not supported; `FOR KEY SHARE` supported since August 2026 | Shard read lock is a plain `SELECT` ([#23](https://github.com/iw/temporal-dsql/issues/23)) |
+| `FOR SHARE` | Not supported; `FOR KEY SHARE` supported since August 2026 | Shard read lock uses `FOR KEY SHARE` |
 
 **DSQL limits to keep in mind:** 3,000 modified rows and 10 MiB per transaction, 1 MiB per column value, 60-minute connections, and 100 new connections per second per cluster. Range deletes ([#26](https://github.com/iw/temporal-dsql/issues/26)) and large payloads ([#27](https://github.com/iw/temporal-dsql/issues/27)) can hit these limits today.
 
