@@ -3,7 +3,7 @@ package dsql
 import (
 	"context"
 	"database/sql"
-	"fmt"
+	"database/sql/driver"
 
 	"go.temporal.io/server/chasm"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
@@ -146,12 +146,13 @@ ORDER BY task_id LIMIT $5`
 	deleteVisibilityTaskQuery      = `DELETE FROM visibility_tasks WHERE shard_id = $1 AND task_id = $2`
 	rangeDeleteVisibilityTaskQuery = `DELETE FROM visibility_tasks WHERE shard_id = $1 AND task_id >= $2 AND task_id < $3`
 
-	bufferedEventsColumns     = `shard_id, namespace_id, workflow_id, run_id, data, data_encoding`
+	bufferedEventsColumns     = `id, shard_id, namespace_id, workflow_id, run_id, data, data_encoding`
 	createBufferedEventsQuery = `INSERT INTO buffered_events(` + bufferedEventsColumns + `)
-VALUES (:shard_id, :namespace_id, :workflow_id, :run_id, :data, :data_encoding)`
+VALUES ($1, $2, $3, $4, $5, $6, $7)`
 
-	deleteBufferedEventsQuery = `DELETE FROM buffered_events WHERE shard_id = $1 AND namespace_id = $2 AND workflow_id = $3 AND run_id = $4`
-	getBufferedEventsQuery    = `SELECT data, data_encoding FROM buffered_events WHERE shard_id = $1 AND namespace_id = $2 AND workflow_id = $3 AND run_id = $4 ORDER BY id`
+	deleteBufferedEventsQuery  = `DELETE FROM buffered_events WHERE shard_id = $1 AND namespace_id = $2 AND workflow_id = $3 AND run_id = $4`
+	getBufferedEventsQuery     = `SELECT data, data_encoding FROM buffered_events WHERE shard_id = $1 AND namespace_id = $2 AND workflow_id = $3 AND run_id = $4 ORDER BY id`
+	getMaxBufferedEventIDQuery = `SELECT COALESCE(MAX(id), 0) FROM buffered_events WHERE shard_id = $1 AND namespace_id = $2 AND workflow_id = $3 AND run_id = $4`
 
 	insertReplicationTaskDLQQuery = `
 INSERT INTO replication_tasks_dlq 
@@ -860,27 +861,35 @@ func (pdb *db) InsertIntoBufferedEvents(
 	ctx context.Context,
 	rows []sqlplugin.BufferedEventsRow,
 ) (sql.Result, error) {
-	// For buffered events, we need to handle multiple rows
-	// DSQL doesn't support BIGSERIAL, so we must generate IDs using Snowflake algorithm
+	type runKey struct {
+		shardID     int32
+		namespaceID string
+		workflowID  string
+		runID       string
+	}
+	maxIDs := make(map[runKey]int64)
+	// The caller's transaction also updates the execution row, so concurrent appends
+	// to the same run conflict at commit and retry with a fresh maximum.
 	for _, row := range rows {
-		namespaceIDStr := row.NamespaceID.String()
-		workflowIDStr := row.WorkflowID
-		runIDStr := row.RunID.String()
-
-		// Generate unique ID for this buffered event (DSQL requires application-level ID generation)
-		id, err := pdb.idGenerator.NextID(ctx, "buffered_events")
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate buffered_events ID: %w", err)
+		key := runKey{row.ShardID, row.NamespaceID.String(), row.WorkflowID, row.RunID.String()}
+		id, ok := maxIDs[key]
+		if !ok {
+			if err := pdb.GetContext(ctx, &id, getMaxBufferedEventIDQuery,
+				key.shardID, key.namespaceID, key.workflowID, key.runID,
+			); err != nil {
+				return nil, err
+			}
 		}
+		id++
+		maxIDs[key] = id
 
-		_, err = pdb.ExecContext(ctx,
-			`INSERT INTO buffered_events(id, shard_id, namespace_id, workflow_id, run_id, data, data_encoding)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		_, err := pdb.ExecContext(ctx,
+			createBufferedEventsQuery,
 			id,
-			row.ShardID,
-			namespaceIDStr,
-			workflowIDStr,
-			runIDStr,
+			key.shardID,
+			key.namespaceID,
+			key.workflowID,
+			key.runID,
 			row.Data,
 			row.DataEncoding,
 		)
@@ -888,8 +897,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 			return nil, err
 		}
 	}
-	// Return a dummy result since we can't return the actual result from multiple inserts
-	return nil, nil
+	return driver.RowsAffected(len(rows)), nil
 }
 
 // SelectFromBufferedEvents reads one or more rows from buffered_events table

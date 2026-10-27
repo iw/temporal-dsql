@@ -62,7 +62,7 @@
 #### Schema Compatibility
 - DSQL-compatible schema (`schema/dsql/temporal/schema.sql`)
 - BYTEA → UUID conversion for composite primary keys
-- BIGSERIAL → BIGINT with Snowflake ID generation (IDs can collide across transactions: [#34](https://github.com/iw/temporal-dsql/issues/34))
+- BIGSERIAL → BIGINT, with `buffered_events` IDs allocated per run inside the transaction
 - CHECK constraints omitted (DSQL now supports them)
 - INDEX ASYNC for non-blocking index creation
 
@@ -101,7 +101,7 @@
 
 ### Known Constraints
 
-1. **Sequences and Identity Columns**: Supported by DSQL since February 2026; the plugin still generates `buffered_events` IDs with Snowflake ([#34](https://github.com/iw/temporal-dsql/issues/34))
+1. **Sequences and Identity Columns**: Supported by DSQL since February 2026; the plugin doesn't use them, because `buffered_events` IDs only need to be unique within a run
 2. **CHECK Constraints**: Supported by DSQL; the schema omits them and the application validates instead
 3. **FOR SHARE Not Supported**: The shard read lock uses FOR KEY SHARE instead, which DSQL has supported since August 2026
 4. **FOR UPDATE on JOINs**: Supported by DSQL since August 2026; the plugin still splits these into single-table queries

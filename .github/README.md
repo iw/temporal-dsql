@@ -23,7 +23,7 @@ Everything outside the plugin, its schema and its tooling is upstream Temporal c
 | | |
 |---|---|
 | Temporal base | Upstream `main` as of 2026-04-06, just before v1.31.0 |
-| DSQL schema version | 1.1 |
+| DSQL schema version | 1.2 |
 | Go | 1.26 |
 
 ## Quick start
@@ -41,10 +41,10 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
    ```bash
    export AWS_REGION=us-east-1
    ./temporal-dsql-tool --endpoint <cluster-id>.dsql.us-east-1.on.aws --region us-east-1 \
-     setup-schema --schema-name dsql/temporal --version 1.1
+     setup-schema --schema-name dsql/temporal --version 1.2
    ```
 
-   Start from a new cluster at version 1.1. Upgrading an existing v1.0 schema currently fails ([#28](https://github.com/iw/temporal-dsql/issues/28)).
+   Start from a new cluster at version 1.2. To upgrade a cluster at 1.1, see the [deployment guide](../docs/dsql/deployment.md#upgrading-from-v11). Upgrading from v1.0 currently fails ([#28](https://github.com/iw/temporal-dsql/issues/28)).
 
 3. Copy [`config/development-dsql.yaml`](../config/development-dsql.yaml) and replace its `persistence` block with this one:
 
