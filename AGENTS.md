@@ -68,7 +68,7 @@
 
 #### Persistence Layer
 - First-class DSQL plugin (`common/persistence/sql/sqlplugin/dsql/`)
-- Optimistic concurrency control; the transaction-level retry on SQLSTATE 40001 doesn't fire yet ([#24](https://github.com/iw/temporal-dsql/issues/24))
+- Optimistic concurrency control; transactions that fail with SQLSTATE 40001 are retried through the opt-in `sqlplugin.TxRetryPolicy` hook
 - Shard updates are fenced by the range check in `lockShard`, as upstream; the CAS helpers in `cas_updates.go` are unused ([#49](https://github.com/iw/temporal-dsql/issues/49))
 - FOR UPDATE on single tables only (DSQL lifted this limit in August 2026)
 - Shard read lock is a plain SELECT, not FOR UPDATE ([#23](https://github.com/iw/temporal-dsql/issues/23)); DSQL now supports FOR KEY SHARE
@@ -84,7 +84,7 @@
 - Non-reservoir fallback (pool warmup + pool keeper), the default when `DSQL_RESERVOIR_ENABLED` is unset (hides pgx fast paths: [#38](https://github.com/iw/temporal-dsql/issues/38))
 
 #### Observability
-- DSQL-specific metrics (latency; the conflict and retry counters stay at zero until [#24](https://github.com/iw/temporal-dsql/issues/24) is fixed)
+- DSQL-specific metrics (latency, and transaction conflicts, retries and exhaustion)
 - Reservoir metrics (checkouts, empty events, discards, refills)
 - Connection pool metrics (open, idle, in-use)
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/clock"
 	"go.temporal.io/server/common/config"
@@ -18,7 +19,6 @@ import (
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/persistence/schema"
-	persistsql "go.temporal.io/server/common/persistence/sql"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/driver"
 	"go.temporal.io/server/common/resolver"
@@ -35,6 +35,8 @@ func (pdb *db) IsDupDatabaseError(err error) bool {
 
 // db represents a logical connection to dsql database
 type db struct {
+	*dsqlTxRetryPolicy
+
 	dbKind   sqlplugin.DbKind
 	dbName   string
 	dbDriver driver.Driver
@@ -55,6 +57,7 @@ type db struct {
 }
 
 var _ sqlplugin.DB = (*db)(nil)
+var _ sqlplugin.TxRetryPolicy = (*db)(nil)
 
 // newDB returns an instance of DB, which is a logical
 // connection to the underlying dsql database
@@ -118,6 +121,11 @@ func newDBWithDependencies(
 		}
 	}
 
+	rm := mdb.retryManager
+	if rm == nil {
+		rm = &RetryManager{config: retryConfig}
+	}
+	mdb.dsqlTxRetryPolicy = NewDSQLTxRetryPolicy(rm)
 	return mdb
 }
 
@@ -135,7 +143,7 @@ func (pdb *db) conn() sqlplugin.Conn {
 //
 // IMPORTANT: ErrReservoirEmpty is handled specially - it's a transient backpressure signal
 // that should NOT trigger DatabaseHandle.ConvertError (which would recreate the entire pool).
-// Instead, we convert it to a retryable Unavailable error.
+// Instead, report overload: the operation definitely did not commit.
 func (pdb *db) maybeConvertError(err error) error {
 	if err == nil {
 		return nil
@@ -144,7 +152,10 @@ func (pdb *db) maybeConvertError(err error) error {
 	// Handle reservoir empty as transient backpressure - do NOT pass to handle.ConvertError
 	// which would trigger pool recreation and cause cascading reservoir creation.
 	if errors.Is(err, driver.ErrReservoirEmpty) {
-		return serviceerror.NewUnavailable("dsql reservoir empty: transient backpressure, retry")
+		return &serviceerror.ResourceExhausted{
+			Cause:   enumspb.RESOURCE_EXHAUSTED_CAUSE_SYSTEM_OVERLOADED,
+			Message: "dsql reservoir empty: transient backpressure, retry",
+		}
 	}
 
 	var pgErr *pgconn.PgError
@@ -300,14 +311,4 @@ func (pdb *db) NewExecutionStore(baseStore persistence.ExecutionStore, logger lo
 // GetRetryManager returns the retry manager for DSQL operations
 func (pdb *db) GetRetryManager() *RetryManager {
 	return pdb.retryManager
-}
-
-// TxRetryPolicy exposes a tx-boundary retry policy to the SqlStore.
-// This enables retry of entire persistence transactions on SQLSTATE 40001 for Aurora DSQL,
-// while leaving other SQL plugins unchanged.
-func (pdb *db) TxRetryPolicy() persistsql.TxRetryPolicy {
-	if pdb.retryManager == nil {
-		return nil
-	}
-	return NewDSQLTxRetryPolicy(pdb.retryManager)
 }

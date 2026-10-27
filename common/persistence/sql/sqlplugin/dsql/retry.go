@@ -20,7 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -95,7 +95,6 @@ type RetryManager struct {
 	config  RetryConfig
 	logger  log.Logger
 	metrics DSQLMetrics
-	rng     *rand.Rand
 }
 
 func NewRetryManager(db *sql.DB, cfg RetryConfig, logger log.Logger, mh metrics.Handler) *RetryManager {
@@ -105,7 +104,6 @@ func NewRetryManager(db *sql.DB, cfg RetryConfig, logger log.Logger, mh metrics.
 		config:  cfg,
 		logger:  logger,
 		metrics: NewDSQLMetrics(mh),
-		rng:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -354,7 +352,7 @@ func (r *RetryManager) calculateBackoff(attempt int) time.Duration {
 		delay = float64(r.config.MaxDelay)
 	}
 	if r.config.JitterFactor > 0 {
-		j := (r.rng.Float64()*2 - 1) * r.config.JitterFactor
+		j := (rand.Float64()*2 - 1) * r.config.JitterFactor
 		delay = delay + (delay * j)
 	}
 	if delay < 0 {
