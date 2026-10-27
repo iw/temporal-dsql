@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/require"
 )
@@ -26,6 +27,19 @@ const (
 var shardTestDriverID atomic.Int64
 
 var notificationVersionCondition = regexp.MustCompile(`\bnotification_version\s*=\s*\$(\d+)`)
+var deleteBatchLimit = regexp.MustCompile(`\bLIMIT \$(\d+)`)
+
+type quotaTestTable struct {
+	rows     int64
+	rowBytes int64
+}
+
+type quotaTestDelete struct {
+	table    string
+	limit    int64
+	rows     int64
+	exceeded bool
+}
 
 type shardTestDriver struct {
 	mu                  sync.Mutex
@@ -44,6 +58,8 @@ type shardTestDriver struct {
 	versions            map[string]int64
 	bufferedEventMaxIDs map[bufferedEventsTestRun]int64
 	queryErrors         []error
+	tables              map[string]*quotaTestTable
+	deletes             []quotaTestDelete
 }
 
 type bufferedEventsTestRun struct {
@@ -151,6 +167,9 @@ func (c *shardTestConn) ExecContext(_ context.Context, query string, args []driv
 	if !strings.HasPrefix(query, "UPDATE shards ") &&
 		!strings.HasPrefix(query, "UPDATE namespaces ") &&
 		!strings.HasPrefix(query, "UPDATE namespace_metadata ") &&
+		!strings.HasPrefix(query, "DELETE FROM ") &&
+		!strings.HasPrefix(query, "INSERT INTO history_node ") &&
+		!strings.HasPrefix(query, "INSERT INTO history_tree ") &&
 		!strings.HasPrefix(query, "INSERT INTO buffered_events(") {
 		return nil, fmt.Errorf("unexpected exec: %s", query)
 	}
@@ -161,6 +180,36 @@ func (c *shardTestConn) ExecContext(_ context.Context, query string, args []driv
 		c.db.execErrors = c.db.execErrors[1:]
 		if err != nil {
 			return nil, err
+		}
+	}
+	if strings.HasPrefix(query, "DELETE FROM ") {
+		tableName := strings.Fields(query)[2]
+		table, ok := c.db.tables[tableName]
+		if !ok {
+			return nil, fmt.Errorf("unexpected delete table: %s", tableName)
+		}
+		limit := table.rows
+		if match := deleteBatchLimit.FindStringSubmatch(query); match != nil {
+			index, err := strconv.Atoi(match[1])
+			if err != nil || index < 1 || index > len(args) {
+				return nil, fmt.Errorf("invalid delete limit argument: %s", match[1])
+			}
+			limit = args[index-1].Value.(int64)
+		}
+		rows := min(table.rows, limit)
+		exceeded := rows > 3000 || rows*table.rowBytes > 10*1024*1024
+		c.db.deletes = append(c.db.deletes, quotaTestDelete{tableName, limit, rows, exceeded})
+		if exceeded {
+			return nil, &pgconn.PgError{Code: "54000", Message: "transaction quota exceeded"}
+		}
+		// These fixtures model autocommit range deletes. Tests also assert that
+		// branch deletion never starts a transaction or holds another connection.
+		table.rows -= rows
+		return driver.RowsAffected(rows), nil
+	}
+	for _, arg := range args {
+		if data, ok := arg.Value.([]byte); ok && len(data) > 1024*1024 {
+			return nil, &pgconn.PgError{Code: "54000", Message: "column quota exceeded"}
 		}
 	}
 	// Model only version predicates against the fixture's stored table versions.

@@ -19,9 +19,14 @@ persistence.maxIdleConns:
   - value: 20
     constraints: {}
 
-# DSQL transaction retry settings (due to optimistic concurrency control)
-persistence.transactionSizeLimit:
-  - value: 4000000
+# A history batch occupies one column, capped at 1 MiB by DSQL.
+system.transactionSizeLimit:
+  - value: 1048576
+    constraints: {}
+
+# Reject oversized payloads up front, leaving room under 1 MiB for the event envelope.
+limit.blobSize.error:
+  - value: 1000000
     constraints: {}
 
 # Buffered events settings (for ID generation)

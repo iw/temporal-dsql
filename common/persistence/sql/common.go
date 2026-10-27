@@ -110,6 +110,7 @@ func (m *SqlStore) txExecuteOnce(
 		}
 		switch err.(type) {
 		case *persistence.ConditionFailedError,
+			*persistence.TransactionSizeLimitError,
 			*persistence.CurrentWorkflowConditionFailedError,
 			*persistence.WorkflowConditionFailedError,
 			*serviceerror.NamespaceAlreadyExists,

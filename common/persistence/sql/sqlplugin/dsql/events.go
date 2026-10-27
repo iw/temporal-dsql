@@ -29,7 +29,10 @@ const (
 
 	deleteHistoryNodeQuery = `DELETE FROM history_node WHERE shard_id = $1 AND tree_id = $2 AND branch_id = $3 AND node_id = $4 AND txn_id = $5 `
 
-	deleteHistoryNodesQuery = `DELETE FROM history_node WHERE shard_id = $1 AND tree_id = $2 AND branch_id = $3 AND node_id >= $4 `
+	deleteHistoryNodesQuery = `DELETE FROM history_node WHERE (shard_id, tree_id, branch_id, node_id, txn_id) IN (
+ SELECT shard_id, tree_id, branch_id, node_id, txn_id FROM history_node
+ WHERE shard_id = $1 AND tree_id = $2 AND branch_id = $3 AND node_id >= $4
+ ORDER BY shard_id, tree_id, branch_id, node_id, txn_id LIMIT $5)`
 
 	// below are templates for history_tree table
 	addHistoryTreeQuery = `INSERT INTO history_tree (` +
@@ -152,7 +155,7 @@ func (pdb *db) RangeDeleteFromHistoryNode(
 	ctx context.Context,
 	filter sqlplugin.HistoryNodeDeleteFilter,
 ) (sql.Result, error) {
-	return pdb.ExecContext(ctx,
+	return pdb.deleteInBatches(ctx, historyNodeDeleteBatchSize,
 		deleteHistoryNodesQuery,
 		filter.ShardID,
 		UUIDToString(filter.TreeID),

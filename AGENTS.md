@@ -107,8 +107,8 @@
 4. **FOR UPDATE on JOINs**: Supported by DSQL since August 2026; the plugin still splits these into single-table queries
 5. **Connection Rate Limit**: 100 connections/second cluster-wide
 6. **Connection Limit**: 10,000 connections per cluster (default, can be raised)
-7. **Transaction Limits**: 3,000 modified rows and 10 MiB per transaction; range deletes can exceed this ([#26](https://github.com/iw/temporal-dsql/issues/26))
-8. **Column Size**: 1 MiB per non-indexed column value, below Temporal's 2 MiB blob limit ([#27](https://github.com/iw/temporal-dsql/issues/27))
+7. **Transaction Limits**: 3,000 modified rows and 10 MiB per transaction; range deletes run in batches that halve on SQLSTATE 54000
+8. **Column Size**: 1 MiB per non-indexed column value; the plugin reports SQLSTATE 54000 as `TransactionSizeLimitError`, and the DSQL dynamic config caps history batches and payloads below 1 MiB
 9. **Connection Duration**: 60 minutes maximum
 
 ### Recommended Configuration

@@ -89,9 +89,14 @@ Pool sizing can also be set via environment variables (`TEMPORAL_SQL_MAX_CONNS`,
 These are the validated dynamic config keys for DSQL deployments. Values shown are from the bench environment (200–800 WPS); scale down for lighter workloads.
 
 ```yaml
-# DSQL transaction size limit (4MB — DSQL constraint)
+# A history batch is stored in one column, which DSQL caps at 1 MiB
 system.transactionSizeLimit:
-  - value: 4000000
+  - value: 1048576
+    constraints: {}
+
+# Reject oversized payloads at the frontend, leaving room under 1 MiB for the event envelope
+limit.blobSize.error:
+  - value: 1000000
     constraints: {}
 
 # Persistence QPS per host (scale to workload)
