@@ -13,9 +13,12 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/iancoleman/strcase"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/server/common/persistence/sql/sqlplugin"
+	"go.temporal.io/server/common/primitives"
 )
 
 const (
@@ -60,6 +63,9 @@ type shardTestDriver struct {
 	queryErrors         []error
 	tables              map[string]*quotaTestTable
 	deletes             []quotaTestDelete
+	historyTrees        []sqlplugin.HistoryTreeRow
+	taskQueues          map[string][]sqlplugin.TaskQueuesRow
+	clusterMembers      []sqlplugin.ClusterMembershipRow
 }
 
 type bufferedEventsTestRun struct {
@@ -77,7 +83,9 @@ func newShardTestDB(t *testing.T, rangeID int64) (*sqlx.DB, *shardTestDriver) {
 	db, err := sql.Open(name, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	return sqlx.NewDb(db, "postgres"), fake
+	sqlDB := sqlx.NewDb(db, "postgres")
+	sqlDB.MapperFunc(strcase.ToSnake)
+	return sqlDB, fake
 }
 
 func (d *shardTestDriver) Open(string) (driver.Conn, error) {
@@ -158,8 +166,105 @@ func (c *shardTestConn) QueryContext(_ context.Context, query string, args []dri
 	case "SELECT notification_version FROM namespace_metadata WHERE partition_id=$1 FOR UPDATE":
 		return &shardTestRows{column: "notification_version", value: c.db.versions["namespace_metadata"]}, nil
 	default:
+		return c.db.queryUUIDRows(query, args)
+	}
+}
+
+// Fixtures are in database key order. UUID columns are returned as text, as with DSQL.
+func (d *shardTestDriver) queryUUIDRows(query string, args []driver.NamedValue) (driver.Rows, error) {
+	switch {
+	case strings.Contains(query, " FROM history_tree "):
+		rows := &uuidTestRows{columns: []string{"shard_id", "tree_id", "branch_id", "data", "data_encoding"}}
+		pointRead := strings.HasPrefix(query, "SELECT branch_id,")
+		if pointRead {
+			rows.columns = rows.columns[2:]
+		}
+		for _, row := range d.historyTrees {
+			shardID, treeID := args[0].Value.(int64), args[1].Value.(string)
+			if pointRead {
+				if int64(row.ShardID) == shardID && row.TreeID.String() == treeID {
+					rows.values = append(rows.values, []driver.Value{row.BranchID.String(), row.Data, row.DataEncoding})
+				}
+				continue
+			}
+			branchID := args[2].Value.(string)
+			if int64(row.ShardID) > shardID || (int64(row.ShardID) == shardID &&
+				(row.TreeID.String() > treeID || (row.TreeID.String() == treeID && row.BranchID.String() > branchID))) {
+				rows.values = append(rows.values, []driver.Value{int64(row.ShardID), row.TreeID.String(), row.BranchID.String(), row.Data, row.DataEncoding})
+			}
+		}
+		if !pointRead {
+			rows.values = rows.values[:min(len(rows.values), int(args[3].Value.(int64)))]
+		}
+		return rows, nil
+	case strings.Contains(query, " FROM task_queues "), strings.Contains(query, " FROM task_queues_v2 "):
+		return d.queryTaskQueueRows(query, args), nil
+	case strings.Contains(query, " FROM cluster_membership "):
+		rows := &uuidTestRows{columns: []string{"host_id", "rpc_address", "rpc_port", "role", "session_start", "last_heartbeat", "record_expiry"}}
+		for _, row := range d.clusterMembers {
+			hostID := primitives.UUID(row.HostID).String()
+			if strings.Contains(query, " AND host_id = $") && hostID != args[1].Value.(string) {
+				continue
+			}
+			if strings.Contains(query, " AND host_id > $") && hostID <= args[1].Value.(string) {
+				continue
+			}
+			rows.values = append(rows.values, []driver.Value{hostID, row.RPCAddress, int64(row.RPCPort), int64(row.Role), row.SessionStart, row.LastHeartbeat, row.RecordExpiry})
+		}
+		if strings.Contains(query, " LIMIT $") {
+			rows.values = rows.values[:min(len(rows.values), int(args[len(args)-1].Value.(int64)))]
+		}
+		return rows, nil
+	default:
 		return nil, fmt.Errorf("unexpected query: %s", query)
 	}
+}
+
+func (d *shardTestDriver) queryTaskQueueRows(query string, args []driver.NamedValue) driver.Rows {
+	rows := &uuidTestRows{columns: []string{"range_hash", "task_queue_id", "range_id", "data", "data_encoding"}}
+	table := "task_queues"
+	if strings.Contains(query, " FROM task_queues_v2 ") {
+		table = "task_queues_v2"
+	}
+	pointRead := strings.Contains(query, "task_queue_id=$2")
+	minHash, maxHash := args[0].Value.(int64), args[0].Value.(int64)
+	idIndex := 1
+	if strings.Contains(query, "range_hash >= $1") {
+		maxHash = args[1].Value.(int64)
+		idIndex = 2
+	}
+	id := args[idIndex].Value.(string)
+	for _, row := range d.taskQueues[table] {
+		if int64(row.RangeHash) < minHash || int64(row.RangeHash) > maxHash {
+			continue
+		}
+		storedID := primitives.UUID(row.TaskQueueID).String()
+		if (pointRead && storedID != id) || (!pointRead && storedID <= id) {
+			continue
+		}
+		rows.values = append(rows.values, []driver.Value{int64(row.RangeHash), storedID, row.RangeID, row.Data, row.DataEncoding})
+	}
+	if !pointRead {
+		rows.values = rows.values[:min(len(rows.values), int(args[len(args)-1].Value.(int64)))]
+	}
+	return rows
+}
+
+type uuidTestRows struct {
+	columns []string
+	values  [][]driver.Value
+}
+
+func (r *uuidTestRows) Columns() []string { return r.columns }
+func (r *uuidTestRows) Close() error      { return nil }
+
+func (r *uuidTestRows) Next(values []driver.Value) error {
+	if len(r.values) == 0 {
+		return io.EOF
+	}
+	copy(values, r.values[0])
+	r.values = r.values[1:]
+	return nil
 }
 
 func (c *shardTestConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {

@@ -9,6 +9,25 @@ import (
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 )
 
+// DSQL returns UUID columns as text; core uses the stored UUID bytes as its page cursor.
+type dsqlTaskQueueRow struct {
+	RangeHash    uint32 `db:"range_hash"`
+	TaskQueueID  string `db:"task_queue_id"`
+	RangeID      int64  `db:"range_id"`
+	Data         []byte `db:"data"`
+	DataEncoding string `db:"data_encoding"`
+}
+
+func (r *dsqlTaskQueueRow) toPluginRow() sqlplugin.TaskQueuesRow {
+	return sqlplugin.TaskQueuesRow{
+		RangeHash:    r.RangeHash,
+		TaskQueueID:  uuidStringToBytes(r.TaskQueueID),
+		RangeID:      r.RangeID,
+		Data:         r.Data,
+		DataEncoding: r.DataEncoding,
+	}
+}
+
 const (
 	taskQueueCreatePart = `INTO task_queues_v2 (range_hash, task_queue_id, range_id, data, data_encoding) ` +
 		`VALUES (:range_hash, :task_queue_id, :range_id, :data, :data_encoding)`
@@ -179,7 +198,7 @@ func (pdb *db) selectFromTaskQueues(
 	v sqlplugin.MatchingTaskVersion,
 ) ([]sqlplugin.TaskQueuesRow, error) {
 	var err error
-	var row sqlplugin.TaskQueuesRow
+	var row dsqlTaskQueueRow
 
 	err = pdb.GetContext(ctx,
 		&row,
@@ -190,7 +209,7 @@ func (pdb *db) selectFromTaskQueues(
 	if err != nil {
 		return nil, err
 	}
-	return []sqlplugin.TaskQueuesRow{row}, err
+	return []sqlplugin.TaskQueuesRow{row.toPluginRow()}, nil
 }
 
 func (pdb *db) rangeSelectFromTaskQueues(
@@ -199,19 +218,20 @@ func (pdb *db) rangeSelectFromTaskQueues(
 	v sqlplugin.MatchingTaskVersion,
 ) ([]sqlplugin.TaskQueuesRow, error) {
 	var err error
-	var rows []sqlplugin.TaskQueuesRow
+	var dsqlRows []dsqlTaskQueueRow
 
 	// DSQL: task_queue_id is UUID type, so we need a valid UUID for comparison.
 	// Use nil UUID (all zeros) as the minimum value when no filter is specified.
 	// This ensures "task_queue_id > $N" works correctly with UUID ordering.
 	gt := NilUUID
-	if filter.TaskQueueIDGreaterThan != nil && len(filter.TaskQueueIDGreaterThan) > 0 {
-		gt = TaskQueueIDToUUIDString(filter.TaskQueueIDGreaterThan)
+	if len(filter.TaskQueueIDGreaterThan) > 0 {
+		// This cursor is the stored UUID from the previous page, not a logical queue ID.
+		gt = BytesToUUIDString(filter.TaskQueueIDGreaterThan)
 	}
 
 	if filter.RangeHashLessThanEqualTo > 0 {
 		err = pdb.SelectContext(ctx,
-			&rows,
+			&dsqlRows,
 			sqlplugin.SwitchTaskQueuesTable(listTaskQueueWithHashRangeQry, v),
 			filter.RangeHashGreaterThanEqualTo,
 			filter.RangeHashLessThanEqualTo,
@@ -220,7 +240,7 @@ func (pdb *db) rangeSelectFromTaskQueues(
 		)
 	} else {
 		err = pdb.SelectContext(ctx,
-			&rows,
+			&dsqlRows,
 			sqlplugin.SwitchTaskQueuesTable(listTaskQueueQry, v),
 			filter.RangeHash,
 			gt,
@@ -231,6 +251,10 @@ func (pdb *db) rangeSelectFromTaskQueues(
 		return nil, err
 	}
 
+	rows := make([]sqlplugin.TaskQueuesRow, len(dsqlRows))
+	for i := range dsqlRows {
+		rows[i] = dsqlRows[i].toPluginRow()
+	}
 	return rows, nil
 }
 

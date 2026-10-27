@@ -3,7 +3,7 @@
 -- CHASM = Component-based Hierarchical Architecture for State Management
 -- This table stores current executions for non-workflow archetypes (standalone activities, schedulers)
 
-CREATE TABLE IF NOT EXISTS current_chasm_executions(
+CREATE TABLE current_chasm_executions(
   shard_id INTEGER NOT NULL,
   namespace_id UUID NOT NULL,           -- DSQL: UUID instead of BYTEA
   business_id VARCHAR(255) NOT NULL,    -- Maps to WorkflowID for workflows

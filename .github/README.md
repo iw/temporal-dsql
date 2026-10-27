@@ -44,7 +44,7 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
      setup-schema --schema-name dsql/temporal --version 1.2
    ```
 
-   Start from a new cluster at version 1.2. To upgrade a cluster at 1.1, see the [deployment guide](../docs/dsql/deployment.md#upgrading-from-v11). Upgrading from v1.0 currently fails ([#28](https://github.com/iw/temporal-dsql/issues/28)).
+   Start from a new cluster at version 1.2. To upgrade a cluster at 1.0 or 1.1, see the [deployment guide](../docs/dsql/deployment.md#upgrading-from-v11).
 
 3. Copy [`config/development-dsql.yaml`](../config/development-dsql.yaml) and replace its `persistence` block with this one:
 

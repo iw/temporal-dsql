@@ -63,7 +63,7 @@ v1.2 drops the global unique index on `buffered_events(id)`, so the server can n
     --target-version 1.2
 ```
 
-v1.1 adds the `current_chasm_executions` table for CHASM support (standalone activities, schedulers). This upgrade currently fails at the v1.1 step ([#28](https://github.com/iw/temporal-dsql/issues/28)).
+v1.1 adds the `current_chasm_executions` table for CHASM support (standalone activities, schedulers).
 
 ## 2. Static Configuration
 
