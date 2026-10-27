@@ -69,7 +69,7 @@
 #### Persistence Layer
 - First-class DSQL plugin (`common/persistence/sql/sqlplugin/dsql/`)
 - Optimistic concurrency control; the transaction-level retry on SQLSTATE 40001 doesn't fire yet ([#24](https://github.com/iw/temporal-dsql/issues/24))
-- Shard updates aren't fenced on DSQL ([#22](https://github.com/iw/temporal-dsql/issues/22)); the CAS helpers in `cas_updates.go` are unused ([#49](https://github.com/iw/temporal-dsql/issues/49))
+- Shard updates are fenced by the range check in `lockShard`, as upstream; the CAS helpers in `cas_updates.go` are unused ([#49](https://github.com/iw/temporal-dsql/issues/49))
 - FOR UPDATE on single tables only (DSQL lifted this limit in August 2026)
 - Shard read lock is a plain SELECT, not FOR UPDATE ([#23](https://github.com/iw/temporal-dsql/issues/23)); DSQL now supports FOR KEY SHARE
 

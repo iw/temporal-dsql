@@ -135,15 +135,6 @@ func lockShard(
 	switch err {
 	case nil:
 		if rangeID != oldRangeID {
-			// For traditional SQL backends (Postgres/MySQL), a mismatch indicates shard ownership was lost.
-			// For OCC stores (DSQL), this strict equality check is not reliable because "locking" does not
-			// provide blocking semantics. Ownership is determined by the fenced update and commit-time retry.
-			if _, ok := tx.(TxRetryPolicyProvider); ok {
-				// OCC store: do not fail fast here.
-				// The subsequent fenced update will be the arbiter of ownership.
-				return nil
-			}
-
 			return &persistence.ShardOwnershipLostError{
 				ShardID: shardID,
 				Msg:     fmt.Sprintf("Failed to update shard. Previous range ID: %v; new range ID: %v", oldRangeID, rangeID),
