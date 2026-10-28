@@ -8,7 +8,9 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
@@ -50,9 +52,51 @@ func (m *SqlStore) Close() {
 }
 
 func (m *SqlStore) txExecute(ctx context.Context, operation string, f func(tx sqlplugin.Tx) error) error {
+	policy, ok := m.DB.(sqlplugin.TxRetryPolicy)
+	if !ok {
+		_, err := m.txExecuteOnce(ctx, operation, f, nil)
+		return err
+	}
+	for attempt := 1; ; attempt++ {
+		retryable, err := m.txExecuteOnce(ctx, operation, f, policy)
+		if !retryable {
+			return err
+		}
+
+		delay, retry := policy.TxRetryBackoff(operation, attempt, err)
+		if retry && ctx.Err() == nil {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+			}
+			timer.Stop()
+			if ctx.Err() == nil {
+				continue
+			}
+		}
+		return &serviceerror.ResourceExhausted{
+			Cause:   enumspb.RESOURCE_EXHAUSTED_CAUSE_SYSTEM_OVERLOADED,
+			Message: fmt.Sprintf("%s failed. Transaction retries stopped after %d attempts. Error: %v", operation, attempt, err),
+		}
+	}
+}
+
+func (m *SqlStore) txExecuteOnce(
+	ctx context.Context,
+	operation string,
+	f func(tx sqlplugin.Tx) error,
+	policy sqlplugin.TxRetryPolicy,
+) (retryable bool, err error) {
 	tx, err := m.DB.BeginTx(ctx)
 	if err != nil {
-		return serviceerror.NewUnavailablef("%s failed. Failed to start transaction. Error: %v", operation, err)
+		if policy != nil && policy.IsRetryableTxError(err) {
+			return true, err
+		}
+		if _, ok := err.(*serviceerror.ResourceExhausted); ok {
+			return false, err
+		}
+		return false, serviceerror.NewUnavailablef("%s failed. Failed to start transaction. Error: %v", operation, err)
 	}
 	err = f(tx)
 	if err != nil {
@@ -61,23 +105,31 @@ func (m *SqlStore) txExecute(ctx context.Context, operation string, f func(tx sq
 			m.logger.Error("transaction rollback error", tag.Error(rollBackErr))
 		}
 
+		if policy != nil && policy.IsRetryableTxError(err) {
+			return true, err
+		}
 		switch err.(type) {
 		case *persistence.ConditionFailedError,
+			*persistence.TransactionSizeLimitError,
 			*persistence.CurrentWorkflowConditionFailedError,
 			*persistence.WorkflowConditionFailedError,
 			*serviceerror.NamespaceAlreadyExists,
 			*persistence.ShardOwnershipLostError,
 			*serviceerror.Unavailable,
+			*serviceerror.ResourceExhausted,
 			*serviceerror.NotFound:
-			return err
+			return false, err
 		default:
-			return serviceerror.NewUnavailablef("%v: %v", operation, err)
+			return false, serviceerror.NewUnavailablef("%v: %v", operation, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return serviceerror.NewUnavailablef("%s operation failed. Failed to commit transaction. Error: %v", operation, err)
+		if policy != nil && policy.IsRetryableTxError(err) {
+			return true, err
+		}
+		return false, serviceerror.NewUnavailablef("%s operation failed. Failed to commit transaction. Error: %v", operation, err)
 	}
-	return nil
+	return false, nil
 }
 
 func gobSerialize(x any) ([]byte, error) {
