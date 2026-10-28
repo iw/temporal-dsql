@@ -12,12 +12,16 @@
 pub mod dagger_generated;
 
 use dagger_generated::ModuleContext;
-use dagger_sdk::{Container, Directory, File, ModuleError};
+use dagger_sdk::{Container, ContainerWithExecOpts, Directory, File, ModuleError, QueryError};
 
 const BUILD_TAGS: &str = "disable_grpc_modules";
 const TEST_TAGS: &str = "disable_grpc_modules,test_dep";
 const GOLANGCI_LINT: &str = "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0";
 const ERRORTYPE: &str = "fillmore-labs.com/errortype@v0.0.7";
+const ALPINE: &str = "alpine:3.23";
+/// Where lint fetches a pull request's base branch from.
+const REPOSITORY: &str = "https://github.com/iw/temporal-dsql.git";
+const PATCH: &str = "/tmp/lint.patch";
 const BINARIES: [(&str, &str); 3] = [
     ("temporal-server", "./cmd/server"),
     ("temporal-dsql-tool", "./cmd/tools/dsql"),
@@ -60,28 +64,33 @@ impl Ci {
         self.binaries(&ctx, &platform).await
     }
 
-    /// Runs golangci-lint and the errortype vet check, as make lint-code does.
+    /// Runs golangci-lint and the errortype vet check, as make lint-code does, with
+    /// golangci-lint limited to the lines a change adds, as upstream CI's --new-from-rev.
     #[dagger(function)]
     pub async fn lint(
         &self,
         #[dagger(context)] ctx: ModuleContext,
         #[dagger(
-            doc = "Unified diff that limits golangci-lint to the lines it changes; lints everything when omitted."
+            doc = "Branch the change merges into, such as main; the diff starts at its merge base with HEAD. Without it, the diff is HEAD's own commit."
+        )]
+        base: Option<String>,
+        #[dagger(
+            doc = "Unified diff to lint instead of one from Git history, for a checkout without it, such as a Git worktree."
         )]
         patch: Option<File>,
+        #[dagger(
+            doc = "The repository's Git metadata; defaults to the workspace's.",
+            default_path = "/",
+            ignore = ["*", "!.git", "!.git/**"]
+        )]
+        git: Directory,
     ) -> Result<String, ModuleError> {
+        let patch = match patch {
+            Some(patch) => patch,
+            None => diff(&ctx, git, base.filter(|base| !base.is_empty())).await?,
+        };
         let query = ctx.query();
-        let mut golangci = vec![
-            "golangci-lint",
-            "run",
-            "--build-tags",
-            TEST_TAGS,
-            "--timeout",
-            "30m",
-            "--fix=false",
-            "--config=.github/.golangci.yml",
-        ];
-        let mut linter = self
+        let linted = self
             .go_builder(&ctx)
             .await?
             .with_mounted_cache(
@@ -89,12 +98,19 @@ impl Ci {
                 "/root/.cache/golangci-lint",
             )
             .with_exec(vec!["go", "install", GOLANGCI_LINT])
-            .with_exec(vec!["go", "install", ERRORTYPE]);
-        if let Some(patch) = patch {
-            linter = linter.with_file("/tmp/lint.patch", patch);
-            golangci.push("--new-from-patch=/tmp/lint.patch");
-        }
-        let linted = linter.with_exec(golangci);
+            .with_exec(vec!["go", "install", ERRORTYPE])
+            .with_file(PATCH, patch)
+            .with_exec(vec![
+                "golangci-lint",
+                "run",
+                "--build-tags",
+                TEST_TAGS,
+                "--timeout",
+                "30m",
+                "--fix=false",
+                "--config=.github/.golangci.yml",
+                "--new-from-patch=/tmp/lint.patch",
+            ]);
         let issues = linted.stdout().await?;
         let vetted = linted
             .with_exec(vec![
@@ -205,6 +221,60 @@ impl Ci {
         }
         Ok(builder.directory("/out"))
     }
+}
+
+/// The diff a change makes, from Git history: from its merge base with `base`, which is
+/// fetched from GitHub, or HEAD's own commit when there's no base.
+async fn diff(
+    ctx: &ModuleContext,
+    git: Directory,
+    base: Option<String>,
+) -> Result<File, ModuleError> {
+    let repo = ctx
+        .query()
+        .container()
+        .from(ALPINE)
+        .with_exec(vec!["apk", "add", "--no-cache", "git"])
+        // The files keep the checkout's owner, which Git would otherwise refuse.
+        .with_exec(vec!["git", "config", "--global", "safe.directory", "*"])
+        .with_directory("/repo", git)
+        .with_workdir("/repo");
+    let (repo, from) = match base {
+        Some(base) => {
+            let fetched = repo.with_exec(vec![
+                "git",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                REPOSITORY,
+                base.as_str(),
+            ]);
+            let merge_base = fetched
+                .with_exec(vec!["git", "merge-base", "FETCH_HEAD", "HEAD"])
+                .stdout()
+                .await
+                .map_err(git_history)?;
+            (fetched, merge_base.trim().to_owned())
+        }
+        None => (repo, "HEAD~1".to_owned()),
+    };
+    let diffed = repo
+        .with_exec_opts(
+            vec!["git", "diff", from.as_str(), "HEAD"],
+            &ContainerWithExecOpts::default().with_redirect_stdout(PATCH),
+        )
+        .sync()
+        .await
+        .map_err(git_history)?;
+    Ok(diffed.file(PATCH))
+}
+
+/// Explains a failed Git step, which usually means the engine can't read the checkout's
+/// Git history.
+fn git_history(err: QueryError) -> ModuleError {
+    ModuleError::new(format!(
+        "couldn't diff from Git history; for a checkout without it, such as a Git worktree, pass --patch: {err}"
+    ))
 }
 
 fn strings(values: &[&str]) -> Vec<String> {

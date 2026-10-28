@@ -35,12 +35,14 @@ steps:
       - github_commit_status:
           context: "buildkite/build"
 
+  # A pull request lints the lines it adds since its merge base with the base branch.
+  # Other builds, where the base branch is empty, lint their own commit.
   - label: ":lint-roller: lint"
     key: lint
     command: |
       eval "$$(.dagger/engine.sh)"
       trap '.dagger/engine.sh stop' EXIT
-      .buildkite/lint.sh
+      dagger call ci lint --base "$$BUILDKITE_PULL_REQUEST_BASE_BRANCH"
     agents:
       nsc-shape: "16x32"
       nsc-cache-tag: "temporal-dsql-lint"

@@ -1,5 +1,5 @@
 {
-  "descriptor_digest": "sha256:3a30ce3b3b89e04b8ae235646de1c6c1aadf9f1c6ecb771a9353c26e07c5e0dc",
+  "descriptor_digest": "sha256:40b9f6bd11056127fd9957a878e695db2ed5c18aff087ae3d975b9a0ab173b13",
   "format_version": 1,
   "types": {
     "Ci": {
@@ -20,7 +20,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 57,
+                "line": 61,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -45,7 +45,7 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 53,
+            "line": 57,
             "path": "src/lib.rs"
           },
           "wire_name": "build"
@@ -57,12 +57,32 @@
               "default_address": null,
               "default_path": null,
               "deprecation": null,
-              "documentation": "Unified diff that limits golangci-lint to the lines it changes; lints everything when omitted.",
+              "documentation": "Branch the change merges into, such as main; the diff starts at its merge base with HEAD. Without it, the diff is HEAD's own commit.",
               "ignore": [],
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 71,
+                "line": 76,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "base"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Unified diff to lint instead of one from Git history, for a checkout without it, such as a Git worktree.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 80,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -71,6 +91,30 @@
                 "nullable": true
               },
               "wire_name": "patch"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": "/",
+              "deprecation": null,
+              "documentation": "The repository's Git metadata; defaults to the workspace's.",
+              "ignore": [
+                "*",
+                "!.git",
+                "!.git/**"
+              ],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 86,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Directory",
+                "nullable": false
+              },
+              "wire_name": "git"
             }
           ],
           "cache": {
@@ -78,7 +122,7 @@
           },
           "constructor": false,
           "deprecation": null,
-          "documentation": "Runs golangci-lint and the errortype vet check, as make lint-code does.",
+          "documentation": "Runs golangci-lint and the errortype vet check, as make lint-code does, with\ngolangci-lint limited to the lines a change adds, as upstream CI's --new-from-rev.",
           "return_type": {
             "kind": "named",
             "name": "String",
@@ -87,7 +131,7 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 65,
+            "line": 70,
             "path": "src/lib.rs"
           },
           "wire_name": "lint"
@@ -104,7 +148,7 @@
               "optional": true,
               "source": {
                 "column": 81,
-                "line": 120,
+                "line": 136,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -128,7 +172,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 124,
+                "line": 140,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -153,7 +197,7 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 117,
+            "line": 133,
             "path": "src/lib.rs"
           },
           "wire_name": "test"
@@ -163,7 +207,7 @@
       "kind": "object",
       "source": {
         "column": 12,
-        "line": 28,
+        "line": 32,
         "path": "src/lib.rs"
       },
       "wire_name": "Ci"
@@ -207,7 +251,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 46,
+                "line": 50,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -232,7 +276,7 @@
           "role": "ordinary",
           "source": {
             "column": 12,
-            "line": 36,
+            "line": 40,
             "path": "src/lib.rs"
           },
           "wire_name": "ci"
@@ -242,7 +286,7 @@
       "kind": "object",
       "source": {
         "column": 12,
-        "line": 36,
+        "line": 40,
         "path": "src/lib.rs"
       },
       "wire_name": "Query"

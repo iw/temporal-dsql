@@ -16,7 +16,6 @@ The module and the live program run on the SDK's `v0.3.1` release and a stock Da
 | `.dagger/live/` | The live tests: a Rust program that a developer runs, with its own `Cargo.lock` and toolchain pin |
 | `.dagger/engine.sh` | Downloads and verifies the pinned CLI, starts the pinned engine, and prints the environment |
 | `.buildkite/pipeline.yml` | Pipeline steps |
-| `.buildkite/lint.sh` | Limits lint to the lines a build changes |
 
 The module never sees Buildkite or Namespace. Its constructor takes the repository, which defaults to the workspace root without `.git`, `.dagger` and build output. The docs stay in, because a test checks the deployment guide's dynamic config. Pass `dagger call ci --source=<dir> …` to use another tree.
 
@@ -25,12 +24,16 @@ The module never sees Buildkite or Namespace. Its constructor takes the reposito
 | Call | What it does |
 |---|---|
 | `build [--platform]` | Compiles `temporal-server`, `temporal-dsql-tool` and `temporal-elasticsearch-tool`, and returns them as a directory |
-| `lint [--patch]` | Runs golangci-lint v2.9.0 and the errortype vet check, as `make lint-code` does |
+| `lint [--base] [--patch]` | Runs golangci-lint v2.9.0 on the lines a change adds, and the errortype vet check, as `make lint-code` does |
 | `test [--packages] [--run]` | Runs `go test -race -shuffle=on` on `common/persistence/sql/...`, `schema/...`, `tools/dsql/...` and `tools/poolsim/...` |
 
 `--platform` defaults to the engine's own platform. Go cross-compiles, so `build` can target any platform from any engine.
 
-Pass `lint` a patch. Upstream lints only new code (`--new-from-rev`), and a full run reports thousands of existing issues.
+`lint` checks only the lines a change adds, as upstream's `--new-from-rev` does, since a full run reports thousands of existing issues. It works out the change from the repository's Git history:
+
+- With `--base`, such as `--base main`, the change is everything since HEAD's merge base with that branch, which `lint` fetches from GitHub.
+- Without it, the change is HEAD's own commit.
+- In a checkout whose Git history the engine can't read, such as a Git worktree, pass the diff instead with `--patch`.
 
 ## Local use
 
@@ -48,8 +51,10 @@ Then call the module:
 dagger call ci build export --path dist/bin
 dagger call ci test
 dagger call ci test --packages ./common/persistence/sql/sqlplugin/dsql/... --run TestPool
-git diff origin/main... > /tmp/lint.patch && dagger call ci lint --patch /tmp/lint.patch
+dagger call ci lint --base main
 ```
+
+In a Git worktree, pass the diff instead: `git diff origin/main... > /tmp/lint.patch && dagger call ci lint --patch /tmp/lint.patch`.
 
 If your global Git configuration rewrites `https://github.com/` to SSH, run `dagger` with `GIT_CONFIG_GLOBAL=/dev/null`: the engine fetches the SDK runtime over HTTPS and can't use your SSH keys. In a Git worktree the CLI warns that it can't open the repository. The warning is harmless.
 
@@ -141,7 +146,7 @@ Every build of a pull request, `main`, a release branch or a tag runs these step
 | Step | Command | Commit status |
 |---|---|---|
 | build | `dagger call ci build` for linux/amd64 and linux/arm64 | `buildkite/build` |
-| lint | `.buildkite/lint.sh`: a pull request against its merge base, other builds against the parent commit | `buildkite/lint` |
+| lint | `dagger call ci lint --base` with a pull request's base branch; other builds lint their own commit | `buildkite/lint` |
 | test | `dagger call ci test` | `buildkite/test` |
 
 None of the steps uses AWS, so the pipeline needs no AWS credentials. Run the live tests locally before merging a change they cover; see [Live tests](#live-tests).
