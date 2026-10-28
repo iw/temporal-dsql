@@ -1,0 +1,12 @@
+src/bin/dagger-module.rs linguist-generated=true
+src/dagger_generated linguist-generated=true
+/.dagger/rust/operation-manifest.json linguist-generated
+/src/dagger_generated/binding-catalog.json linguist-generated
+/src/dagger_generated/generated-module-assets.json linguist-generated
+/src/dagger_generated/mod.rs linguist-generated
+/src/dagger_generated/module-introspection.json linguist-generated
+/src/dagger_generated/module_codec.rs linguist-generated
+/src/dagger_generated/module_context.rs linguist-generated
+/src/dagger_generated/module_descriptor.rs linguist-generated
+/src/dagger_generated/module_dispatch.rs linguist-generated
+/src/dagger_generated/module_registration.rs linguist-generated

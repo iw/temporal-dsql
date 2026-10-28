@@ -1,0 +1,393 @@
+{
+  "descriptor_digest": "sha256:b4c130e7dc736f0e56cbbbf1d620ec188633cb9ccce0b3cf00e11c8ae0a539fe",
+  "format_version": 1,
+  "types": {
+    "Ci": {
+      "deprecation": null,
+      "documentation": null,
+      "enum_values": [],
+      "fields": [],
+      "functions": [
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Target platform, such as linux/arm64; defaults to the engine's platform.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 62,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "platform"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Compiles temporal-server, temporal-dsql-tool and temporal-elasticsearch-tool.",
+          "return_type": {
+            "kind": "named",
+            "name": "Directory",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 58,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "build"
+        },
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Unified diff that limits golangci-lint to the lines it changes; lints everything when omitted.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 76,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "File",
+                "nullable": true
+              },
+              "wire_name": "patch"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Runs golangci-lint and the errortype vet check, as make lint-code does.",
+          "return_type": {
+            "kind": "named",
+            "name": "String",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 70,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "lint"
+        },
+        {
+          "arguments": [
+            {
+              "default": "eu-west-1",
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Region for the throwaway resources.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 168,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": false
+              },
+              "wire_name": "region"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "ARN of the role to assume with the web identity token; a secret, so logs don't show the account.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 172,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Secret",
+                "nullable": true
+              },
+              "wire_name": "roleArn"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Web identity token for the role, such as a Buildkite OIDC token.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 174,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Secret",
+                "nullable": true
+              },
+              "wire_name": "webIdentityToken"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Access key ID, when no role is given.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 66,
+                "line": 175,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Secret",
+                "nullable": true
+              },
+              "wire_name": "awsAccessKeyId"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Secret access key, when no role is given.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 70,
+                "line": 176,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Secret",
+                "nullable": true
+              },
+              "wire_name": "awsSecretAccessKey"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Session token, for a temporary access key.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 71,
+                "line": 179,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Secret",
+                "nullable": true
+              },
+              "wire_name": "awsSessionToken"
+            }
+          ],
+          "cache": {
+            "kind": "never"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Runs the DSQL plugin's live tests on a throwaway Aurora DSQL cluster and DynamoDB\ntable, and deletes both however the run ends. Pass a role and a web identity token,\nas CI does, or an access key.",
+          "return_type": {
+            "kind": "named",
+            "name": "String",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 164,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "live"
+        },
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Package patterns to test instead of the default set.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 81,
+                "line": 125,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "element": {
+                  "kind": "named",
+                  "name": "String",
+                  "nullable": false
+                },
+                "kind": "list",
+                "nullable": true
+              },
+              "wire_name": "packages"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Only run tests matching this regular expression, as go test -run.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 129,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "run"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Runs the SQL persistence, DSQL plugin, schema, DSQL tool and pool simulator tests\nwith the race detector.",
+          "return_type": {
+            "kind": "named",
+            "name": "String",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 122,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "test"
+        }
+      ],
+      "interfaces": [],
+      "kind": "object",
+      "source": {
+        "column": 12,
+        "line": 33,
+        "path": "src/lib.rs"
+      },
+      "wire_name": "Ci"
+    },
+    "Query": {
+      "deprecation": null,
+      "documentation": "The module query root.",
+      "enum_values": [],
+      "fields": [],
+      "functions": [
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": "/",
+              "deprecation": null,
+              "documentation": "Repository checkout; defaults to the workspace root.",
+              "ignore": [
+                ".git",
+                ".claude",
+                ".cursor",
+                ".idea",
+                ".vscode",
+                ".dagger",
+                ".buildkite",
+                "**/.DS_Store",
+                ".bin",
+                ".stamp",
+                ".tmp",
+                ".testoutput",
+                ".coverage",
+                "dist",
+                "develop/docker-compose",
+                "temporal-*",
+                "tdbg",
+                "tctl*",
+                "fairsim",
+                "poolsim"
+              ],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 51,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Directory",
+                "nullable": false
+              },
+              "wire_name": "source"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": true,
+          "deprecation": null,
+          "documentation": null,
+          "return_type": {
+            "kind": "named",
+            "name": "Ci",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 12,
+            "line": 41,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "ci"
+        }
+      ],
+      "interfaces": [],
+      "kind": "object",
+      "source": {
+        "column": 12,
+        "line": 41,
+        "path": "src/lib.rs"
+      },
+      "wire_name": "Query"
+    }
+  }
+}
