@@ -22,7 +22,7 @@ The fork also changes some upstream code to work within DSQL's limits, such as t
 
 | | |
 |---|---|
-| Temporal base | Upstream `main` as of 2026-04-06, just before v1.31.0 |
+| Temporal base | Upstream release `v1.32.1` |
 | DSQL schema version | 1.2 |
 | Go | 1.26 |
 
@@ -72,7 +72,7 @@ There are no releases yet. Build from source as shown above.
 
 ## Contributing
 
-Open issues and pull requests in this repository, not in `temporalio/temporal`. `main` is protected, so every change goes through a pull request, including merges from upstream.
+Open issues and pull requests in this repository, not in `temporalio/temporal`. `main` is protected, so every change goes through a pull request, including moves to a new upstream release; see [upgrading to a new release tag](../docs/dsql/upstream-changes.md#upgrading-to-a-new-release-tag).
 
 ## Built with Claude Code
 
