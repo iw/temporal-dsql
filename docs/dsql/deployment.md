@@ -70,6 +70,19 @@ v1.2 drops the global unique index on `buffered_events(id)`, so the server can n
 
 v1.1 adds the `current_chasm_executions` table for CHASM support (standalone activities, schedulers).
 
+### Restore retention on existing system namespaces
+
+New clusters create `temporal-system` with seven days of retention. Clusters created
+by earlier fork versions may still have zero retention; upgrading the server does
+not update an existing namespace. Apply this one-time correction:
+
+```bash
+temporal operator namespace update --namespace temporal-system --retention 7d
+```
+
+The frontend does not special-case `temporal-system`, but this command has not been
+tried against a live cluster. It cannot recover history that has already been deleted.
+
 ### Least-privilege role
 
 After schema setup, connect as `admin` and run these statements individually to create a runtime role and map it to the Temporal hosts' IAM role:

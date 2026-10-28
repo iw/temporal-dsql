@@ -11,7 +11,7 @@ const (
 	templateEnqueueMessageQueryV2            = `INSERT INTO queue_messages (queue_type, queue_name, queue_partition, message_id, message_payload, message_encoding) VALUES(:queue_type, :queue_name, :queue_partition, :message_id, :message_payload, :message_encoding)`
 	templateGetMessagesQueryV2               = `SELECT message_id, message_payload, message_encoding FROM queue_messages WHERE queue_type = $1 and queue_name = $2 and queue_partition = $3 and message_id >= $4 ORDER BY message_id ASC LIMIT $5`
 	templateRangeDeleteMessagesQueryV2       = `DELETE FROM queue_messages WHERE queue_type = $1 and queue_name = $2 and queue_partition = $3 and message_id >= $4 and message_id <= $5`
-	templateGetLastMessageIDQueryV2          = `SELECT message_id FROM queue_messages WHERE queue_type=$1 and queue_name=$2 and queue_partition=$3 and message_id >= (SELECT message_id FROM queue_messages WHERE queue_type=$1 and queue_name=$2 and queue_partition=$3 ORDER BY message_id DESC LIMIT 1) FOR UPDATE`
+	templateGetLastMessageIDQueryV2          = `SELECT message_id FROM queue_messages WHERE queue_type=$1 AND queue_name=$2 AND queue_partition=$3 ORDER BY message_id DESC LIMIT 1 FOR UPDATE`
 	templateCreateQueueMetadataQueryV2       = `INSERT INTO queues (queue_type, queue_name, metadata_payload, metadata_encoding) VALUES(:queue_type, :queue_name, :metadata_payload, :metadata_encoding)`
 	templateUpdateQueueMetadataQueryV2       = `UPDATE queues SET metadata_payload = :metadata_payload, metadata_encoding = :metadata_encoding WHERE queue_type = :queue_type and queue_name = :queue_name`
 	templateGetQueueMetadataQueryV2          = `SELECT metadata_payload, metadata_encoding from queues WHERE queue_type=$1 and queue_name=$2`

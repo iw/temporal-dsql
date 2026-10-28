@@ -126,6 +126,24 @@ namespaceIDStr := row.NamespaceID.String()
 runIDStr := row.RunID.String()
 ```
 
+### CHASM path limits
+
+`chasm_node_maps.chasm_path` uses `VARCHAR(255)` instead of upstream's `BYTEA`
+because DSQL cannot index `BYTEA` and the path is part of the primary key. The
+**encoded path must be at most 255 characters and contain no NUL characters**.
+The default CHASM path encoder prefixes `\`, `$`, and characters up to `#` with a
+backslash, retaining the original character. Escaping therefore increases the
+length and does not remove NUL characters, which text columns reject.
+
+A write outside these limits returns DSQL's own error. Core wraps errors from
+this writer as `Unavailable`, so Temporal retries the write. A plugin-side check
+alone would not make the failure final.
+
+DSQL has no `ALTER COLUMN ... TYPE` operation and caps the total primary key size
+across all columns at 1 KiB. Widening the path would require a separate design
+decision, rebuilding the table and copying rows in batches of fewer than 3,000;
+it cannot be done by widening the column in place.
+
 ### BIGSERIAL Removal
 
 The `buffered_events.id` column was changed from `BIGSERIAL` to `BIGINT`, and the plugin allocates the IDs itself:
