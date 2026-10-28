@@ -22,11 +22,15 @@ Every physical connection runs `BeforeConnect`, including startup fill and healt
 
 1. Wait for one of eight process-wide slots, respecting cancellation.
 2. Wait once on the plugin's existing connection rate limiter.
-3. Obtain the admin IAM token from the existing cache, using `GetConfiguredTokenDuration()`, and set `ConnConfig.Password`.
+3. Obtain an IAM token for `cfg.User` (or `admin` when empty), using `GetConfiguredTokenDuration()`, and set `ConnConfig.Password`. Admin uses `DbConnectAdmin`; other roles use `DbConnect`. Configured passwords are ignored with one warning.
 
-The slot is released when the hook returns, before the handshake. It bounds concurrent limiter calls, including DynamoDB requests, across all pools in the process. The DSN, endpoint, `CLUSTER_ENDPOINT`, `REGION`/`AWS_REGION`, and token-cache behavior are unchanged.
+The slot is released when the hook returns, before the handshake. It bounds concurrent limiter calls, including DynamoDB requests, across all pools in the process. The endpoint, `CLUSTER_ENDPOINT`, and `REGION`/`AWS_REGION` settings are unchanged. TLS defaults to `verify-full`, regardless of TLS boolean settings. Hosts need a CA bundle trusting Amazon's certificate authorities; standard bundles and usual base images provide it. An explicit `connectAttributes.sslmode` is honored, with one warning unless it is `verify-full`.
 
-Local rate limiting remains the default (`DSQL_CONNECTION_RATE_LIMIT`, default 10/sec; `DSQL_CONNECTION_BURST_LIMIT`, default 100). With `DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED`, the existing DynamoDB counter or token bucket paces connections across processes. Initialization and fallback behavior are unchanged. The token bucket's clock-skew and failure behavior remain tracked in [#40](https://github.com/iw/temporal-dsql/issues/40); token expiry is tracked in [#32](https://github.com/iw/temporal-dsql/issues/32).
+Local rate limiting remains the default (`DSQL_CONNECTION_RATE_LIMIT`, default 10/sec; `DSQL_CONNECTION_BURST_LIMIT`, default 100). With `DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED`, the existing DynamoDB counter or token bucket paces connections across processes. Initialization and fallback behavior are unchanged. The token bucket's clock-skew and failure behavior remain tracked in [#40](https://github.com/iw/temporal-dsql/issues/40).
+
+The cache keeps one reusable token per endpoint, region, user and requested duration. Expiry comes from the signed `X-Amz-Date` plus `X-Amz-Expires`, including any shortening by credentials. Cache hits require 10% of the signed lifetime remaining, with a five-second minimum. Background checks refresh at 80% of the signed lifetime. Malformed or expired tokens are never served. A fresh token already inside the margin can still be used until its signed expiry, with a warning at most once a minute. Credential caching refreshes four to five minutes early using jitter.
+
+Credential retrieval and signing happen outside the cache lock, with concurrent generation for the same key coalesced. Slow retrieval does not block valid cache hits. Failed refresh retains an old token only while it is outside its safety margin; otherwise a new connection receives an error. Existing connections are unaffected because DSQL checks the token only at connection establishment.
 
 ## Errors and ownership
 
@@ -65,6 +69,10 @@ These variables are ignored. If any are set, startup emits one warning listing t
 The slot-block and distributed connection-lease implementations remain in the tree, unwired. `DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true` refuses to connect at startup with an error naming [#33](https://github.com/iw/temporal-dsql/issues/33). A deployment relying on that global cap must resolve its capacity plan before upgrading.
 
 ## Rollout and rollback
+
+**Role behavior changes:** a config whose `user` is not `admin` now connects as that role. The role must exist and be mapped to the host's IAM identity first, or the config must say `user: admin`. See [least-privilege role setup](deployment.md#least-privilege-role). Previously the plugin always connected as admin.
+
+Ensure every host has a CA bundle trusting Amazon's certificate authorities for the new `verify-full` default, and that `connectAddr` names the cluster's endpoint host rather than an IP address or alias. Remove configured passwords and unnecessary `sslmode: require` overrides. Schema setup and upgrades continue to use `temporal-dsql-tool --user admin`.
 
 Budget all pool sizes, including old and new replicas during rollout. Remove ignored variables, set `maxConnLifetime` to 50 minutes or less, and remove `maxIdleConns`. Keep rate-limiter configuration. Resolve any reliance on connection leasing before disabling it.
 

@@ -52,6 +52,8 @@ type plugin struct {
 
 	ignoredSettingsOnce sync.Once
 	lifetimeWarningOnce sync.Once
+	passwordWarningOnce sync.Once
+	sslModeWarningOnce  sync.Once
 }
 
 var _ sqlplugin.Plugin = (*plugin)(nil)
@@ -186,27 +188,7 @@ func (p *plugin) createDSQLConnectionWithAuth(
 		return nil, fmt.Errorf("failed to initialize token cache: %w", err)
 	}
 
-	tokenDuration := GetConfiguredTokenDuration()
-
-	logger.Info("Creating DSQL connection with IAM authentication",
-		tag.NewStringTag("endpoint", clusterEndpoint),
-		tag.NewStringTag("region", region),
-		tag.NewStringTag("user", adminUser),
-		tag.NewDurationTag("token_duration", tokenDuration))
-
-	// Create a token provider function that the driver will call for each new connection
-	tokenProvider := func(ctx context.Context) (string, error) {
-		token, err := tokenCache.GetToken(ctx, clusterEndpoint, region, adminUser, tokenDuration)
-		if err != nil {
-			logger.Error("Failed to get fresh DSQL token for connection",
-				tag.Error(err),
-				tag.NewStringTag("endpoint", clusterEndpoint))
-			return "", err
-		}
-		logger.Debug("Got fresh DSQL token for new connection",
-			tag.NewStringTag("endpoint", clusterEndpoint))
-		return token, nil
-	}
+	tokenProvider := p.connectionTokenProvider(cfg, tokenCache, clusterEndpoint, region, logger)
 
 	poolConfig, err := p.poolConfig(cfg, r, tokenProvider, logger)
 	if err != nil {
@@ -223,6 +205,40 @@ func (p *plugin) createDSQLConnectionWithAuth(
 		return nil, fmt.Errorf("failed to ping DSQL: %w", err)
 	}
 	return db, nil
+}
+
+func dsqlUser(cfg *config.SQL) string {
+	if cfg.User == "" {
+		return adminUser
+	}
+	return cfg.User
+}
+
+func (p *plugin) connectionTokenProvider(cfg *config.SQL, tokenCache *TokenCache, clusterEndpoint, region string, logger log.Logger) driver.TokenProvider {
+	user := dsqlUser(cfg)
+	tokenDuration := GetConfiguredTokenDuration()
+
+	logger.Info("Creating DSQL connection with IAM authentication",
+		tag.NewStringTag("endpoint", clusterEndpoint),
+		tag.NewStringTag("region", region),
+		tag.NewStringTag("user", user),
+		tag.NewDurationTag("token_duration", tokenDuration))
+
+	// Create a token provider function that the driver will call for each new connection
+	return func(ctx context.Context) (string, error) {
+		token, err := tokenCache.GetToken(ctx, clusterEndpoint, region, user, tokenDuration)
+		if err != nil {
+			logger.Error("Failed to get fresh DSQL token for connection",
+				tag.Error(err),
+				tag.NewStringTag("endpoint", clusterEndpoint),
+				tag.NewStringTag("user", user))
+			return "", err
+		}
+		logger.Debug("Got fresh DSQL token for new connection",
+			tag.NewStringTag("endpoint", clusterEndpoint),
+			tag.NewStringTag("user", user))
+		return token, nil
+	}
 }
 
 // getOrInitTokenCache returns the token cache, initializing it if necessary.

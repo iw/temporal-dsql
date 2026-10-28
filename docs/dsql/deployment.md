@@ -5,9 +5,10 @@ This guide covers deploying Temporal with Aurora DSQL as the persistence layer, 
 ## Prerequisites
 
 - Aurora DSQL cluster (public endpoint enabled)
-- IAM permissions: `dsql:DbConnectAdmin` on the cluster ARN
+- IAM permissions: `dsql:DbConnectAdmin` for schema administration; `dsql:DbConnect` for hosts using a custom database role (see below)
 - AWS credentials configured (IAM role, environment variables, or credentials file)
 - `temporal-dsql-tool` binary for schema setup
+- A CA bundle on each host that trusts Amazon's certificate authorities; standard bundles and usual base images include these roots
 
 ## 1. Schema Setup
 
@@ -21,6 +22,7 @@ export REGION="us-east-1"
 ./temporal-dsql-tool \
     --endpoint "$CLUSTER_ENDPOINT" \
     --region "$REGION" \
+    --user admin \
     setup-schema \
     --schema-name "dsql/temporal" \
     --version 1.2
@@ -29,6 +31,7 @@ export REGION="us-east-1"
 ./temporal-dsql-tool \
     --endpoint "$CLUSTER_ENDPOINT" \
     --region "$REGION" \
+    --user admin \
     setup-schema \
     --schema-name "dsql/temporal" \
     --version 1.2 \
@@ -45,6 +48,7 @@ Apply the schema change before you deploy the new server:
 ./temporal-dsql-tool \
     --endpoint "$CLUSTER_ENDPOINT" \
     --region "$REGION" \
+    --user admin \
     update-schema \
     --schema-name "dsql/temporal" \
     --target-version 1.2
@@ -58,12 +62,29 @@ v1.2 drops the global unique index on `buffered_events(id)`, so the server can n
 ./temporal-dsql-tool \
     --endpoint "$CLUSTER_ENDPOINT" \
     --region "$REGION" \
+    --user admin \
     update-schema \
     --schema-name "dsql/temporal" \
     --target-version 1.2
 ```
 
 v1.1 adds the `current_chasm_executions` table for CHASM support (standalone activities, schedulers).
+
+### Least-privilege role
+
+After schema setup, connect as `admin` and run these statements individually to create a runtime role and map it to the Temporal hosts' IAM role:
+
+```sql
+CREATE ROLE temporal WITH LOGIN;
+AWS IAM GRANT temporal TO 'arn:aws:iam::<account-id>:role/<temporal-role>';
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO temporal;
+```
+
+No schema grant is needed: every role already has `USAGE` on `public`, and DSQL rejects `GRANT ... ON SCHEMA public` because `public` is a system schema.
+
+Configure `sql.user: temporal`. Each Temporal host's IAM identity needs `dsql:DbConnect` on the cluster ARN instead of `dsql:DbConnectAdmin`. Schema setup and upgrades still run as `admin` (`temporal-dsql-tool --user admin`) with the administrative IAM permission. Tables created later need the table grant again after setup or an upgrade.
+
+An empty `sql.user` defaults to `admin`. The plugin ignores `sql.password`, because it uses IAM tokens, and warns once if a password is configured.
 
 ## 2. Static Configuration
 
@@ -74,6 +95,7 @@ persistence:
     dsql-default:
       sql:
         pluginName: "dsql"
+        user: "admin" # Or temporal after completing the least-privilege role setup
         databaseName: "temporal"
         connectAddr: "${CLUSTER_ENDPOINT}:5432"
         maxConns: 50
@@ -83,6 +105,12 @@ persistence:
 `maxIdleConns` is ignored. Service pools open and keep `maxConns` connections in the background (100 if unset). `maxConnLifetime` is capped at 50 minutes; shorter positive values apply. The pool uses four minutes of lifetime jitter and one-minute health checks. See [connection pool](connection-pool.md) for lifecycle details and limitations.
 
 Pool sizing can also use `TEMPORAL_SQL_MAX_CONNS` where the deployment template maps it to `maxConns`. Count every pool in every Temporal process: their total must fit the cluster connection limit (10,000 by default), with headroom for startup pools and rolling replacements.
+
+### TLS verification
+
+The DSQL plugin defaults to `sslmode=verify-full`, verifying both the server certificate and the cluster hostname. The certificate is checked against the host in `connectAddr`, so use the cluster's endpoint host name there, not an IP address or another alias. This applies even when `tls.enabled` or `tls.enableHostVerification` is false or omitted. DSQL accepts only TLS. Each host needs a CA bundle trusting Amazon's certificate authorities; standard bundles and usual base images provide it. `tls.caFile` supplies a custom root bundle through `sslrootcert`; client certificate handling is unchanged.
+
+An explicit `connectAttributes.sslmode` overrides this default. A value other than `verify-full` emits one warning because full certificate and hostname verification is no longer assured. Use this escape hatch only deliberately. The schema tool likewise defaults to `verify-full` and accepts `--sslmode` for an explicit override.
 
 ## 3. Dynamic Configuration
 
@@ -137,7 +165,7 @@ See `temporal-dsql-deploy-ecs/docker/config/dynamicconfig-bench.yaml` for the co
 
 pgxpool is always used. Startup performs a single bounded ping and returns while the service pool fills in the background. A process-wide semaphore permits eight concurrent limiter/token calls across all pools and releases before handshakes. The existing limiter paces startup and replacement connections.
 
-IAM settings remain `REGION` or `AWS_REGION`, `CLUSTER_ENDPOINT` (or the configured address), and `DSQL_TOKEN_DURATION` (default 15 minutes). Token duration does not determine established connection lifetime.
+IAM settings remain `REGION` or `AWS_REGION`, `CLUSTER_ENDPOINT` (or the configured address), and `DSQL_TOKEN_DURATION` (default 15 minutes). The cache derives expiry from the signed token, reserving 10% of its signed lifetime (at least five seconds) for opening a connection. Background checks refresh at 80% of the signed lifetime. A newly generated token inside the margin can be used while still unexpired, with a warning at most once a minute. Credentials refresh four to five minutes before expiry. Token duration does not determine established connection lifetime.
 
 The old reservoir, pool warmup and pool keeper settings are ignored with one warning listing those present. See the [complete removed-variable list and rollout instructions](connection-pool.md#migration-from-the-old-layer).
 
@@ -268,7 +296,7 @@ TOKEN=$(aws dsql generate-db-connect-admin-auth-token \
     --hostname "$CLUSTER_ENDPOINT" \
     --region "$REGION")
 
-psql "host=$CLUSTER_ENDPOINT user=admin password=$TOKEN sslmode=require" \
+psql "host=$CLUSTER_ENDPOINT user=admin password=$TOKEN sslmode=verify-full" \
     -c "SELECT version();"
 ```
 
@@ -308,7 +336,7 @@ Use pool waits, constructing connections and rate-limiter logs to distinguish sa
 | Error | Cause | Solution |
 |-------|-------|----------|
 | "REGION or AWS_REGION must be set" | Missing env var | Set `REGION` or `AWS_REGION` |
-| "failed to resolve AWS credentials" | IAM misconfiguration | Check role/credentials, verify `dsql:DbConnectAdmin` |
+| "failed to resolve AWS credentials" | IAM misconfiguration | Check role/credentials, verify `dsql:DbConnect` for a custom role or `dsql:DbConnectAdmin` for admin |
 | "connection rate limit exceeded" | Too many new connections | Check distributed rate limiter, stagger restarts |
 | `ResourceExhausted` / 53300 / 53400 | Connection not attempted or refused at admission | Inspect limiter and cluster connection budget |
 
@@ -320,6 +348,10 @@ OCC conflicts are expected under concurrent load. The retry logic handles them a
 - Monitor `dsql_tx_exhausted_total` — retries exhausted means the conflict rate exceeds retry budget
 
 ### Rollout and rollback
+
+**Role behavior changes:** a config whose `user` is not `admin` now connects as that role. Create and map the role before rollout, or change the config to `user: admin`. Previously the plugin ignored `user` and always connected as `admin`.
+
+Ensure hosts have a trusted CA bundle before rolling out the new `verify-full` default. Remove password settings and unnecessary `sslmode: require` overrides to enable certificate verification.
 
 Follow the [pool rollout checklist](connection-pool.md#rollout-and-rollback): budget every pool and overlapping replica, remove ignored settings, resolve reliance on leasing, then replace one process at a time while checking pool fill and waits. Startup does not wait for a full pool.
 

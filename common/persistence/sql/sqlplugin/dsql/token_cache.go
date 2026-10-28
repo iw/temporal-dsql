@@ -1,11 +1,15 @@
 // Token cache for DSQL IAM authentication tokens.
-// Maintains cached tokens with proactive refresh to ensure connections always have valid tokens.
-
 package dsql
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"math"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,46 +19,27 @@ import (
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/common/metrics"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
-	// DefaultTokenDuration is the default token validity duration.
-	// 15 minutes is the maximum allowed by Aurora DSQL.
-	DefaultTokenDuration = 15 * time.Minute
-
-	// MinTokenDuration is the minimum allowed token duration.
-	MinTokenDuration = 15 * time.Second
-
-	// RefreshAtLifetimePercent - refresh tokens when this much lifetime has passed
-	RefreshAtLifetimePercent = 0.8
-
-	// DefaultPoolSize is the default number of tokens to keep in the pool
-	DefaultPoolSize = 3
-
-	// adminUser is the DSQL admin user name
-	adminUser = "admin"
-
-	// TokenDurationEnvVar is the environment variable to override token duration.
-	TokenDurationEnvVar = "DSQL_TOKEN_DURATION"
-
-	// backgroundRefreshInterval is how often the background loop runs
+	// DefaultTokenDuration is the requested token lifetime; credentials can shorten it.
+	DefaultTokenDuration      = 15 * time.Minute
+	MinTokenDuration          = 15 * time.Second
+	RefreshAtLifetimePercent  = 0.8
+	adminUser                 = "admin"
+	TokenDurationEnvVar       = "DSQL_TOKEN_DURATION"
 	backgroundRefreshInterval = 10 * time.Second
 )
 
-// GetConfiguredTokenDuration returns the token duration from environment variable
-// or the default if not set.
+// GetConfiguredTokenDuration returns the configured duration, or the default.
 func GetConfiguredTokenDuration() time.Duration {
-	if envDuration := os.Getenv(TokenDurationEnvVar); envDuration != "" {
-		if d, err := time.ParseDuration(envDuration); err == nil {
-			if d >= MinTokenDuration && d <= DefaultTokenDuration {
-				return d
-			}
-		}
+	if d, err := time.ParseDuration(os.Getenv(TokenDurationEnvVar)); err == nil && d >= MinTokenDuration && d <= DefaultTokenDuration {
+		return d
 	}
 	return DefaultTokenDuration
 }
 
-// poolKey uniquely identifies a token pool.
 type poolKey struct {
 	host          string
 	region        string
@@ -62,282 +47,269 @@ type poolKey struct {
 	tokenDuration time.Duration
 }
 
-// pooledToken holds a token with its expiration time.
+func (key poolKey) flightKey() string {
+	return fmt.Sprintf("%q/%q/%q/%d", key.host, key.region, key.user, key.tokenDuration)
+}
+
 type pooledToken struct {
 	token     string
+	signedAt  time.Time
 	expiresAt time.Time
 }
 
-// isValid returns true if the token hasn't expired.
-func (pt *pooledToken) isValid() bool {
-	return time.Now().Before(pt.expiresAt)
+// parseToken fails closed: missing or malformed expiry fields leave a zero expiry.
+func parseToken(token string) *pooledToken {
+	pt := &pooledToken{token: token}
+	_, query, ok := strings.Cut(token, "?")
+	if !ok {
+		return pt
+	}
+	values, err := url.ParseQuery(query)
+	if err != nil || len(values["X-Amz-Date"]) != 1 || len(values["X-Amz-Expires"]) != 1 {
+		return pt
+	}
+	signedAt, err := time.Parse("20060102T150405Z", values.Get("X-Amz-Date"))
+	if err != nil {
+		return pt
+	}
+	seconds, err := strconv.ParseInt(values.Get("X-Amz-Expires"), 10, 64)
+	if err != nil || seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {
+		return pt
+	}
+	pt.signedAt = signedAt
+	pt.expiresAt = signedAt.Add(time.Duration(seconds) * time.Second)
+	return pt
 }
 
-// needsRefresh returns true if the token is at or past 80% of its lifetime.
-func (pt *pooledToken) needsRefresh(tokenDuration time.Duration) bool {
-	refreshAt := pt.expiresAt.Add(-time.Duration(float64(tokenDuration) * (1 - RefreshAtLifetimePercent)))
-	return time.Now().After(refreshAt)
+func (pt *pooledToken) isValid(now time.Time) bool {
+	margin := max(pt.expiresAt.Sub(pt.signedAt)/10, 5*time.Second)
+	return now.Before(pt.expiresAt.Add(-margin))
 }
 
-// tokenPool holds multiple pre-generated tokens for a given key.
-type tokenPool struct {
-	tokens []*pooledToken
+func (pt *pooledToken) refreshAt() time.Time {
+	lifetime := pt.expiresAt.Sub(pt.signedAt)
+	return pt.signedAt.Add(time.Duration(float64(lifetime) * RefreshAtLifetimePercent))
 }
 
-// TokenCache manages pools of pre-generated authentication tokens.
-//
-// # Design
-//
-// - Maintains a pool of pre-generated tokens (default 3 per key)
-// - Background goroutine continuously refreshes tokens approaching expiry
-// - GetToken() always returns immediately from the pool
-// - If pool is empty (shouldn't happen), generates synchronously as fallback
-//
-// # Token Lifecycle
-//
-// 1. On first GetToken(), pool is initialized with tokens generated synchronously
-// 2. Background loop runs every 10 seconds, checking all pools
-// 3. Tokens at 80% lifetime are refreshed (new token generated, old one replaced)
-// 4. GetToken() returns any valid token from the pool
+func (pt *pooledToken) needsRefresh(now time.Time) bool {
+	return !now.Before(pt.refreshAt())
+}
+
+// TokenCache keeps one reusable token per key. Signing and credential retrieval
+// run outside mu, with singleflight sharing generation between concurrent callers.
 type TokenCache struct {
 	mu                  sync.RWMutex
-	pools               map[poolKey]*tokenPool
-	poolSize            int
+	tokens              map[poolKey]*pooledToken
+	generations         singleflight.Group
 	credentialsProvider aws.CredentialsProvider
 	logger              log.Logger
 	metricsHandler      metrics.Handler
-
-	// Background refresh
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	now                 func() time.Time
+	lastWarningAt       time.Time
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	wg                  sync.WaitGroup
+	refreshWake         chan struct{}
 }
 
-// NewTokenCache creates a new token cache with background refresh.
-func NewTokenCache(
-	credentialsProvider aws.CredentialsProvider,
-	logger log.Logger,
-	metricsHandler metrics.Handler,
-) *TokenCache {
-	tc := &TokenCache{
-		pools:               make(map[poolKey]*tokenPool),
-		poolSize:            DefaultPoolSize,
-		credentialsProvider: credentialsProvider,
-		logger:              logger,
-		metricsHandler:      metricsHandler,
-		stopCh:              make(chan struct{}),
-	}
-
-	// Start background refresh goroutine
+func NewTokenCache(provider aws.CredentialsProvider, logger log.Logger, handler metrics.Handler) *TokenCache {
+	tc := newTokenCache(provider, logger, handler, time.Now)
 	tc.wg.Add(1)
 	go tc.backgroundRefreshLoop()
-
 	return tc
 }
 
-// Stop stops the background refresh goroutine.
+func newTokenCache(provider aws.CredentialsProvider, logger log.Logger, handler metrics.Handler, now func() time.Time) *TokenCache {
+	ctx, cancel := context.WithCancel(context.Background())
+	tc := &TokenCache{
+		tokens:              make(map[poolKey]*pooledToken),
+		credentialsProvider: provider,
+		logger:              logger,
+		metricsHandler:      handler,
+		now:                 now,
+		ctx:                 ctx,
+		cancel:              cancel,
+		refreshWake:         make(chan struct{}, 1),
+	}
+	return tc
+}
+
+// Stop cancels background refresh, including an in-flight credentials fetch.
 func (tc *TokenCache) Stop() {
-	tc.stopOnce.Do(func() {
-		close(tc.stopCh)
-	})
+	tc.cancel()
 	tc.wg.Wait()
 }
 
-// backgroundRefreshLoop continuously refreshes tokens approaching expiry.
 func (tc *TokenCache) backgroundRefreshLoop() {
 	defer tc.wg.Done()
-
-	ticker := time.NewTicker(backgroundRefreshInterval)
-	defer ticker.Stop()
-
+	timer := time.NewTimer(tc.nextRefreshDelay())
+	defer timer.Stop()
 	for {
 		select {
-		case <-tc.stopCh:
+		case <-tc.ctx.Done():
 			return
-		case <-ticker.C:
+		case <-tc.refreshWake:
+		case <-timer.C:
 			tc.refreshPools()
 		}
+		timer.Reset(tc.nextRefreshDelay())
 	}
 }
 
-// refreshPools checks all pools and refreshes tokens that need it.
+func (tc *TokenCache) nextRefreshDelay() time.Duration {
+	now := tc.now()
+	delay := backgroundRefreshInterval
+	tc.mu.RLock()
+	defer tc.mu.RUnlock()
+	for _, token := range tc.tokens {
+		untilRefresh := token.refreshAt().Sub(now)
+		// Retry overdue tokens on the regular interval after a failed refresh,
+		// rather than spinning. Short-lived tokens wake the loop before that interval.
+		if untilRefresh > 0 {
+			delay = min(delay, untilRefresh)
+		}
+	}
+	return delay
+}
+
 func (tc *TokenCache) refreshPools() {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-
-	for key, pool := range tc.pools {
-		tc.refreshPoolLocked(key, pool)
+	now := tc.now()
+	tc.mu.RLock()
+	pending := make(map[poolKey]*pooledToken)
+	for key, token := range tc.tokens {
+		if token.needsRefresh(now) {
+			pending[key] = token
+		}
+	}
+	tc.mu.RUnlock()
+	for key, token := range pending {
+		if tc.ctx.Err() != nil {
+			return
+		}
+		if _, err := tc.refreshToken(tc.ctx, key, token); err != nil && tc.logger != nil {
+			tc.logger.Error("Background token refresh failed", tag.Error(err),
+				tag.NewStringTag("host", key.host), tag.NewStringTag("user", key.user))
+		}
 	}
 }
 
-// refreshPoolLocked refreshes tokens in a pool that need refreshing.
-// Must be called with tc.mu held.
-func (tc *TokenCache) refreshPoolLocked(key poolKey, pool *tokenPool) {
-	// Remove expired tokens and refresh those approaching expiry
-	validTokens := make([]*pooledToken, 0, tc.poolSize)
-
-	for _, pt := range pool.tokens {
-		if !pt.isValid() {
-			// Token expired, discard it
-			continue
-		}
-		if pt.needsRefresh(key.tokenDuration) {
-			// Token approaching expiry, generate replacement
-			newToken, err := tc.generateTokenLocked(key)
-			if err != nil {
-				tc.recordTokenRefreshFailure()
-				if tc.logger != nil {
-					tc.logger.Error("Background token refresh failed",
-						tag.Error(err),
-						tag.NewStringTag("host", key.host))
-				}
-				// Keep the old token for now
-				validTokens = append(validTokens, pt)
-			} else {
-				validTokens = append(validTokens, newToken)
-				tc.recordTokenRefresh()
-				tc.logTokenRefresh(key.host, key.region, key.user, key.tokenDuration)
-			}
-		} else {
-			// Token still good
-			validTokens = append(validTokens, pt)
-		}
-	}
-
-	// Ensure pool has enough tokens
-	for len(validTokens) < tc.poolSize {
-		newToken, err := tc.generateTokenLocked(key)
-		if err != nil {
-			tc.recordTokenRefreshFailure()
-			if tc.logger != nil {
-				tc.logger.Error("Failed to replenish token pool",
-					tag.Error(err),
-					tag.NewStringTag("host", key.host))
-			}
-			break
-		}
-		validTokens = append(validTokens, newToken)
-		tc.recordTokenRefresh()
-		tc.logTokenRefresh(key.host, key.region, key.user, key.tokenDuration)
-	}
-
-	pool.tokens = validTokens
+func (tc *TokenCache) cachedToken(key poolKey) *pooledToken {
+	tc.mu.RLock()
+	defer tc.mu.RUnlock()
+	return tc.tokens[key]
 }
 
-// GetToken returns a valid token from the pool. On first call, initializes
-// the pool synchronously. After that, always returns from pool immediately.
-func (tc *TokenCache) GetToken(ctx context.Context, host, region, user string, tokenDuration time.Duration) (string, error) {
-	if tokenDuration == 0 {
-		tokenDuration = DefaultTokenDuration
-	}
-
-	key := poolKey{
-		host:          host,
-		region:        region,
-		user:          user,
-		tokenDuration: tokenDuration,
-	}
-
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-
-	pool, exists := tc.pools[key]
-	if !exists {
-		// First request - initialize pool
-		pool = &tokenPool{tokens: make([]*pooledToken, 0, tc.poolSize)}
-		tc.pools[key] = pool
-
-		// Generate initial tokens
-		for i := 0; i < tc.poolSize; i++ {
-			token, err := tc.generateTokenLocked(key)
-			if err != nil {
-				if i == 0 {
-					// Can't even generate one token
-					return "", err
-				}
-				// Got at least one, continue with what we have
-				break
-			}
-			pool.tokens = append(pool.tokens, token)
-			tc.recordTokenRefresh()
-		}
-
-		tc.logTokenRefresh(key.host, key.region, key.user, key.tokenDuration)
-	}
-
-	// Find a valid token in the pool
-	for _, pt := range pool.tokens {
-		if pt.isValid() {
-			tc.recordCacheHit()
-			return pt.token, nil
-		}
-	}
-
-	// No valid tokens (shouldn't happen with background refresh)
-	tc.recordCacheMiss()
-
-	// Fallback: generate synchronously
-	token, err := tc.generateTokenLocked(key)
-	if err != nil {
-		tc.recordTokenRefreshFailure()
+// GetToken serves cached tokens only outside their safety margin. A newly signed
+// token inside the margin may be returned to its waiters, but never after expiry.
+func (tc *TokenCache) GetToken(ctx context.Context, host, region, user string, duration time.Duration) (string, error) {
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-
-	pool.tokens = append(pool.tokens, token)
-	tc.recordTokenRefresh()
-	tc.logTokenRefresh(key.host, key.region, key.user, key.tokenDuration)
-
+	if duration == 0 {
+		duration = DefaultTokenDuration
+	}
+	if user == "" {
+		user = adminUser
+	}
+	key := poolKey{host: host, region: region, user: user, tokenDuration: duration}
+	token := tc.cachedToken(key)
+	if token != nil && token.isValid(tc.now()) {
+		tc.recordCacheHit()
+		return token.token, nil
+	}
+	tc.recordCacheMiss()
+	token, err := tc.refreshToken(ctx, key, token)
+	if err != nil {
+		return "", err
+	}
+	// A waiter may resume after the generated token has already expired.
+	if !tc.now().Before(token.expiresAt) {
+		return "", errors.New("DSQL IAM token has expired")
+	}
 	return token.token, nil
 }
 
-// generateTokenLocked generates a new pooled token.
-// Must be called with tc.mu held.
-func (tc *TokenCache) generateTokenLocked(key poolKey) (*pooledToken, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	var tokenOpts []func(*auth.TokenOptions)
-	if key.tokenDuration > 0 {
-		tokenOpts = append(tokenOpts, func(opts *auth.TokenOptions) {
-			opts.ExpiresIn = key.tokenDuration
-		})
+func (tc *TokenCache) refreshToken(ctx context.Context, key poolKey, previous *pooledToken) (*pooledToken, error) {
+	result := tc.generations.DoChan(key.flightKey(), func() (interface{}, error) {
+		// Another generation may have completed between the cache lookup and joining the flight.
+		if current := tc.cachedToken(key); current != nil && current != previous && current.isValid(tc.now()) {
+			return current, nil
+		}
+		token, err := tc.generateToken(key)
+		if err != nil {
+			tc.recordTokenRefreshFailure()
+			return nil, err
+		}
+		now := tc.now()
+		if !now.Before(token.expiresAt) {
+			tc.recordTokenRefreshFailure()
+			return nil, errors.New("generated DSQL IAM token has expired or has invalid expiry")
+		}
+		tc.mu.Lock()
+		tc.tokens[key] = token
+		warn := !token.isValid(now) && (tc.lastWarningAt.IsZero() || now.Sub(tc.lastWarningAt) >= time.Minute)
+		if warn {
+			tc.lastWarningAt = now
+		}
+		tc.mu.Unlock()
+		select {
+		case tc.refreshWake <- struct{}{}:
+		default:
+		}
+		if warn && tc.logger != nil {
+			tc.logger.Warn("Generated DSQL IAM token is inside its expiry safety margin",
+				tag.NewStringTag("host", key.host), tag.NewStringTag("user", key.user),
+				tag.NewDurationTag("remaining_lifetime", token.expiresAt.Sub(now)))
+		}
+		tc.recordTokenRefresh()
+		tc.logTokenRefresh(key.host, key.region, key.user, token.expiresAt.Sub(token.signedAt))
+		return token, nil
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-result:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		token, ok := res.Val.(*pooledToken)
+		if !ok {
+			return nil, errors.New("unexpected DSQL token generation result")
+		}
+		return token, nil
 	}
+}
 
+func (tc *TokenCache) generateToken(key poolKey) (*pooledToken, error) {
+	// Callers cancel their own wait without canceling generation for other waiters.
+	ctx, cancel := context.WithTimeout(tc.ctx, 30*time.Second)
+	defer cancel()
+	options := func(opts *auth.TokenOptions) { opts.ExpiresIn = key.tokenDuration }
 	var token string
 	var err error
-
 	if key.user == adminUser {
-		token, err = auth.GenerateDBConnectAdminAuthToken(ctx, key.host, key.region, tc.credentialsProvider, tokenOpts...)
+		token, err = auth.GenerateDBConnectAdminAuthToken(ctx, key.host, key.region, tc.credentialsProvider, options)
 	} else {
-		token, err = auth.GenerateDbConnectAuthToken(ctx, key.host, key.region, tc.credentialsProvider, tokenOpts...)
+		token, err = auth.GenerateDbConnectAuthToken(ctx, key.host, key.region, tc.credentialsProvider, options)
 	}
-
 	if err != nil {
 		return nil, err
 	}
-
-	return &pooledToken{
-		token:     token,
-		expiresAt: time.Now().Add(key.tokenDuration),
-	}, nil
+	return parseToken(token), nil
 }
 
-// Clear removes all pools. Useful for testing.
+// Clear removes all cached tokens.
 func (tc *TokenCache) Clear() {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	tc.pools = make(map[poolKey]*tokenPool)
+	tc.tokens = make(map[poolKey]*pooledToken)
 }
 
-// Size returns total number of tokens across all pools.
+// Size returns the number of cached tokens.
 func (tc *TokenCache) Size() int {
 	tc.mu.RLock()
 	defer tc.mu.RUnlock()
-	count := 0
-	for _, pool := range tc.pools {
-		count += len(pool.tokens)
-	}
-	return count
+	return len(tc.tokens)
 }
 
 // Metrics helpers
@@ -377,7 +349,11 @@ func (tc *TokenCache) logTokenRefresh(host, region, user string, duration time.D
 
 // ResolveCredentialsProvider resolves the AWS credentials provider once.
 func ResolveCredentialsProvider(ctx context.Context, region string) (aws.CredentialsProvider, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region),
+		awsconfig.WithCredentialsCacheOptions(func(options *aws.CredentialsCacheOptions) {
+			options.ExpiryWindow = 5 * time.Minute
+			options.ExpiryWindowJitterFrac = 0.2
+		}))
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -47,11 +48,25 @@ var (
 
 func (p *plugin) poolConfig(cfg *config.SQL, r resolver.ServiceResolver, tokenProvider driver.TokenProvider, logger log.Logger) (*pgxpool.Config, error) {
 	dsqlConfig := *cfg
-	dsqlConfig.User = adminUser
+	dsqlConfig.User = dsqlUser(cfg)
 	dsqlConfig.Password = "placeholder"
+	if cfg.Password != "" {
+		p.passwordWarningOnce.Do(func() {
+			logger.Warn("DSQL password is ignored; connections use IAM authentication")
+		})
+	}
 	dsn, err := session.BuildDSN(&dsqlConfig, r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build DSN: %w", err)
+	}
+	parsedDSN, err := url.Parse(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if mode := parsedDSN.Query().Get("sslmode"); mode != "verify-full" {
+		p.sslModeWarningOnce.Do(func() {
+			logger.Warn("DSQL server certificate and hostname are not fully verified; use sslmode=verify-full", tag.NewStringTag("sslmode", mode))
+		})
 	}
 	poolConfig, err := pgxpool.ParseConfig(dsn)
 	if err != nil {

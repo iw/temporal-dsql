@@ -11,7 +11,6 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/require"
-	"go.temporal.io/server/common/auth"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
@@ -21,6 +20,19 @@ import (
 )
 
 func TestDSQLPoolIntegration(t *testing.T) {
+	testDSQLPoolIntegration(t, "")
+}
+
+func TestDSQLPoolRoleIntegration(t *testing.T) {
+	user := os.Getenv("DSQL_TEST_USER")
+	if user == "" {
+		t.Skip("set DSQL_TEST_USER to test an IAM-mapped database role")
+	}
+	testDSQLPoolIntegration(t, user)
+}
+
+func testDSQLPoolIntegration(t *testing.T, user string) {
+	t.Helper()
 	endpoint := os.Getenv("DSQL_TEST_ENDPOINT")
 	if endpoint == "" {
 		t.Skip("set DSQL_TEST_ENDPOINT to run against a live DSQL cluster")
@@ -33,11 +45,11 @@ func TestDSQLPoolIntegration(t *testing.T) {
 	require.NoError(t, err)
 	cfg := &config.SQL{
 		DatabaseName: "postgres", ConnectAddr: net.JoinHostPort(endpoint, "5432"), MaxConns: 3,
-		TLS: &auth.TLS{Enabled: true, EnableHostVerification: true},
+		User: user,
 	}
-	c, err := p.poolConfig(cfg, resolver.NewNoopResolver(), func(ctx context.Context) (string, error) {
-		return cache.GetToken(ctx, endpoint, region, adminUser, GetConfiguredTokenDuration())
-	}, logger)
+	t.Cleanup(cache.Stop)
+	provider := p.connectionTokenProvider(cfg, cache, endpoint, region, logger)
+	c, err := p.poolConfig(cfg, resolver.NewNoopResolver(), provider, logger)
 	require.NoError(t, err)
 	sqlDB, connector, err := openPoolDB(c, metrics.NoopMetricsHandler)
 	require.NoError(t, err)
@@ -55,6 +67,9 @@ func TestDSQLPoolIntegration(t *testing.T) {
 	var value int
 	require.NoError(t, pluginDB.(*db).GetContext(ctx, &value, "SELECT 1"))
 	require.Equal(t, 1, value)
+	var connectedUser string
+	require.NoError(t, pluginDB.(*db).GetContext(ctx, &connectedUser, "SELECT current_user"))
+	require.Equal(t, dsqlUser(cfg), connectedUser)
 	require.NoError(t, pluginDB.Close())
 	_, err = connector.pool.Acquire(ctx)
 	require.ErrorContains(t, err, "closed pool")
