@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,6 +25,9 @@ const (
 	dsqlDBType = "dsql"
 
 	defaultTokenTTL = 15 * time.Minute
+
+	// indexBuildTimeout bounds the wait for each asynchronous index build.
+	indexBuildTimeout = 30 * time.Minute
 
 	// Versioning tables - must match the structure expected by Temporal server
 	// (see common/persistence/sql/sqlplugin/dsql/admin.go).
@@ -51,6 +55,9 @@ CREATE TABLE IF NOT EXISTS schema_update_history (
   PRIMARY KEY (version_partition, year, month, update_time)
 )`
 )
+
+// asyncIndexStatement matches CREATE [UNIQUE] INDEX ASYNC, which returns the job_id of the index build.
+var asyncIndexStatement = regexp.MustCompile(`(?i)\bCREATE\s+(UNIQUE\s+)?INDEX\s+ASYNC\b`)
 
 type DSQLSchemaDB struct {
 	db     *sql.DB
@@ -178,11 +185,68 @@ func (d *DSQLSchemaDB) Exec(stmt string, args ...interface{}) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
+	var jobID string
+	if asyncIndexStatement.MatchString(stmt) {
+		if err := tx.QueryRowContext(ctx, stmt, args...).Scan(&jobID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			_ = tx.Rollback()
+			return err
+		}
+	} else if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if jobID == "" {
+		return nil
+	}
+	// When a build finishes, DSQL marks the index active in its catalog, and
+	// transactions using the schema at that moment fail with OC001. Waiting for
+	// each build keeps the later statements, and the server, clear of that.
+	d.logger.Info("Waiting for DSQL index build", tag.NewStringTag("job_id", jobID))
+	ctx, cancel := context.WithTimeout(ctx, indexBuildTimeout)
+	defer cancel()
+	return waitForIndexBuild(ctx, d, jobID)
+}
+
+// jobWaiter is the part of DSQL's job API the tool uses.
+type jobWaiter interface {
+	waitForJob(ctx context.Context, jobID string) (bool, error)
+	jobStatus(ctx context.Context, jobID string) (status, details string, err error)
+}
+
+// waitForIndexBuild blocks until the build completes. sys.wait_for_job returns false
+// when the job hasn't completed, so the job's status decides whether to wait again.
+func waitForIndexBuild(ctx context.Context, w jobWaiter, jobID string) error {
+	for {
+		ok, err := w.waitForJob(ctx, jobID)
+		if err != nil {
+			return fmt.Errorf("wait for DSQL index build %s: %w", jobID, err)
+		}
+		if ok {
+			return nil
+		}
+		status, details, err := w.jobStatus(ctx, jobID)
+		if err != nil {
+			return fmt.Errorf("read status of DSQL index build %s: %w", jobID, err)
+		}
+		if status != "submitted" && status != "processing" {
+			return fmt.Errorf("DSQL index build %s %s: %s", jobID, status, details)
+		}
+	}
+}
+
+func (d *DSQLSchemaDB) waitForJob(ctx context.Context, jobID string) (bool, error) {
+	var succeeded bool
+	err := d.db.QueryRowContext(ctx, `CALL sys.wait_for_job($1)`, jobID).Scan(&succeeded)
+	return succeeded, err
+}
+
+func (d *DSQLSchemaDB) jobStatus(ctx context.Context, jobID string) (status, details string, err error) {
+	var nullStatus, nullDetails sql.NullString
+	err = d.db.QueryRowContext(ctx, `SELECT status, details FROM sys.jobs WHERE job_id = $1`, jobID).Scan(&nullStatus, &nullDetails)
+	return nullStatus.String, nullDetails.String, err
 }
 
 // DropAllTables drops all tables in public schema (DSQL-compatible, no DO blocks).

@@ -42,6 +42,12 @@ schema_region="us-east-1"
 
 The tool uses IAM authentication automatically and has the DSQL schema embedded.
 
+Secondary indexes are built asynchronously (`CREATE INDEX ASYNC`), and the tool
+waits for each build to finish before it runs the next statement. When a build
+finishes, DSQL marks the index active in its catalog, and transactions using the
+schema at that moment fail with OC001. Because of the wait, the schema is settled
+when the tool returns, and the server can start straight away.
+
 The schema is one full baseline at version 1.2. The server requires that version;
 a cluster that fails the version check needs a fresh schema. The region comes
 from `--region` or the endpoint's host name.
