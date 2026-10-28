@@ -18,7 +18,7 @@ func TestSchemaDSNTLS(t *testing.T) {
 				if expected == "" {
 					expected = "verify-full"
 				}
-				dsn := schemaDSN("db.example.invalid", 5432, "admin", "fake-token", "postgres", c.GlobalString("sslmode"))
+				dsn := schemaDSN("db.example.invalid", 5432, "admin", "fake-token", "postgres", c.GlobalString("sslmode"), "")
 				parsed, err := url.Parse(dsn)
 				require.NoError(t, err)
 				require.Equal(t, expected, parsed.Query().Get("sslmode"))

@@ -1,0 +1,6 @@
+{
+  "CurrVersion": "1.0",
+  "MinCompatibleVersion": "1.0",
+  "Description": "DSQL visibility baseline",
+  "SchemaUpdateCqlFiles": ["schema.sql"]
+}

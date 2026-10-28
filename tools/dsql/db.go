@@ -57,8 +57,13 @@ CREATE TABLE IF NOT EXISTS schema_update_history (
 // asyncIndexStatement matches CREATE [UNIQUE] INDEX ASYNC, which returns the job_id of the index build.
 var asyncIndexStatement = regexp.MustCompile(`(?i)\bCREATE\s+(UNIQUE\s+)?INDEX\s+ASYNC\b`)
 
+// schemaNamePattern accepts one unquoted lowercase schema name, which the server's
+// search_path and the tool's own statements resolve the same way.
+var schemaNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+
 type DSQLSchemaDB struct {
 	db     *sql.DB
+	schema string // the PostgreSQL schema the tool works in
 	logger log.Logger
 }
 
@@ -88,6 +93,11 @@ func NewDSQLSchemaDBFromCLI(c *cli.Context, logger log.Logger) (*DSQLSchemaDB, e
 	dbName := strings.TrimSpace(c.GlobalString(schema.CLIOptDatabase))
 	if dbName == "" {
 		dbName = "postgres"
+	}
+
+	searchPath := schemaSearchPath(c)
+	if searchPath != "" && !schemaNamePattern.MatchString(searchPath) {
+		return nil, fmt.Errorf("invalid --%s %q: use one lowercase schema name", cliFlagSearchPath, searchPath)
 	}
 
 	region, err := schemaRegion(endpoint, c.GlobalString("region"))
@@ -127,16 +137,25 @@ func NewDSQLSchemaDBFromCLI(c *cli.Context, logger log.Logger) (*DSQLSchemaDB, e
 	if sslMode != "verify-full" {
 		logger.Warn("DSQL server certificate and hostname are not fully verified; use sslmode=verify-full", tag.NewStringTag("sslmode", sslMode))
 	}
-	dsn := schemaDSN(endpoint, port, user, token, dbName, sslMode)
 
 	logger.Info("Connecting to DSQL for schema operations",
 		tag.NewStringTag("endpoint", endpoint),
 		tag.NewStringTag("region", region),
 		tag.NewStringTag("database", dbName),
 		tag.NewStringTag("user", user),
+		tag.NewStringTag("search_path", searchPath),
 	)
 
-	db, err := sql.Open("pgx", dsn)
+	schemaName := "public"
+	if searchPath != "" {
+		// DSQL connections cache the catalog, so the schema has to exist before the tool's connections open.
+		if err := createSchema(ctx, schemaDSN(endpoint, port, user, token, dbName, sslMode, ""), searchPath); err != nil {
+			return nil, fmt.Errorf("create schema %s: %w", searchPath, err)
+		}
+		schemaName = searchPath
+	}
+
+	db, err := sql.Open("pgx", schemaDSN(endpoint, port, user, token, dbName, sslMode, searchPath))
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +164,17 @@ func NewDSQLSchemaDBFromCLI(c *cli.Context, logger log.Logger) (*DSQLSchemaDB, e
 		return nil, err
 	}
 
-	return &DSQLSchemaDB{db: db, logger: logger}, nil
+	return &DSQLSchemaDB{db: db, schema: schemaName, logger: logger}, nil
+}
+
+func createSchema(ctx context.Context, dsn, name string) error {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	_, err = db.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS "+name)
+	return err
 }
 
 func schemaRegion(endpoint, region string) (string, error) {
@@ -159,10 +188,14 @@ func schemaRegion(endpoint, region string) (string, error) {
 	return "", errors.New("cannot infer region from endpoint; set --region")
 }
 
-func schemaDSN(endpoint string, port int, user, token, dbName, sslMode string) string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+func schemaDSN(endpoint string, port int, user, token, dbName, sslMode, searchPath string) string {
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		url.PathEscape(user), url.PathEscape(token), endpoint, port,
 		url.PathEscape(dbName), url.QueryEscape(sslMode))
+	if searchPath != "" {
+		dsn += "&search_path=" + url.QueryEscape(searchPath)
+	}
+	return dsn
 }
 
 func (d *DSQLSchemaDB) Type() string { return dsqlDBType }
@@ -247,16 +280,15 @@ func (d *DSQLSchemaDB) jobStatus(ctx context.Context, jobID string) (status, det
 	return nullStatus.String, nullDetails.String, err
 }
 
-// DropAllTables drops all tables in public schema (DSQL-compatible, no DO blocks).
+// DropAllTables drops all tables in the tool's schema (DSQL-compatible, no DO blocks).
 func (d *DSQLSchemaDB) DropAllTables() error {
 	ctx := context.Background()
 
-	// List tables in public schema
 	rows, err := d.db.QueryContext(ctx, `
 SELECT table_name
 FROM information_schema.tables
-WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-ORDER BY table_name`)
+WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+ORDER BY table_name`, d.schema)
 	if err != nil {
 		return err
 	}
@@ -276,7 +308,7 @@ ORDER BY table_name`)
 
 	for _, t := range tables {
 		// Drop each table in its own tx
-		stmt := fmt.Sprintf(`DROP TABLE IF EXISTS public.%s`, quoteIdent(t))
+		stmt := fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s`, quoteIdent(d.schema), quoteIdent(t))
 		if err := d.Exec(stmt); err != nil {
 			return err
 		}
