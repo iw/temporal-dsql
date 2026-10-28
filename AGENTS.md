@@ -1,75 +1,47 @@
-You are an experienced developer working on the temporal project. Your task is to fix a bug or implement a new feature while adhering to the project's best practices and development guidelines. Your background is in distributed systems, database engines, and scalable platforms.
-Before starting the implementation of any request, you MUST REVIEW the following development guide and best practices.
+# AGENTS
 
-# Core Mandates
-- **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
-- **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, and 'go.mod') before employing it.
-- **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
-- **Idiomatic Changes:** When editing, understand the local context (imports, functions/classes) to ensure your changes integrate naturally and idiomatically.
-- **Comments:** Add code comments sparingly. Focus on *why* something is done, especially for complex logic, rather than *what* is done. Only add high-value comments if necessary for clarity or if requested by the user. Do not edit comments that are separate from the code you are changing. *NEVER* talk to the user or describe your changes through comments.
-- **Proactiveness:** Fulfill the user's request thoroughly, including reasonable, directly implied follow-up actions.
-- **Confirm Ambiguity/Expansion:** Do not take significant actions beyond the clear scope of the request without confirming with the user. If asked *how* to do something, explain first, don't just do it.
-- **Explaining Changes:** After completing a code modification or file operation provide summaries.
-- **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+## Mission
+- Enable Temporal to run with Amazon Aurora DSQL as the **persistence** database while keeping the existing visibility store unchanged.
+- Maintain Temporal feature parity, operational reliability, and performance envelopes established for the current persistence backends.
+- Deliver incremental milestones that unblock experimentation without destabilizing the primary Temporal development branch.
 
-# Tone and Style
-- **Concise & Direct:** Adopt a professional, direct, and concise tone suitable for a chat environment.
-- **Minimal Output:** Aim for fewer than 3 lines of text output (excluding tool use/code generation) per response whenever practical. Focus strictly on the user's query.
-- **Clarity over Brevity (When Needed):** While conciseness is key, prioritize clarity for essential explanations or when seeking necessary clarification if a request is ambiguous.
-- **No Chitchat:** Avoid conversational filler, preambles ("Okay, I will now..."), or postambles ("I have finished the changes..."). Get straight to the action or answer.
-- **Formatting:** Use GitHub-flavored Markdown. Responses will be rendered in monospace.
-- **Tools vs. Text:** Use tools for actions, text output *only* for communication. Do not add explanatory comments within tool calls or code blocks unless specifically part of the required code/command itself.
-- **Handling Inability:** If unable/unwilling to fulfill a request, state so briefly (1-2 sentences) without excessive justification. Offer alternatives if appropriate.
+## Scope & Non‑Goals
+- **In scope:** schema compatibility, persistence layer wiring, config surfaces, tooling/tests for Aurora DSQL, schema setup, observability.
+- **Not in scope:** changes to visibility DB, unrelated feature work, adopting new third‑party libraries unless usage already exists in `go.mod`.
+- Avoid speculative refactors; tie every change to Aurora DSQL enablement or required hygiene uncovered along the way.
 
+## Architecture Touchpoints
+1. **`/common/persistence`**: storage interfaces, factory wiring, schema management utilities.
+2. **`/service/*`**: ensure persistence clients are injectable/configurable per service without affecting visibility paths.
+3. **`/schema`**: DSQL schema artifacts and validation tooling.
+4. **Config**: extend dynamic/static config knobs (under `/config` and `/common/dynamicconfig`) so operators can opt into DSQL.
+5. **Tooling**: `make` targets, proto/codegen hooks, and deployment templates that reference persistence backends.
 
-# Development Guide
-## Project Structure
-- `/api`: proto definitions and generated code
-- `/chasm`: library for Chasm (Coordinated Heterogeneous Application State Machines)
-- `/client`: client libraries for inter-service communication between frontend/history/matching etc.
-- `/cmd`: CLI commands and main applications
-- `/common`: modules shared across all services
-- `/common/dynamicconfig`: dynamic configuration library
-- `/common/membership`: cluster membership management
-- `/common/metrics`: metrics definition and library
-- `/common/namespace`: namespace cache and utilities
-- `/common/nexus`: Nexus service client and utilities
-- `/common/persistence`: persistence layer abstractions and implementations
-- `/components`: nexus components
-- `/config`: configuration files and templates
-- `/docs`: documentation
-- `/proto`: proto definitions for internal services
-- `/schema`: database schema definitions for core databases store and visibility store
-- `/service`: main services (frontend, history, matching, worker, etc.)
-- `/service/frontend`: frontend service implementation
-- `/service/history`: history service implementation
-- `/service/matching`: matching service implementation
-- `/service/worker`: worker service implementation
+## Working Agreements
+- Mirror existing code style, naming, and error handling patterns. Inspect neighboring files before editing.
+- Verify any dependency is already used in the repo before importing it.
+- Prefer incremental PRs grouped by subsystem (e.g., schema prep, persistence adapter, service wiring, tests).
+- Keep comments minimal and focused on *why* design trade‑offs were made.
+- Do not revert or overwrite local developer changes unless explicitly asked.
+- Attribute agent-assisted work. Commits made with an AI coding agent end with a `Co-Authored-By:` trailer naming the agent; Claude Code adds `Co-Authored-By: <model> <noreply@anthropic.com>` by default. Pull request descriptions end with the agent's attribution line, such as `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Keep these lines when squashing, rebasing or rewording commits. The shared `.claude/settings.json` sets Claude Code's `attribution.pr`.
 
-## Important Commands:
-- Linting: `make lint-code`
-- Formatting imports: `make fmt-imports`
-- Code generation: `make proto`
-- Update API proto: `make update-go-api`
-- Unit Testing: `make unit-test`
+## Development Flow
+1. **Understand**: read surrounding code/tests/config before coding; capture findings in issue notes or design docs.
+2. **Plan**: break tasks into verifiable steps with explicit test strategies; call out performance, scalability, complexity, and security trade‑offs and failure modes (crash recovery, 10× load, etc.).
+3. **Implement**: follow repo conventions, ensure error paths are handled/logged appropriately (`logger.Fatal` vs `logger.DPanic`).
+4. **Regenerate**: rerun codegen whenever touching `.proto`, `//go:generate`, or schema assets.
+5. **Verify**: run `make lint-code` plus targeted unit tests (`make unit-test -tags test_dep` as needed). Document skipped tests with rationale.
 
-## Best Practices:
-- Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project
-- Do not litter our codebase with unnecessary comments. Comments should describe WHY something was done, never WHAT was done
-- Implement tests for both best-case scenarios and failure modes
-- Handle errors appropriately
-  - errors MUST be handled, not ignored
-- Leave `CONSIDER(name):` comments for future design considerations
-- Regenerate code when interface definitions change
-- Always include `-tags test_dep` when running tests
-- Include the `integration` tag only for integration tests
-- Do not introduce new third party libraries unless specifically requested.
+## Testing Expectations
+- Cover success and failure cases for persistence adapters, config guards, and schema setup.
+- Include regression tests for mixed persistence/visibility backends.
+- Leverage deterministic fixtures; avoid flaky integration tests unless tagged with `integration`.
+- Prefer `require` over `assert`, avoid testify suites in unit tests, use `require.Eventually` instead of `time.Sleep`.
 
-## Error Handling:
-- Check and handle all errors
-- Use appropriate logging methods based on error severity
-  - Use `logger.Fatal` for core invariant violations
-  - Use `logger.DPanic` for issues that are important but should not crash production
+## Operational Considerations
+- Document deployment instructions for operators (configuration, schema setup, capacity and failure handling).
+- Ensure metrics/alerts exist for Aurora DSQL health and latency; extend `/common/metrics` definitions when necessary.
+- Capture open questions (consistency model, transaction semantics, failure domains) in tracking issues or this document.
 
 ## Testing:
 - Write tests for new functionality
@@ -79,26 +51,97 @@ Before starting the implementation of any request, you MUST REVIEW the following
 - For float comparisons in tests, use `InDelta` or `InEpsilon` instead of `Equal` (enforced by `testifylint`)
 - For error assertions in testify suites, use `s.Require().NoError(err)` instead of `s.NoError(err)` (enforced by `testifylint`)
 
-# Primary Workflows
-## Software Engineering Tasks
-When requested to perform tasks like fixing bugs, adding features, refactoring, or explaining code, follow this sequence:
-1. **Understand:** Think about the user's request and the relevant codebase context.
-2. **Plan:** Build a coherent and grounded (based on the understanding in step 1) plan for how you intend to resolve the user's task. Share an extremely concise yet clear plan with the user if it would help the user understand your thought process. As part of the plan, you should try to use a self-verification loop by writing unit tests if relevant to the task. Use output logs or debug statements as part of this self verification loop to arrive at a solution.
-3. **Implement:** Use the available tools to act on the plan, strictly adhering to the project's established conventions (detailed under 'Core Mandates').
-4. **Regenerate:** If necessary, regenerate code based on your changes. If you alter anything annotated with `//go:generate` or in a `.proto` file you will need to do this.
-5. **Verify (Tests):** If applicable and feasible, verify the changes using the project's testing procedures. Identify the correct test commands and frameworks by examining 'README' files, build/package configuration (e.g., 'Makefile'), or existing test execution patterns. NEVER assume standard test commands.
-6. **Verify (Standards):** VERY IMPORTANT: After making code changes, execute the project-specific build, linting and type-checking commands (`make lint-code`)
+---
 
-## Planning
-When planning (under 'Software Engineering Tasks'):
-1. Break down the feature into smaller, manageable tasks.
-2. Consider potential challenges for each task and how to address them.
-3. Provide a high-level outline of the code structure, including function names and their purposes.
-4. List specific test cases you plan to implement.
-5. State which error handling approaches you will use for different scenarios.
-6. Discuss the trade-offs inherent in your design decisions, including:
-  a. Performance trade-offs
-  b. Scalability trade-offs
-  c. Complexity trade-offs
-  d. Security trade-offs
-7. Reason about the failure modes of your design. How does it handle crashes? A 10x increase in load?
+## Implementation Status
+
+> **Known issues (review of 2026-10-16):** The critical and high findings are fixed. Remaining findings are tracked in the [open review issues](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+is%3Aopen+label%3Adsql-review-2026-10). The plugin remains experimental and is not recommended for production.
+
+### ✅ Implemented
+
+#### Schema Compatibility
+- DSQL-compatible schema baseline 1.2 (`schema/dsql/temporal/schema.sql`)
+- UUID identifiers in composite primary keys
+- BIGINT `buffered_events` IDs allocated per run inside the transaction
+- CHECK constraints omitted; the application validates values
+- INDEX ASYNC for non-blocking index creation
+
+#### Persistence Layer
+- First-class DSQL plugin (`common/persistence/sql/sqlplugin/dsql/`)
+- Optimistic concurrency control; transactions that fail with SQLSTATE 40001 are retried through the opt-in `sqlplugin.TxRetryPolicy` hook
+- Shard updates are fenced by the range check in `lockShard`, as upstream
+- FOR UPDATE queries use single tables
+- Shard read lock uses FOR KEY SHARE, so a range renewal fails the commit of an in-flight write that read the old range
+
+#### IAM Authentication
+- pgxpool BeforeConnect hook obtains IAM tokens from the existing cache
+- Token cache reads each token's expiry from the signed token and refreshes it before it expires
+- Connections use the configured `user` role (default `admin`); passwords are ignored and TLS defaults to `verify-full`
+
+#### Connection Management
+- **pgxpool** behind `database/sql` — service pools keep `MinConns == MaxConns` (configured `maxConns`, default 100); ephemeral pools use max 5/min 0. A closing connector owns pool and metrics shutdown. Connection failures do not rebuild pools.
+- Lifetime is capped at 50 minutes, with 4 minutes of jitter and 1-minute health checks. `maxIdleConns` is ignored. There are no acquire/release hooks. See the expiry and shutdown limitations in `docs/dsql/connection-pool.md`.
+- A process-wide semaphore of 8 bounds limiter/token calls before each handshake. Background fill uses the same rate limiter as on-demand connections.
+- **Token Bucket Rate Limiter** (opt-in) — DynamoDB-backed GCRA reservations, with burst capacity 1000 and 100/sec sustained. Reservations only move forward under clock skew. The token bucket falls back to local pacing for 30 seconds on DynamoDB errors; local pacing is the default mode.
+
+#### Observability
+- DSQL-specific transaction conflict, retry, backoff and exhaustion metrics
+- pgxpool gauges and counters (constructing, waits, new connections, lifetime destroys, canceled acquires)
+- Connection pool metrics (open, idle, in-use)
+
+#### Documentation
+- `docs/dsql/README.md` - Documentation index
+- `docs/dsql/deployment.md` - Deployment and configuration
+- `docs/dsql/implementation.md` - Technical implementation details
+- `docs/dsql/connection-pool.md` - Pool architecture, sizing and lifecycle
+- `docs/dsql/metrics.md` - Metrics reference
+- `docs/dsql/ci.md` - CI: the Dagger module, the Buildkite pipeline and the live tests
+
+#### Tooling
+- `tools/poolsim/` - Discrete event simulator for pgxpool, DSQL limits and workload scenarios
+- `tools/dsql/` - DSQL schema management tool
+- `.dagger/modules/ci/` - Dagger CI module: `dagger call ci build|lint|test`
+- `.dagger/live/` - Rust program for the DSQL live tests on throwaway AWS resources, run locally with the `temporal-dsql-ci` profile
+
+### Known Constraints
+
+1. **Sequences and Identity Columns**: Supported by DSQL; the plugin doesn't use them, because `buffered_events` IDs only need to be unique within a run
+2. **CHECK Constraints**: Supported by DSQL; the schema omits them and the application validates instead
+3. **FOR SHARE Not Supported**: The shard read lock uses FOR KEY SHARE instead
+4. **FOR UPDATE on JOINs**: Supported by DSQL; the plugin uses single-table queries
+5. **Connection Rate Limit**: 100 connections/second cluster-wide
+6. **Connection Limit**: 10,000 connections per cluster (default, can be raised)
+7. **Transaction Limits**: 3,000 modified rows and 10 MiB per transaction; range deletes run in batches that halve on SQLSTATE 54000
+8. **Column Size**: 1 MiB per non-indexed column value; the plugin reports SQLSTATE 54000 as `TransactionSizeLimitError`, and the DSQL dynamic config caps history batches and payloads below 1 MiB
+9. **Connection Duration**: 60 minutes maximum
+
+### Recommended Configuration
+
+**Service pool sizing:** set `maxConns` per pool and `maxConnLifetime: 50m` (or shorter). Every service pool opens its full size in the background and keeps it. The sum across all pools in all Temporal processes must fit the cluster limit (10,000 by default), allowing for rolling deployments and ephemeral pools. `maxIdleConns` is ignored. See `docs/dsql/connection-pool.md` for lifecycle limitations.
+
+**Distributed Rate Limiting with Token Bucket** (opt-in; see `docs/dsql/connection-pool.md` for sizing and outage behavior):
+```yaml
+# Under persistence.datastores.<store>.sql:
+connectAttributes:
+  # region: "us-east-1" # Inferred from the DSQL endpoint when omitted
+  rate_limiter: "dynamodb_token_bucket"
+  rate_limiter_table: "temporal-dsql-rate-limiter"
+  token_bucket_rate: "100"
+  token_bucket_capacity: "1000"
+```
+
+Plugin settings come only from datastore `connectAttributes` or defaults. Region comes from `region` or the endpoint host name; an unrecognized endpoint requires an explicit region. Invalid settings or token bucket mode without a table fail startup. The process-wide limiter uses the first pool's settings and warns once if a later pool requests different effective settings.
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| `docs/dsql/README.md` | Documentation index |
+| `docs/dsql/deployment.md` | Deployment and configuration |
+| `docs/dsql/implementation.md` | Technical implementation details |
+| `docs/dsql/connection-pool.md` | Pool architecture, sizing and lifecycle |
+| `docs/dsql/metrics.md` | Metrics reference |
+| `docs/dsql/ci.md` | CI: the Dagger module, the Buildkite pipeline and the live tests |
+| `tools/poolsim/README.md` | Pool simulator documentation |

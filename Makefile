@@ -782,3 +782,4 @@ ensure-no-changes:
 	@printf $(COLOR) "========================================================================"
 	@git status --porcelain
 	@test -z "`git status --porcelain`" || (printf $(COLOR) "========================================================================"; printf $(RED) "Above files are not regenerated properly. Regenerate them and try again."; git diff HEAD ; exit 1)
+include dsql.mk
