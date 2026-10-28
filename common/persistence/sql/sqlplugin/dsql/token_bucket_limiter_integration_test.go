@@ -27,8 +27,11 @@ func TestGCRADynamoDBIntegration(t *testing.T) {
 	require.NoError(t, err)
 	client := dynamodb.NewFromConfig(cfg)
 	endpoint := "test-gcra-" + uuid.NewString()
-	l := NewTokenBucketLimiter(client, table, endpoint, nil)
-	l.Rate, l.Capacity, l.MaxWait = 10, 5, time.Second
+	l := newTokenBucketLimiter(client, testSettings(t, map[string]string{
+		"region": cfg.Region, "cluster_endpoint": endpoint,
+		"rate_limiter": "dynamodb_token_bucket", "rate_limiter_table": table,
+		"token_bucket_rate": "10", "token_bucket_capacity": "5", "token_bucket_max_wait": "1s",
+	}))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

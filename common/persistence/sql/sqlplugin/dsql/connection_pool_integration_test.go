@@ -40,15 +40,18 @@ func testDSQLPoolIntegration(t *testing.T, user string) {
 	region := os.Getenv("AWS_REGION")
 	require.NotEmpty(t, region, "AWS_REGION must be set")
 	logger := log.NewTestLogger()
-	p := &plugin{driver: &driver.PGXDriver{}, rateLimiter: NewConnectionRateLimiter()}
-	cache, err := p.getOrInitTokenCache(t.Context(), region, logger, metrics.NoopMetricsHandler)
+	resolved := testSettings(t, map[string]string{
+		"region": region, "cluster_endpoint": endpoint, "rate_limiter": "local",
+	})
+	p := &plugin{driver: &driver.PGXDriver{}, rateLimiter: newConnectionRateLimiter(resolved)}
+	cache, err := p.tokenCacheForSettings(t.Context(), resolved, logger, metrics.NoopMetricsHandler)
 	require.NoError(t, err)
 	cfg := &config.SQL{
 		DatabaseName: "postgres", ConnectAddr: net.JoinHostPort(endpoint, "5432"), MaxConns: 3,
 		User: user,
 	}
 	t.Cleanup(cache.Stop)
-	provider := p.connectionTokenProvider(cfg, cache, endpoint, region, logger)
+	provider := p.tokenProvider(cfg, cache, resolved, logger)
 	c, err := p.poolConfig(cfg, resolver.NewNoopResolver(), provider, logger)
 	require.NoError(t, err)
 	sqlDB, connector, err := openPoolDB(c, metrics.NoopMetricsHandler)

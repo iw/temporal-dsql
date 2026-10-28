@@ -20,6 +20,7 @@ import (
 )
 
 func TestRateLimiterFallbackRecovery(t *testing.T) {
+	clearSettingsEnv(t)
 	for _, mode := range []string{"gcra", "counter"} {
 		t.Run(mode, func(t *testing.T) {
 			for _, cause := range []error{
@@ -42,15 +43,17 @@ func TestRateLimiterFallbackRecovery(t *testing.T) {
 					})
 					var distributed driver.RateLimiter = gcraTestLimiter(t, client)
 					if mode == "counter" {
-						counter := NewDistributedRateLimiter(nil, "test-table", "test-endpoint")
-						counter.ddb = client
+						counter := newDistributedRateLimiter(client, testSettings(t, map[string]string{
+							"region": "us-east-1", "cluster_endpoint": "test-endpoint",
+							"rate_limiter": "dynamodb_counter", "rate_limiter_table": "test-table",
+						}))
 						distributed = counter
 					}
 					core, observed := observer.New(zap.WarnLevel)
 					handler := metricstest.NewCaptureHandler()
 					capture := handler.StartCapture()
 					defer handler.StopCapture(capture)
-					l := newFailOpenRateLimiter(distributed, log.NewZapLogger(zap.New(core)), handler)
+					l := newFailOpenRateLimiterWithSettings(distributed, testSettings(t, nil), log.NewZapLogger(zap.New(core)), handler)
 					now := time.Unix(1000, 0)
 					l.now = func() time.Time { return now }
 					var locals atomic.Int64
@@ -94,6 +97,7 @@ func TestRateLimiterFallbackRecovery(t *testing.T) {
 }
 
 func TestRateLimiterFallbackExclusions(t *testing.T) {
+	clearSettingsEnv(t)
 	for _, cause := range []error{
 		&types.ConditionalCheckFailedException{},
 		&dynamoDBLimiterError{err: &types.ConditionalCheckFailedException{}},
@@ -107,7 +111,7 @@ func TestRateLimiterFallbackExclusions(t *testing.T) {
 			handler := metricstest.NewCaptureHandler()
 			capture := handler.StartCapture()
 			defer handler.StopCapture(capture)
-			l := newFailOpenRateLimiter(poolTestLimiter(func(context.Context) error { return cause }), log.NewZapLogger(zap.New(core)), handler)
+			l := newFailOpenRateLimiterWithSettings(poolTestLimiter(func(context.Context) error { return cause }), testSettings(t, nil), log.NewZapLogger(zap.New(core)), handler)
 			l.local = poolTestLimiter(func(context.Context) error { t.Error("unexpected local fallback"); return nil })
 			require.ErrorIs(t, l.Wait(t.Context()), cause)
 			require.Empty(t, capture.Snapshot())
@@ -118,11 +122,12 @@ func TestRateLimiterFallbackExclusions(t *testing.T) {
 }
 
 func TestRateLimiterFallbackLocalSettings(t *testing.T) {
+	clearSettingsEnv(t)
 	t.Setenv(ConnectionRateLimitEnvVar, "1")
 	t.Setenv(ConnectionBurstLimitEnvVar, "2")
-	l := newFailOpenRateLimiter(poolTestLimiter(func(context.Context) error {
+	l := newFailOpenRateLimiterWithSettings(poolTestLimiter(func(context.Context) error {
 		return &dynamoDBLimiterError{err: errors.New("offline")}
-	}), nil, nil)
+	}), testSettings(t, nil), nil, nil)
 	require.NoError(t, l.Wait(t.Context()))
 	require.NoError(t, l.Wait(t.Context()))
 	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
@@ -133,6 +138,7 @@ func TestRateLimiterFallbackLocalSettings(t *testing.T) {
 }
 
 func TestRateLimiterFallbackPolicyErrors(t *testing.T) {
+	clearSettingsEnv(t)
 	for _, mode := range []string{"horizon", "contention", "counter_timeout", "canceled_sdk"} {
 		t.Run(mode, func(t *testing.T) {
 			client := updateItemFunc(func(context.Context, *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
@@ -149,13 +155,16 @@ func TestRateLimiterFallbackPolicyErrors(t *testing.T) {
 				require.NoError(t, l.Wait(t.Context()))
 				distributed = l
 			case "counter_timeout":
-				l := NewDistributedRateLimiter(nil, "test-table", "test-endpoint")
-				l.ddb, l.MaxWait = client, -time.Second
+				l := newDistributedRateLimiter(client, testSettings(t, map[string]string{
+					"region": "us-east-1", "cluster_endpoint": "test-endpoint",
+					"rate_limiter": "dynamodb_counter", "rate_limiter_table": "test-table",
+				}))
+				l.MaxWait = -time.Second
 				distributed = l
 			default:
 				distributed = gcraTestLimiter(t, client)
 			}
-			l := newFailOpenRateLimiter(distributed, nil, nil)
+			l := newFailOpenRateLimiterWithSettings(distributed, testSettings(t, nil), nil, nil)
 			l.local = poolTestLimiter(func(context.Context) error { t.Error("unexpected fallback"); return nil })
 			require.Error(t, l.Wait(t.Context()))
 			require.True(t, l.fallbackUntil.IsZero())

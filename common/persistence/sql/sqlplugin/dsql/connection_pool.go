@@ -49,6 +49,12 @@ var (
 
 func (p *plugin) poolConfig(cfg *config.SQL, r resolver.ServiceResolver, tokenProvider driver.TokenProvider, logger log.Logger) (*pgxpool.Config, error) {
 	dsqlConfig := *cfg
+	dsqlConfig.ConnectAttributes = make(map[string]string, len(cfg.ConnectAttributes))
+	for key, value := range cfg.ConnectAttributes {
+		if !isPluginAttribute(key) {
+			dsqlConfig.ConnectAttributes[key] = value
+		}
+	}
 	dsqlConfig.User = dsqlUser(cfg)
 	dsqlConfig.Password = "placeholder"
 	if cfg.Password != "" {

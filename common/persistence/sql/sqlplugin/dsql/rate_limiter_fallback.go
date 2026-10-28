@@ -37,7 +37,7 @@ type failOpenRateLimiter struct {
 	nextWarning   time.Time
 }
 
-func newFailOpenRateLimiter(distributed driver.RateLimiter, logger log.Logger, handler metrics.Handler) *failOpenRateLimiter {
+func newFailOpenRateLimiterWithSettings(distributed driver.RateLimiter, resolved settings, logger log.Logger, handler metrics.Handler) *failOpenRateLimiter {
 	if logger == nil {
 		logger = log.NewNoopLogger()
 	}
@@ -46,7 +46,7 @@ func newFailOpenRateLimiter(distributed driver.RateLimiter, logger log.Logger, h
 	}
 	return &failOpenRateLimiter{
 		distributed: distributed,
-		local:       NewConnectionRateLimiter(),
+		local:       newConnectionRateLimiter(resolved),
 		logger:      logger,
 		fallbacks:   handler.Counter(rateLimiterFallbackMetric),
 		now:         time.Now,

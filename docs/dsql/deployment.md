@@ -15,13 +15,13 @@ This guide covers deploying Temporal with Aurora DSQL as the persistence layer, 
 **Current schema version: 1.2**
 
 ```bash
-export CLUSTER_ENDPOINT="your-cluster.dsql.us-east-1.on.aws"
-export REGION="us-east-1"
+schema_endpoint="your-cluster.dsql.us-east-1.on.aws"
+schema_region="us-east-1"
 
 # Initial setup
 ./temporal-dsql-tool \
-    --endpoint "$CLUSTER_ENDPOINT" \
-    --region "$REGION" \
+    --endpoint "$schema_endpoint" \
+    --region "$schema_region" \
     --user admin \
     setup-schema \
     --schema-name "dsql/temporal" \
@@ -29,8 +29,8 @@ export REGION="us-east-1"
 
 # Full reset (drops and recreates — use with caution)
 ./temporal-dsql-tool \
-    --endpoint "$CLUSTER_ENDPOINT" \
-    --region "$REGION" \
+    --endpoint "$schema_endpoint" \
+    --region "$schema_region" \
     --user admin \
     setup-schema \
     --schema-name "dsql/temporal" \
@@ -46,8 +46,8 @@ Apply the schema change before you deploy the new server:
 
 ```bash
 ./temporal-dsql-tool \
-    --endpoint "$CLUSTER_ENDPOINT" \
-    --region "$REGION" \
+    --endpoint "$schema_endpoint" \
+    --region "$schema_region" \
     --user admin \
     update-schema \
     --schema-name "dsql/temporal" \
@@ -60,8 +60,8 @@ v1.2 drops the global unique index on `buffered_events(id)`, so the server can n
 
 ```bash
 ./temporal-dsql-tool \
-    --endpoint "$CLUSTER_ENDPOINT" \
-    --region "$REGION" \
+    --endpoint "$schema_endpoint" \
+    --region "$schema_region" \
     --user admin \
     update-schema \
     --schema-name "dsql/temporal" \
@@ -111,7 +111,12 @@ persistence:
         pluginName: "dsql"
         user: "admin" # Or temporal after completing the least-privilege role setup
         databaseName: "postgres" # a DSQL cluster has one database, named postgres
-        connectAddr: "${CLUSTER_ENDPOINT}:5432"
+        connectAddr: "your-cluster.dsql.us-east-1.on.aws:5432"
+        connectAttributes:
+          token_duration: "15m"
+          rate_limiter: "local"
+          connection_rate_limit: "10"
+          connection_burst_limit: "100"
         maxConns: 50
         maxConnLifetime: "50m"
     visibility: # a separate, durable store; DSQL doesn't support visibility
@@ -128,6 +133,51 @@ Visibility can use any store Temporal supports except DSQL, such as Elasticsearc
 `maxIdleConns` is ignored. Service pools open and keep `maxConns` connections in the background (100 if unset). `maxConnLifetime` is capped at 50 minutes; shorter positive values apply. The pool uses four minutes of lifetime jitter and one-minute health checks. See [connection pool](connection-pool.md) for lifecycle details and limitations.
 
 Pool sizing can also use `TEMPORAL_SQL_MAX_CONNS` where the deployment template maps it to `maxConns`. Count every pool in every Temporal process: their total must fit the cluster connection limit (10,000 by default), with headroom for startup pools and rolling replacements.
+
+### Datastore settings and legacy fallbacks
+
+Put plugin settings under `persistence.datastores.<store>.sql.connectAttributes`, with string values. They are resolved once when a datastore pool is created. Plugin keys are removed from a copy before building the PostgreSQL DSN; other attributes, including `sslmode`, pass through. The caller's config is unchanged. Visibility configuration is unaffected.
+
+| Attribute | Default | Meaning |
+|---|---|---|
+| `region` | Endpoint region, then legacy/SDK fallbacks below | Region for IAM signing and the DynamoDB client |
+| `cluster_endpoint` | Host in `connectAddr` | IAM token host and distributed limiter key; does not change the network address |
+| `token_duration` | `15m` | Requested token lifetime, from `15s` through `15m` inclusive |
+| `connection_rate_limit` | `10` | Local connections/sec, including distributed-mode outage fallback |
+| `connection_burst_limit` | `100` | Local burst capacity, including outage fallback |
+| `rate_limiter` | `local` | `local`, `dynamodb_token_bucket` or `dynamodb_counter` |
+| `rate_limiter_table` | None | Required DynamoDB table for either distributed mode |
+| `token_bucket_rate` | `100` | Token bucket connections/sec |
+| `token_bucket_capacity` | `1000` | Token bucket burst capacity |
+| `token_bucket_max_wait` | `30s` | Maximum reservation wait |
+| `counter_limit` | `100` | Counter connections/sec |
+| `counter_max_wait` | `30s` | Maximum counter permit wait |
+
+Attributes override their legacy environment variables, which override defaults. Region has a special order: `region` attribute, region in the resolved endpoint (`<cluster-id>.dsql.<region>.on.aws`), `REGION`, then `AWS_REGION`. Otherwise startup fails with instructions for setting it. Inferring the region before environment fallbacks signs tokens for the cluster's own region. Endpoint order is `cluster_endpoint`, `CLUSTER_ENDPOINT`, then the host in `connectAddr`.
+
+Integers and durations must parse and be positive, even when their mode is inactive. `token_duration` must also stay in its allowed range. An unknown mode or a DynamoDB mode without a table fails `CreateDB`, naming the setting and value. Valid settings unused by the chosen mode log a warning; local rate and burst are also used for distributed-mode fallback. A runtime failure to create the DynamoDB client still logs an error and falls back locally.
+
+The connection limiter remains shared by all pools in a process: the first pool's settings win. A later pool requesting different effective limiter settings gets one warning naming the retained and requested settings. Use consistent limiter settings, regions and endpoints across pools that share a distributed limiter. Token cache entries remain distinct per endpoint, region, user and duration.
+
+The following environment variables still work as fallbacks but are **deprecated** and will be removed in a future release. One warning per process lists all deprecated variables set, with their replacement attributes, including overridden or empty variables. Empty legacy values still mean unset. `AWS_REGION` remains the SDK's standard fallback and is not deprecated or warned about.
+
+| Deprecated variable | Replacement in `connectAttributes` |
+|---|---|
+| `REGION` | `region` (usually inferred from the endpoint) |
+| `CLUSTER_ENDPOINT` | `cluster_endpoint` (usually unnecessary) |
+| `DSQL_TOKEN_DURATION` | `token_duration` |
+| `DSQL_CONNECTION_RATE_LIMIT` | `connection_rate_limit` |
+| `DSQL_CONNECTION_BURST_LIMIT` | `connection_burst_limit` |
+| `DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED` | `rate_limiter`: false/unset → `local`; true → a DynamoDB mode |
+| `DSQL_TOKEN_BUCKET_ENABLED` | `rate_limiter`: with distributed enabled, true → `dynamodb_token_bucket`, false/unset → `dynamodb_counter` |
+| `DSQL_DISTRIBUTED_RATE_LIMITER_TABLE` | `rate_limiter_table` |
+| `DSQL_DISTRIBUTED_RATE_LIMITER_LIMIT` | `counter_limit` |
+| `DSQL_DISTRIBUTED_RATE_LIMITER_MAX_WAIT` | `counter_max_wait` |
+| `DSQL_TOKEN_BUCKET_RATE` | `token_bucket_rate` |
+| `DSQL_TOKEN_BUCKET_CAPACITY` | `token_bucket_capacity` |
+| `DSQL_TOKEN_BUCKET_MAX_WAIT` | `token_bucket_max_wait` |
+
+Legacy enable variables must be valid booleans unless `rate_limiter` overrides them. Before rollout, move settings into each datastore's map and correct any values previously ignored by permissive parsing. For rollback to an older image, remove the new plugin attributes and restore the legacy variables: older images send these attributes to PostgreSQL as unknown runtime parameters. This configuration migration requires no schema change.
 
 ### TLS verification
 
@@ -188,7 +238,7 @@ The [development dynamic config](../../config/dynamicconfig/development-dsql.yam
 
 pgxpool is always used. Startup performs a single bounded ping and returns while the service pool fills in the background. A process-wide semaphore permits eight concurrent limiter/token calls across all pools and releases before handshakes. The existing limiter paces startup and replacement connections.
 
-IAM settings remain `REGION` or `AWS_REGION`, `CLUSTER_ENDPOINT` (or the configured address), and `DSQL_TOKEN_DURATION` (default 15 minutes). The cache derives expiry from the signed token, reserving 10% of its signed lifetime (at least five seconds) for opening a connection. Background checks refresh at 80% of the signed lifetime. A newly generated token inside the margin can be used while still unexpired, with a warning at most once a minute. Credentials refresh four to five minutes before expiry. Token duration does not determine established connection lifetime.
+IAM settings are `connectAttributes.region`, `cluster_endpoint` (defaulting to the host in `connectAddr`) and `token_duration` (default 15 minutes). The region is inferred from a DSQL endpoint when no attribute is set; see [settings and legacy fallbacks](#datastore-settings-and-legacy-fallbacks). The cache derives expiry from the signed token, reserving 10% of its signed lifetime (at least five seconds) for opening a connection. Background checks refresh at 80% of the signed lifetime. A newly generated token inside the margin can be used while still unexpired, with a warning at most once a minute. Credentials refresh four to five minutes before expiry. Token duration does not determine established connection lifetime.
 
 The old reservoir, pool warmup and pool keeper settings are ignored with one warning listing those present. See the [complete removed-variable list and rollout instructions](connection-pool.md#migration-from-the-old-layer).
 
@@ -200,20 +250,19 @@ DynamoDB-backed rate limiting can coordinate multiple Temporal processes. It rem
 
 Coordinates the cluster-wide 100 connections/sec rate limit across all service instances. Takes advantage of DSQL's burst capacity (1,000 connections) for fast startup.
 
-```bash
-DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=true
-DSQL_DISTRIBUTED_RATE_LIMITER_TABLE=temporal-dsql-rate-limiter
-
-# Token bucket mode (recommended — enables burst capacity)
-DSQL_TOKEN_BUCKET_ENABLED=true
-DSQL_TOKEN_BUCKET_RATE=100       # Sustained rate (matches DSQL limit)
-DSQL_TOKEN_BUCKET_CAPACITY=1000  # Burst capacity (matches DSQL burst)
-DSQL_TOKEN_BUCKET_MAX_WAIT=30s   # Maximum reservation wait
+```yaml
+# Under persistence.datastores.<store>.sql:
+connectAttributes:
+  rate_limiter: "dynamodb_token_bucket"
+  rate_limiter_table: "temporal-dsql-rate-limiter"
+  token_bucket_rate: "100"       # Sustained connections/sec
+  token_bucket_capacity: "1000"  # Burst capacity
+  token_bucket_max_wait: "30s"   # Maximum reservation wait
 ```
 
-Without token bucket mode, the distributed rate limiter falls back to a simple per-second counter (no burst support). Its fleet rate is configured with `DSQL_DISTRIBUTED_RATE_LIMITER_LIMIT` (default 100/sec).
+Select `connectAttributes.rate_limiter: "dynamodb_counter"` for a simple per-second counter without burst support. Set `counter_limit` (default 100/sec) and `counter_max_wait` (default 30s) in the same map. Both DynamoDB modes require a nonempty `rate_limiter_table`; a missing table fails startup.
 
-Both distributed modes use the local `ConnectionRateLimiter` for 30 seconds after DynamoDB API, throttling or network errors, then retry DynamoDB. The local controls are `DSQL_CONNECTION_RATE_LIMIT` (default 10/sec) and `DSQL_CONNECTION_BURST_LIMIT` (default 100). During an outage, every process paces itself locally, so the fleet may exceed DSQL's limits; DSQL rejects the excess with 53400 (not attempted). Lower the local burst if less excess is desired. Condition failures, the GCRA horizon timeout and cancellation do not cause fallback. Warnings are limited to once a minute; monitor `dsql_rate_limiter_fallbacks_total`. Startup fallback on client initialization failure is retained.
+Both distributed modes use the local `ConnectionRateLimiter` for 30 seconds after DynamoDB API, throttling or network errors, then retry DynamoDB. The local controls are `connectAttributes.connection_rate_limit` (default 10/sec) and `connectAttributes.connection_burst_limit` (default 100). During an outage, every process paces itself locally, so the fleet may exceed DSQL's limits; DSQL rejects the excess with 53400 (not attempted). Lower the local burst if less excess is desired. Condition failures, the GCRA horizon timeout and cancellation do not cause fallback. Warnings are limited to once a minute; monitor `dsql_rate_limiter_fallbacks_total`. Startup fallback on client initialization failure is retained.
 
 GCRA uses `dsql_connect_gcra#<endpoint>`, leaving old `dsql_connect_bucket#<endpoint>` items for TTL cleanup. During mixed-version rollout or rollback, the separate items permit up to twice the configured rate and burst. Monitor 53400 errors and keep the mixed-version interval short. No table migration is needed.
 
@@ -255,23 +304,26 @@ The slot-block connection lease was removed ([#33](https://github.com/iw/tempora
 
 Putting it all together for a multi-service deployment:
 
-```bash
-# DSQL connection
-CLUSTER_ENDPOINT="your-cluster.dsql.us-east-1.on.aws"
-REGION="us-east-1"
-DSQL_TOKEN_DURATION="14m"
-
-# Connection pool (per service instance — scale per service type)
-TEMPORAL_SQL_MAX_CONNS=50
-
-# Distributed rate limiting (token bucket)
-DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=true
-DSQL_DISTRIBUTED_RATE_LIMITER_TABLE=temporal-dsql-rate-limiter
-DSQL_TOKEN_BUCKET_ENABLED=true
-DSQL_TOKEN_BUCKET_RATE=100
-DSQL_TOKEN_BUCKET_CAPACITY=1000
-
+```yaml
+persistence:
+  datastores:
+    dsql-default:
+      sql:
+        pluginName: "dsql"
+        databaseName: "postgres"
+        connectAddr: "your-cluster.dsql.us-east-1.on.aws:5432"
+        user: "admin"
+        maxConns: 50
+        maxConnLifetime: "50m"
+        connectAttributes:
+          token_duration: "14m"
+          rate_limiter: "dynamodb_token_bucket"
+          rate_limiter_table: "temporal-dsql-rate-limiter"
+          token_bucket_rate: "100"
+          token_bucket_capacity: "1000"
 ```
+
+Merge this datastore with the separate visibility configuration from section 2.
 
 ### Per-Service Pool Sizing
 
@@ -279,39 +331,33 @@ Each service pool opens its full `maxConns` allocation at startup and keeps it. 
 
 ### ECS Task Definition
 
-Example environment for a deployment template that maps these variables to SQL config:
+Package a complete Temporal configuration file based on the YAML above into the image at `/etc/temporal/config/dsql.yaml`, or mount it at that path. Set DSQL settings in its datastore's `sql.connectAttributes`. The task role supplies AWS credentials. For example, these fields in the container definition select that config:
 
-```hcl
-environment = [
-  # DSQL connection
-  { name = "TEMPORAL_SQL_HOST",                       value = var.dsql_endpoint },
-  { name = "TEMPORAL_SQL_PORT",                       value = "5432" },
-  { name = "TEMPORAL_SQL_USER",                       value = "admin" },
-  { name = "TEMPORAL_SQL_DATABASE",                   value = "postgres" },
-  { name = "TEMPORAL_SQL_PLUGIN_NAME",                value = "dsql" },
-  { name = "TEMPORAL_SQL_TLS_ENABLED",                value = "true" },
-  { name = "TEMPORAL_SQL_IAM_AUTH",                   value = "true" },
-
-  # Connection pool
-  { name = "TEMPORAL_SQL_MAX_CONNS",                  value = "50" },
-  { name = "TEMPORAL_SQL_CONNECTION_TIMEOUT",          value = "30s" },
-
-  # Distributed rate limiting
-  { name = "DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED",   value = "true" },
-  { name = "DSQL_DISTRIBUTED_RATE_LIMITER_TABLE",     value = var.dsql_rate_limiter_table },
-
-]
+```json
+{
+  "name": "temporal-history",
+  "image": "<temporal-image>",
+  "essential": true,
+  "entryPoint": ["/usr/local/bin/temporal-server"],
+  "command": [
+    "--config-file", "/etc/temporal/config/dsql.yaml",
+    "start", "--service", "history"
+  ]
+}
 ```
+
+Use the server binary path in your image. DSQL plugin attributes are read from this file; the upstream environment-based template does not populate them.
 
 ### Docker Compose
 
 ```yaml
 services:
   temporal-history:
-    environment:
-      TEMPORAL_SQL_MAX_CONNS: "50"
-      AWS_REGION: "us-east-1"
-      CLUSTER_ENDPOINT: "your-cluster.dsql.us-east-1.on.aws"
+    image: "<temporal-image>"
+    entrypoint: ["/usr/local/bin/temporal-server"]
+    command: ["--config-file", "/etc/temporal/config/dsql.yaml", "start", "--service", "history"]
+    volumes:
+      - "./dsql.yaml:/etc/temporal/config/dsql.yaml:ro"
 ```
 
 ## Verification
@@ -320,10 +366,10 @@ services:
 
 ```bash
 TOKEN=$(aws dsql generate-db-connect-admin-auth-token \
-    --hostname "$CLUSTER_ENDPOINT" \
-    --region "$REGION")
+    --hostname "$schema_endpoint" \
+    --region "$schema_region")
 
-psql "host=$CLUSTER_ENDPOINT user=admin password=$TOKEN sslmode=verify-full" \
+psql "host=$schema_endpoint user=admin password=$TOKEN sslmode=verify-full" \
     -c "SELECT version();"
 ```
 
@@ -362,7 +408,8 @@ Use pool waits, constructing connections and rate-limiter logs to distinguish sa
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| "REGION or AWS_REGION must be set" | Missing env var | Set `REGION` or `AWS_REGION` |
+| "set connectAttributes.region" | No explicit region or recognizable DSQL endpoint | Set `connectAttributes.region` or use the cluster endpoint in `connectAddr` |
+| Invalid setting or missing `rate_limiter_table` | Invalid datastore configuration | Correct the named attribute or legacy variable and restart |
 | "failed to resolve AWS credentials" | IAM misconfiguration | Check role/credentials, verify `dsql:DbConnect` for a custom role or `dsql:DbConnectAdmin` for admin |
 | "connection rate limit exceeded" | Too many new connections | Check distributed rate limiter, stagger restarts |
 | `ResourceExhausted` / 53300 / 53400 | Connection not attempted or refused at admission | Inspect limiter and cluster connection budget |

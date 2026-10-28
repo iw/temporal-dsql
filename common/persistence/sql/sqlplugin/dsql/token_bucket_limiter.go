@@ -5,14 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"go.temporal.io/server/common/log"
 )
 
 const (
@@ -46,14 +44,14 @@ type TokenBucketLimiter struct {
 	sleep     func(context.Context, time.Duration) error
 }
 
-func NewTokenBucketLimiter(ddb dynamoDBUpdater, tableName, endpoint string, _ log.Logger) *TokenBucketLimiter {
+func newTokenBucketLimiter(ddb dynamoDBUpdater, resolved settings) *TokenBucketLimiter {
 	return &TokenBucketLimiter{
 		ddb:       ddb,
-		tableName: tableName,
-		endpoint:  normalizeEndpoint(endpoint),
-		Rate:      int64(getEnvInt(TokenBucketRateEnvVar, DefaultTokenBucketRate)),
-		Capacity:  int64(getEnvInt(TokenBucketCapacityEnvVar, DefaultTokenBucketCapacity)),
-		MaxWait:   getEnvDuration(TokenBucketMaxWaitEnvVar, DefaultTokenBucketMaxWait),
+		tableName: resolved.Limiter.Table,
+		endpoint:  normalizeEndpoint(resolved.ClusterEndpoint),
+		Rate:      int64(resolved.Limiter.TokenBucketRate),
+		Capacity:  int64(resolved.Limiter.TokenBucketCapacity),
+		MaxWait:   resolved.Limiter.TokenBucketMaxWait,
 		TTLWindow: time.Hour,
 		now:       time.Now,
 		sleep:     sleepForReservation,
@@ -178,9 +176,4 @@ func sleepForReservation(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return ctx.Err()
 	}
-}
-
-func IsTokenBucketEnabled() bool {
-	enabled, _ := strconv.ParseBool(os.Getenv(TokenBucketEnabledEnvVar))
-	return enabled
 }

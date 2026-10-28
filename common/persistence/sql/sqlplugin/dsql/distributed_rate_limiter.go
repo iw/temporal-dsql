@@ -6,8 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -74,21 +72,14 @@ type DistributedRateLimiter struct {
 	TTLSafetyWindow time.Duration
 }
 
-// NewDistributedRateLimiter creates a distributed rate limiter backed by DynamoDB.
-//
-// The endpoint parameter is the DSQL cluster endpoint (e.g., "cluster-id.dsql.region.on.aws").
-// This is used to partition rate limits per DSQL cluster.
-func NewDistributedRateLimiter(ddb *dynamodb.Client, tableName, endpoint string) *DistributedRateLimiter {
-	limitPerSecond := int64(getEnvInt(DistributedRateLimiterLimitEnvVar, DefaultDistributedRateLimiterLimit))
-	maxWait := getEnvDuration(DistributedRateLimiterMaxWaitEnvVar, DefaultDistributedRateLimiterMaxWait)
-
+func newDistributedRateLimiter(ddb dynamoDBUpdater, resolved settings) *DistributedRateLimiter {
 	return &DistributedRateLimiter{
 		ddb:             ddb,
-		tableName:       tableName,
-		endpoint:        normalizeEndpoint(endpoint),
+		tableName:       resolved.Limiter.Table,
+		endpoint:        normalizeEndpoint(resolved.ClusterEndpoint),
 		pkPrefix:        "dsqlconnect#",
-		LimitPerSecond:  limitPerSecond,
-		MaxWait:         maxWait,
+		LimitPerSecond:  int64(resolved.Limiter.CounterLimit),
+		MaxWait:         resolved.Limiter.CounterMaxWait,
 		BackoffBase:     DefaultDistributedRateLimiterBackoff,
 		EnableTTL:       true,
 		TTLSafetyWindow: DefaultDistributedRateLimiterTTLWindow,
@@ -228,24 +219,6 @@ func (l *DistributedRateLimiter) jitteredBackoff(now time.Time, deadline time.Ti
 		sleep = 200 * time.Millisecond
 	}
 	return minDuration(sleep, remaining)
-}
-
-// IsDistributedRateLimiterEnabled checks if the distributed rate limiter should be used.
-func IsDistributedRateLimiterEnabled() bool {
-	val := os.Getenv(DistributedRateLimiterEnabledEnvVar)
-	if val == "" {
-		return false // disabled by default
-	}
-	enabled, err := strconv.ParseBool(val)
-	if err != nil {
-		return false
-	}
-	return enabled
-}
-
-// GetDistributedRateLimiterTable returns the configured DynamoDB table name.
-func GetDistributedRateLimiterTable() string {
-	return os.Getenv(DistributedRateLimiterTableEnvVar)
 }
 
 // normalizeEndpoint normalizes the endpoint string for consistent key generation.

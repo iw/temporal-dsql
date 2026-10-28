@@ -84,32 +84,43 @@ func (f *gcraFake) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput,
 
 func gcraTestLimiter(t *testing.T, client dynamoDBUpdater) *TokenBucketLimiter {
 	t.Helper()
-	l := NewTokenBucketLimiter(client, "test-rate-table", "test-endpoint", nil)
-	l.Rate, l.Capacity, l.MaxWait = 100, 1000, 30*time.Second
+	l := newTokenBucketLimiter(client, testSettings(t, map[string]string{
+		"region": "us-east-1", "cluster_endpoint": "test-endpoint",
+		"rate_limiter": "dynamodb_token_bucket", "rate_limiter_table": "test-rate-table",
+		"token_bucket_rate": "100", "token_bucket_capacity": "1000", "token_bucket_max_wait": "30s",
+	}))
 	l.now = func() time.Time { return time.Unix(1000, 0) }
 	l.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	return l
 }
 
 func TestTokenBucketConfiguration(t *testing.T) {
-	for _, name := range []string{TokenBucketRateEnvVar, TokenBucketCapacityEnvVar, TokenBucketMaxWaitEnvVar} {
-		t.Setenv(name, "")
+	clearSettingsEnv(t)
+	attrs := map[string]string{
+		"region": "us-east-1", "cluster_endpoint": " TEST-ENDPOINT:5432 ",
+		"rate_limiter": "dynamodb_token_bucket", "rate_limiter_table": "test-table",
 	}
-	l := NewTokenBucketLimiter(nil, "test-table", " TEST-ENDPOINT:5432 ", nil)
+	l := newTokenBucketLimiter(nil, testSettings(t, attrs))
 	require.Equal(t, int64(100), l.Rate)
 	require.Equal(t, int64(1000), l.Capacity)
 	require.Equal(t, 30*time.Second, l.MaxWait)
 	require.Equal(t, "test-endpoint", l.endpoint)
 	t.Setenv(TokenBucketRateEnvVar, "50")
 	t.Setenv(TokenBucketCapacityEnvVar, "500")
-	t.Setenv(TokenBucketMaxWaitEnvVar, "10s")
-	l = NewTokenBucketLimiter(nil, "test-table", "test-endpoint", nil)
-	require.Equal(t, int64(50), l.Rate)
-	require.Equal(t, int64(500), l.Capacity)
-	require.Equal(t, 10*time.Second, l.MaxWait)
-	for _, value := range []string{"", "true", "false", "1", "0", "invalid"} {
-		t.Setenv(TokenBucketEnabledEnvVar, value)
-		require.Equal(t, value == "true" || value == "1", IsTokenBucketEnabled())
+	for _, tc := range []struct {
+		value string
+		want  time.Duration
+	}{
+		{"10s", 10 * time.Second},
+		{"500ms", 500 * time.Millisecond},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv(TokenBucketMaxWaitEnvVar, tc.value)
+			l := newTokenBucketLimiter(nil, testSettings(t, attrs))
+			require.Equal(t, int64(50), l.Rate)
+			require.Equal(t, int64(500), l.Capacity)
+			require.Equal(t, tc.want, l.MaxWait)
+		})
 	}
 }
 

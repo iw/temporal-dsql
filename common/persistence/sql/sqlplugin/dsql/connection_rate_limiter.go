@@ -2,9 +2,6 @@ package dsql
 
 import (
 	"context"
-	"os"
-	"strconv"
-	"time"
 
 	"golang.org/x/time/rate"
 )
@@ -32,13 +29,9 @@ type ConnectionRateLimiter struct {
 	limiter *rate.Limiter
 }
 
-// NewConnectionRateLimiter creates a rate limiter with configured or default limits.
-func NewConnectionRateLimiter() *ConnectionRateLimiter {
-	rateLimit := getEnvInt(ConnectionRateLimitEnvVar, DefaultConnectionRateLimit)
-	burstLimit := getEnvInt(ConnectionBurstLimitEnvVar, DefaultConnectionBurstLimit)
-
+func newConnectionRateLimiter(resolved settings) *ConnectionRateLimiter {
 	return &ConnectionRateLimiter{
-		limiter: rate.NewLimiter(rate.Limit(rateLimit), burstLimit),
+		limiter: rate.NewLimiter(rate.Limit(resolved.Limiter.ConnectionRate), resolved.Limiter.ConnectionBurst),
 	}
 }
 
@@ -52,30 +45,4 @@ func (r *ConnectionRateLimiter) Wait(ctx context.Context) error {
 // Does not block or consume a token if not allowed.
 func (r *ConnectionRateLimiter) Allow() bool {
 	return r.limiter.Allow()
-}
-
-// getEnvInt returns an integer from environment variable or default.
-func getEnvInt(key string, defaultVal int) int {
-	val := os.Getenv(key)
-	if val == "" {
-		return defaultVal
-	}
-	i, err := strconv.Atoi(val)
-	if err != nil {
-		return defaultVal
-	}
-	return i
-}
-
-// getEnvDuration returns a duration from environment variable or default.
-func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
-	val := os.Getenv(key)
-	if val == "" {
-		return defaultVal
-	}
-	d, err := time.ParseDuration(val)
-	if err != nil {
-		return defaultVal
-	}
-	return d
 }
