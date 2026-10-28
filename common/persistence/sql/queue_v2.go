@@ -231,8 +231,61 @@ func (q *queueV2) RangeDeleteMessages(
 			persistence.FirstQueueMessageID,
 		)
 	}
-	var resp *persistence.InternalRangeDeleteMessagesResponse
-	err := q.txExecute(ctx, "RangeDeleteMessages", func(tx sqlplugin.Tx) error {
+	// Compute a fixed range that preserves the last physical message, so enqueues
+	// keep allocating increasing IDs while the delete runs in autocommit batches.
+	qm, err := q.getQueueMetadata(ctx, q.DB, request.QueueType, request.QueueName)
+	if err != nil {
+		switch err.(type) {
+		case *serviceerror.Unavailable, *serviceerror.NotFound:
+			return nil, err
+		default:
+			return nil, serviceerror.NewUnavailablef("RangeDeleteMessages: %v", err)
+		}
+	}
+	partition, err := persistence.GetPartitionForQueueV2(request.QueueType, request.QueueName, qm)
+	if err != nil {
+		return nil, serviceerror.NewUnavailablef(
+			"RangeDeleteMessages failed for queue with type: %v and name: %v. GetPartitionForQueueV2 operation failed. Error: %v",
+			request.QueueType, request.QueueName, err,
+		)
+	}
+	maxMessageID, ok, err := q.getMaxMessageID(ctx, request.QueueType, request.QueueName, q.DB)
+	if err != nil {
+		return nil, serviceerror.NewUnavailablef(
+			"RangeDeleteMessages failed for queue with type: %v and name: %v. failed to get MaxMessageID. Error: %v",
+			request.QueueType, request.QueueName, err,
+		)
+	}
+	if !ok {
+		return nil, nil
+	}
+	deleteRange, ok := persistence.GetDeleteRange(persistence.DeleteRequest{
+		LastIDToDeleteInclusive: request.InclusiveMaxMessageMetadata.ID,
+		ExistingMessageRange: persistence.InclusiveMessageRange{
+			MinMessageID: partition.MinMessageId,
+			MaxMessageID: maxMessageID,
+		},
+	})
+	if !ok {
+		return &persistence.InternalRangeDeleteMessagesResponse{MessagesDeleted: 0}, nil
+	}
+	_, err = q.DB.RangeDeleteFromQueueV2Messages(ctx, sqlplugin.QueueV2MessagesFilter{
+		QueueType:    request.QueueType,
+		QueueName:    request.QueueName,
+		Partition:    defaultPartition,
+		MinMessageID: deleteRange.MinMessageID,
+		MaxMessageID: deleteRange.MaxMessageID,
+	})
+	if err != nil {
+		return nil, serviceerror.NewUnavailablef(
+			"RangeDeleteMessages failed for queue with type: %v and name: %v. RangeDeleteFromQueueV2Messages operation failed. Error: %v",
+			request.QueueType, request.QueueName, err,
+		)
+	}
+	// Readers skip missing rows if this update fails. A retry completes it;
+	// re-reading under the metadata lock also prevents overlapping deletes from
+	// moving the minimum backwards.
+	err = q.txExecute(ctx, "RangeDeleteMessages", func(tx sqlplugin.Tx) error {
 		qm, err := q.getQueueMetadata(ctx, tx, request.QueueType, request.QueueName)
 		if err != nil {
 			return err
@@ -241,53 +294,10 @@ func (q *queueV2) RangeDeleteMessages(
 		if err != nil {
 			return serviceerror.NewUnavailablef(
 				"RangeDeleteMessages failed for queue with type: %v and name: %v. GetPartitionForQueueV2 operation failed. Error: %v",
-				request.QueueType,
-				request.QueueName,
-				err,
+				request.QueueType, request.QueueName, err,
 			)
 		}
-		maxMessageID, ok, err := q.getMaxMessageID(ctx, request.QueueType, request.QueueName, tx)
-		if err != nil {
-			return serviceerror.NewUnavailablef(
-				"RangeDeleteMessages failed for queue with type: %v and name: %v. failed to get MaxMessageID. Error: %v",
-				request.QueueType,
-				request.QueueName,
-				err,
-			)
-		}
-		if !ok {
-			return nil
-		}
-		deleteRange, ok := persistence.GetDeleteRange(persistence.DeleteRequest{
-			LastIDToDeleteInclusive: request.InclusiveMaxMessageMetadata.ID,
-			ExistingMessageRange: persistence.InclusiveMessageRange{
-				MinMessageID: partition.MinMessageId,
-				MaxMessageID: maxMessageID,
-			},
-		})
-		if !ok {
-			resp = &persistence.InternalRangeDeleteMessagesResponse{
-				MessagesDeleted: 0,
-			}
-			return nil
-		}
-		msgFilter := sqlplugin.QueueV2MessagesFilter{
-			QueueType:    request.QueueType,
-			QueueName:    request.QueueName,
-			Partition:    defaultPartition,
-			MinMessageID: deleteRange.MinMessageID,
-			MaxMessageID: deleteRange.MaxMessageID,
-		}
-		_, err = tx.RangeDeleteFromQueueV2Messages(ctx, msgFilter)
-		if err != nil {
-			return serviceerror.NewUnavailablef(
-				"RangeDeleteMessages failed for queue with type: %v and name: %v. RangeDeleteFromQueueV2Messages operation failed. Error: %v",
-				request.QueueType,
-				request.QueueName,
-				err,
-			)
-		}
-		partition.MinMessageId = deleteRange.NewMinMessageID
+		partition.MinMessageId = max(partition.MinMessageId, deleteRange.NewMinMessageID)
 		bytes, _ := qm.Marshal()
 		row := sqlplugin.QueueV2MetadataRow{
 			QueueType:        request.QueueType,
@@ -299,20 +309,15 @@ func (q *queueV2) RangeDeleteMessages(
 		if err != nil {
 			return serviceerror.NewUnavailablef(
 				"RangeDeleteMessages failed for queue with type: %v and name: %v. UpdateQueueV2Metadata operation failed. Error: %v",
-				request.QueueType,
-				request.QueueName,
-				err,
+				request.QueueType, request.QueueName, err,
 			)
-		}
-		resp = &persistence.InternalRangeDeleteMessagesResponse{
-			MessagesDeleted: deleteRange.MessagesToDelete,
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return resp, nil
+	return &persistence.InternalRangeDeleteMessagesResponse{MessagesDeleted: deleteRange.MessagesToDelete}, nil
 }
 
 func (q *queueV2) getQueueMetadata(

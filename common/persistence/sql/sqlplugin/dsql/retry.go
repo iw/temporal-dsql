@@ -1,24 +1,13 @@
 // Package dsql provides Aurora DSQL-specific helpers for Temporal's SQL persistence plugin.
 //
-// This file implements transaction retry semantics suitable for Aurora DSQL's
-// optimistic concurrency control (OCC) model.
-//
-// Authoritative retry rules (DSQL plugin):
-//  1. ConditionFailedError (CAS / fencing loss) => NEVER retry, return immediately.
-//  2. SQLSTATE 40001 (serialization failure)     => retry entire transaction.
-//  3. SQLSTATE OC000 (DSQL OCC data conflict)    => retry entire transaction.
-//  4. SQLSTATE OC001 (DSQL OCC schema conflict)  => retry entire transaction.
-//  5. SQLSTATE 0A000 (feature not supported)     => fail fast (implementation bug), no retry.
-//  6. SQLSTATE 53300 (too many connections)      => fail fast, no retry (cluster limit).
-//  7. SQLSTATE 53400 (connection rate exceeded)  => fail fast, no retry (rate limit).
-//  8. All others                                 => permanent failure, no retry.
+// This file retains retry configuration, error classification, backoff and metrics.
+// Core owns transaction replay through the policy in tx_retry_policy.go, which
+// retries SQLSTATE 40001 only. Classification here does not itself enable retries.
 package dsql
 
 import (
 	"context"
-	"database/sql"
 	"errors"
-	"fmt"
 	"math"
 	"math/rand/v2"
 	"strings"
@@ -26,7 +15,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.temporal.io/server/common/log"
-	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/common/metrics"
 )
 
@@ -91,142 +79,18 @@ func (c RetryConfig) validate() RetryConfig {
 }
 
 type RetryManager struct {
-	db      *sql.DB
 	config  RetryConfig
 	logger  log.Logger
 	metrics DSQLMetrics
 }
 
-func NewRetryManager(db *sql.DB, cfg RetryConfig, logger log.Logger, mh metrics.Handler) *RetryManager {
+func NewRetryManager(cfg RetryConfig, logger log.Logger, mh metrics.Handler) *RetryManager {
 	cfg = cfg.validate()
 	return &RetryManager{
-		db:      db,
 		config:  cfg,
 		logger:  logger,
 		metrics: NewDSQLMetrics(mh),
 	}
-}
-
-// RunTx executes fn in a transaction with DSQL retry semantics.
-// op is used only for logging/metrics labels.
-func (r *RetryManager) RunTx(ctx context.Context, op string, fn func(*sql.Tx) (interface{}, error)) (interface{}, error) {
-	var zero interface{}
-
-	maxAttempts := r.config.MaxRetries + 1
-	var lastErr error
-
-	var timer *time.Timer
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-
-	start := time.Now()
-	defer func() {
-		r.metrics.ObserveTxLatency(op, time.Since(start))
-	}()
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return zero, err
-		}
-
-		tx, err := r.db.BeginTx(ctx, nil)
-		if err != nil {
-			return zero, err
-		}
-
-		result, err := fn(tx)
-		if err != nil {
-			lastErr = err
-			_ = tx.Rollback()
-
-			cls := classifyError(err)
-			r.metrics.IncTxErrorClass(op, cls.String())
-
-			// Non-retryable errors - fail immediately
-			if cls == ErrorTypeConditionFailed ||
-				cls == ErrorTypeUnsupportedFeature ||
-				cls == ErrorTypePermanent ||
-				cls == ErrorTypeConnectionLimit ||
-				cls == ErrorTypeTransactionTimeout {
-				return zero, err
-			}
-
-			// Retry only on retryable class.
-			if attempt == maxAttempts {
-				r.metrics.IncTxExhausted(op)
-				return zero, fmt.Errorf("dsql: max retries exceeded (op=%s attempts=%d): %w", op, attempt, lastErr)
-			}
-
-			r.metrics.IncTxConflict(op)
-			r.metrics.IncTxRetry(op, attempt)
-
-			delay := r.calculateBackoff(attempt - 1)
-			r.metrics.ObserveTxBackoff(op, delay)
-
-			if r.logger != nil {
-				r.logger.Warn("dsql tx retryable error, retrying",
-					tag.Operation(op),
-					tag.Attempt(int32(attempt)),
-					tag.NewDurationTag("backoff", delay),
-					tag.Error(err),
-				)
-			}
-
-			if err := sleepWithContext(ctx, &timer, delay); err != nil {
-				return zero, err
-			}
-			continue
-		}
-
-		if err := tx.Commit(); err != nil {
-			lastErr = err
-			cls := classifyError(err)
-			r.metrics.IncTxErrorClass(op, cls.String())
-
-			if cls == ErrorTypeRetryable && attempt < maxAttempts {
-				r.metrics.IncTxConflict(op)
-				r.metrics.IncTxRetry(op, attempt)
-
-				delay := r.calculateBackoff(attempt - 1)
-				r.metrics.ObserveTxBackoff(op, delay)
-
-				if r.logger != nil {
-					r.logger.Warn("dsql tx commit retryable error, retrying",
-						tag.Operation(op),
-						tag.Attempt(int32(attempt)),
-						tag.NewDurationTag("backoff", delay),
-						tag.Error(err),
-					)
-				}
-
-				if err := sleepWithContext(ctx, &timer, delay); err != nil {
-					return zero, err
-				}
-				continue
-			}
-
-			if cls == ErrorTypeRetryable && attempt == maxAttempts {
-				r.metrics.IncTxExhausted(op)
-				return zero, fmt.Errorf("dsql: max retries exceeded (op=%s attempts=%d): %w", op, attempt, lastErr)
-			}
-
-			return zero, err
-		}
-
-		return result, nil
-	}
-
-	return zero, fmt.Errorf("dsql: unexpected retry loop exit (op=%s): %w", op, lastErr)
-}
-
-func (r *RetryManager) RunTxVoid(ctx context.Context, op string, fn func(*sql.Tx) error) error {
-	_, err := r.RunTx(ctx, op, func(tx *sql.Tx) (interface{}, error) {
-		return nil, fn(tx)
-	})
-	return err
 }
 
 func classifyError(err error) ErrorType {
@@ -330,22 +194,6 @@ func IsRetryableError(err error) bool {
 	return classifyError(err) == ErrorTypeRetryable
 }
 
-// RunTxWithRetry is a standalone function for running transactions with retry logic
-// This is a backwards-compatible helper that creates a temporary RetryManager
-func RunTxWithRetry(ctx context.Context, db *sql.DB, op string, fn func(*sql.Tx) (interface{}, error)) (interface{}, error) {
-	cfg := DefaultRetryConfig()
-	rm := NewRetryManager(db, cfg, nil, nil) // Use nil logger and metrics for simple usage
-	return rm.RunTx(ctx, op, fn)
-}
-
-// RunTxWithRetryVoid is a standalone function for running void transactions with retry logic
-// This is a backwards-compatible helper that creates a temporary RetryManager
-func RunTxWithRetryVoid(ctx context.Context, db *sql.DB, op string, fn func(*sql.Tx) error) error {
-	cfg := DefaultRetryConfig()
-	rm := NewRetryManager(db, cfg, nil, nil) // Use nil logger and metrics for simple usage
-	return rm.RunTxVoid(ctx, op, fn)
-}
-
 func (r *RetryManager) calculateBackoff(attempt int) time.Duration {
 	delay := float64(r.config.BaseDelay) * math.Pow(2, float64(attempt))
 	if delay > float64(r.config.MaxDelay) {
@@ -359,29 +207,6 @@ func (r *RetryManager) calculateBackoff(attempt int) time.Duration {
 		delay = 0
 	}
 	return time.Duration(delay)
-}
-
-func sleepWithContext(ctx context.Context, timer **time.Timer, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	if *timer == nil {
-		*timer = time.NewTimer(d)
-	} else {
-		(*timer).Reset(d)
-	}
-	select {
-	case <-(*timer).C:
-		return nil
-	case <-ctx.Done():
-		if !(*timer).Stop() {
-			select {
-			case <-(*timer).C:
-			default:
-			}
-		}
-		return ctx.Err()
-	}
 }
 
 // GetDependencies returns the dependencies used by this RetryManager

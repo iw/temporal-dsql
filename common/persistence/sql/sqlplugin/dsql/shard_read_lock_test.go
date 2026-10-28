@@ -15,40 +15,26 @@ import (
 )
 
 func TestReadLockShardsForKeyShare(t *testing.T) {
-	for _, inTransaction := range []bool{true, false} {
-		name := "non_transaction"
-		if inTransaction {
-			name = "transaction"
-		}
-		t.Run(name, func(t *testing.T) {
-			fakeDB, fake := newShardTestDB(t, 7)
-			cfg := &config.SQL{
-				PluginName:   dsql.PluginName,
-				DatabaseName: "shard_read_lock_test",
-				Connect: func(*config.SQL) (*sqlx.DB, error) {
-					return fakeDB, nil
-				},
-			}
-			db, err := persistencesql.NewSQLDB(sqlplugin.DbKindMain, cfg,
-				resolver.NewNoopResolver(), log.NewNoopLogger(), metrics.NoopMetricsHandler)
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, db.Close()) })
-
-			var rangeID int64
-			if inTransaction {
-				tx, err := db.BeginTx(t.Context())
-				require.NoError(t, err)
-				defer func() { require.NoError(t, tx.Rollback()) }()
-				rangeID, err = tx.ReadLockShards(t.Context(), sqlplugin.ShardsFilter{ShardID: 1})
-				require.NoError(t, err)
-			} else {
-				rangeID, err = db.ReadLockShards(t.Context(), sqlplugin.ShardsFilter{ShardID: 1})
-				require.NoError(t, err)
-			}
-
-			require.Equal(t, int64(7), rangeID)
-			statements, _, _ := fake.snapshot()
-			require.Equal(t, []string{shardTestReadLockQuery}, statements)
-		})
+	fakeDB, fake := newShardTestDB(t, 7)
+	cfg := &config.SQL{
+		PluginName:   dsql.PluginName,
+		DatabaseName: "shard_read_lock_test",
+		Connect: func(*config.SQL) (*sqlx.DB, error) {
+			return fakeDB, nil
+		},
 	}
+	db, err := persistencesql.NewSQLDB(sqlplugin.DbKindMain, cfg,
+		resolver.NewNoopResolver(), log.NewNoopLogger(), metrics.NoopMetricsHandler)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	tx, err := db.BeginTx(t.Context())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, tx.Rollback()) }()
+	rangeID, err := tx.ReadLockShards(t.Context(), sqlplugin.ShardsFilter{ShardID: 1})
+	require.NoError(t, err)
+
+	require.Equal(t, int64(7), rangeID)
+	statements, _, _ := fake.snapshot()
+	require.Equal(t, []string{shardTestReadLockQuery}, statements)
 }

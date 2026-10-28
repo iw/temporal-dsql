@@ -8,7 +8,7 @@ import (
 )
 
 func TestRetryBackoffConcurrent(t *testing.T) {
-	rm := NewRetryManager(nil, DefaultRetryConfig(), log.NewNoopLogger(), nil)
+	rm := NewRetryManager(DefaultRetryConfig(), log.NewNoopLogger(), nil)
 	policy := NewDSQLTxRetryPolicy(rm)
 	for _, tc := range []struct {
 		name    string

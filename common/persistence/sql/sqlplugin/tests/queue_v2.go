@@ -140,11 +140,11 @@ func (db *faultyDB) InsertIntoQueueV2Metadata(ctx context.Context, row *sqlplugi
 	return db.DB.InsertIntoQueueV2Metadata(ctx, row)
 }
 
-func (tx *faultyTx) RangeDeleteFromQueueV2Messages(ctx context.Context, filter sqlplugin.QueueV2MessagesFilter) (sql.Result, error) {
-	if tx.db.rangeDeleteError != nil {
-		return nil, tx.db.rangeDeleteError
+func (db *faultyDB) RangeDeleteFromQueueV2Messages(ctx context.Context, filter sqlplugin.QueueV2MessagesFilter) (sql.Result, error) {
+	if db.rangeDeleteError != nil {
+		return nil, db.rangeDeleteError
 	}
-	return tx.Tx.RangeDeleteFromQueueV2Messages(ctx, filter)
+	return db.DB.RangeDeleteFromQueueV2Messages(ctx, filter)
 }
 
 func (tx *faultyTx) UpdateQueueV2Metadata(ctx context.Context, row *sqlplugin.QueueV2MetadataRow) (sql.Result, error) {

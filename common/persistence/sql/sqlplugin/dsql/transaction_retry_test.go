@@ -10,9 +10,6 @@ import (
 
 func TestRetryManagerCreationForTransactions(t *testing.T) {
 	t.Run("retry manager logic works correctly", func(t *testing.T) {
-		// This test verifies the key fix: removing the tx == nil condition
-		// from newDBWithDependencies so that transactions can have retry managers
-
 		logger := log.NewNoopLogger()
 		metricsHandler := metrics.NoopMetricsHandler
 		config := RetryConfig{
@@ -22,18 +19,18 @@ func TestRetryManagerCreationForTransactions(t *testing.T) {
 			JitterFactor: 0.5,
 		}
 
-		// Test 1: With logger and metrics but no handle - should not create retry manager
+		// Test 1: With logger and metrics - creates retry manager without a handle
 		db1 := newDBWithDependencies(
 			1, // dbKind
 			"test",
 			nil, // driver
-			nil, // handle - nil, so no retry manager should be created
+			nil, // handle - not needed, since the retry manager never opens transactions
 			nil, // tx
 			logger,
 			metricsHandler,
 			config,
 		)
-		assert.Nil(t, db1.retryManager, "RetryManager should not be created without handle")
+		assert.NotNil(t, db1.retryManager, "RetryManager should be created with logger and metrics")
 
 		// Test 2: Without logger or metrics - should not create retry manager
 		db2 := newDBWithDependencies(
@@ -48,10 +45,6 @@ func TestRetryManagerCreationForTransactions(t *testing.T) {
 		)
 		assert.Nil(t, db2.retryManager, "RetryManager should not be created without logger and metrics")
 
-		// The key insight: The fix removes the tx == nil condition, so now
-		// transactions CAN have retry managers if they have logger, metrics, and handle
-		// This is tested indirectly through the BeginTx method which inherits
-		// the parent's retry manager configuration
 	})
 }
 
@@ -66,8 +59,8 @@ func TestRetryManagerDependencyExtraction(t *testing.T) {
 			JitterFactor: 0.25,
 		}
 
-		// Create retry manager (skip DB creation by passing nil)
-		retryManager := NewRetryManager(nil, config, logger, metricsHandler)
+		// Create the retry configuration and metrics shared with transactions.
+		retryManager := NewRetryManager(config, logger, metricsHandler)
 		assert.NotNil(t, retryManager, "RetryManager should be created")
 
 		// Extract dependencies

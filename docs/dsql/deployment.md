@@ -104,16 +104,26 @@ An empty `sql.user` defaults to `admin`. The plugin ignores `sql.password`, beca
 ```yaml
 persistence:
   defaultStore: dsql-default
+  visibilityStore: visibility
   datastores:
     dsql-default:
       sql:
         pluginName: "dsql"
         user: "admin" # Or temporal after completing the least-privilege role setup
-        databaseName: "temporal"
+        databaseName: "postgres" # a DSQL cluster has one database, named postgres
         connectAddr: "${CLUSTER_ENDPOINT}:5432"
         maxConns: 50
         maxConnLifetime: "50m"
+    visibility: # a separate, durable store; DSQL doesn't support visibility
+      sql:
+        pluginName: "postgres12"
+        databaseName: "temporal_visibility"
+        connectAddr: "${VISIBILITY_ENDPOINT}:5432"
+        user: "temporal"
+        password: "${VISIBILITY_PASSWORD}"
 ```
+
+Visibility can use any store Temporal supports except DSQL, such as Elasticsearch, OpenSearch, PostgreSQL or MySQL, configured as for upstream Temporal. The in-memory SQLite visibility in [`config/development-dsql.yaml`](../../config/development-dsql.yaml) loses its data on restart, so use it only for trying things out.
 
 `maxIdleConns` is ignored. Service pools open and keep `maxConns` connections in the background (100 if unset). `maxConnLifetime` is capped at 50 minutes; shorter positive values apply. The pool uses four minutes of lifetime jitter and one-minute health checks. See [connection pool](connection-pool.md) for lifecycle details and limitations.
 
@@ -127,7 +137,7 @@ An explicit `connectAttributes.sslmode` overrides this default. A value other th
 
 ## 3. Dynamic Configuration
 
-These are the validated dynamic config keys for DSQL deployments. Values shown are from the bench environment (200–800 WPS); scale down for lighter workloads.
+These are the dynamic config keys for DSQL deployments. Values shown are from the bench environment (200–800 WPS); scale down for lighter workloads. Keep the DSQL history batch and payload limits as shown.
 
 ```yaml
 # A history batch is stored in one column, which DSQL caps at 1 MiB
@@ -172,7 +182,7 @@ history.cacheNonUserContextLockTimeout:
     constraints: {}
 ```
 
-See `temporal-dsql-deploy-ecs/docker/config/dynamicconfig-bench.yaml` for the complete bench configuration including matching tuning, frontend rate limits, and task queue partitioning.
+The [development dynamic config](../../config/dynamicconfig/development-dsql.yaml) is a smaller starting point.
 
 ## 4. Connection Pool
 
@@ -184,7 +194,7 @@ The old reservoir, pool warmup and pool keeper settings are ignored with one war
 
 ## 5. Distributed Coordination (Multi-Service)
 
-DynamoDB-backed rate limiting can coordinate multiple Temporal processes. It remains opt-in; token bucket mode uses GCRA reservations with monotonic shared state to address [#40](https://github.com/iw/temporal-dsql/issues/40).
+DynamoDB-backed rate limiting can coordinate multiple Temporal processes. It remains opt-in; token bucket mode uses GCRA reservations with monotonic shared state under clock skew.
 
 ### Token Bucket Rate Limiting
 
@@ -201,7 +211,7 @@ DSQL_TOKEN_BUCKET_CAPACITY=1000  # Burst capacity (matches DSQL burst)
 DSQL_TOKEN_BUCKET_MAX_WAIT=30s   # Maximum reservation wait
 ```
 
-Without token bucket mode, the distributed rate limiter falls back to a simple per-second counter (no burst support). The ECS terraform module currently uses the per-second counter with `DSQL_DISTRIBUTED_RATE_LIMITER_LIMIT=100`.
+Without token bucket mode, the distributed rate limiter falls back to a simple per-second counter (no burst support). Its fleet rate is configured with `DSQL_DISTRIBUTED_RATE_LIMITER_LIMIT` (default 100/sec).
 
 Both distributed modes use the local `ConnectionRateLimiter` for 30 seconds after DynamoDB API, throttling or network errors, then retry DynamoDB. The local controls are `DSQL_CONNECTION_RATE_LIMIT` (default 10/sec) and `DSQL_CONNECTION_BURST_LIMIT` (default 100). During an outage, every process paces itself locally, so the fleet may exceed DSQL's limits; DSQL rejects the excess with 53400 (not attempted). Lower the local burst if less excess is desired. Condition failures, the GCRA horizon timeout and cancellation do not cause fallback. Warnings are limited to once a minute; monitor `dsql_rate_limiter_fallbacks_total`. Startup fallback on client initialization failure is retained.
 
@@ -241,7 +251,7 @@ New hosts need only `UpdateItem`. Retain the old permissions until all old hosts
 
 The slot-block connection lease was removed ([#33](https://github.com/iw/temporal-dsql/issues/33)). `DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true` still refuses startup. The sum of `maxConns` across every Temporal process, including deploy overlap, must fit the cluster's connection limit. Leave headroom for ephemeral pools and administration, then unset the enable variable. The other retired settings are [ignored with a warning](connection-pool.md#migration-from-the-old-layer). The lease's DynamoDB table can be deleted once no old deployment uses it; retain the rate-limiter table.
 
-## 6. Complete Production Configuration
+## 6. Multi-Service Configuration
 
 Putting it all together for a multi-service deployment:
 
@@ -359,7 +369,7 @@ Use pool waits, constructing connections and rate-limiter logs to distinguish sa
 
 ### Serialization Conflicts
 
-OCC conflicts are expected under concurrent load. The retry logic handles them automatically.
+OCC conflicts are expected under concurrent load. Core transactions using `txExecute` retry SQLSTATE 40001 through the plugin policy.
 
 - Monitor `dsql_tx_conflict_total` — a sustained spike may indicate hot-spot access patterns
 - Monitor `dsql_tx_exhausted_total` — retries exhausted means the conflict rate exceeds retry budget
@@ -373,3 +383,13 @@ Ensure hosts have a trusted CA bundle before rolling out the new `verify-full` d
 Follow the [pool rollout checklist](connection-pool.md#rollout-and-rollback): budget every pool and overlapping replica, remove ignored settings, resolve reliance on leasing, then replace one process at a time while checking pool fill and waits. Startup does not wait for a full pool.
 
 Rollback by deploying the previous image and restoring its previous connection configuration. This connection-layer change requires no schema migration or rollback.
+
+### No data migration
+
+**There is no data migration** between DSQL and any other Temporal persistence store, in either direction. The schemas differ and no tooling transfers the data.
+
+**Switching persistence stores abandons the data.** Pointing the persistence config at another, empty store starts Temporal on that empty store and leaves every workflow, history and task queue in DSQL behind. Never use a store switch as an incident rollback.
+
+Rolling back a release means deploying the previous image with its previous config against the same persistence store, as described above.
+
+Moving off DSQL means running a second Temporal cluster on the other store. Start new workflows there and let existing workflows finish on the DSQL cluster before retiring it. Other approaches, including Temporal multi-cluster replication, have not been tried with DSQL.

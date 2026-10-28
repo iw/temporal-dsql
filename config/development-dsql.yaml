@@ -4,28 +4,41 @@ log:
 
 persistence:
   defaultStore: dsql-default
-  visibilityStore: dsql-visibility
-  numHistoryShards: 4
+  visibilityStore: sqlite-visibility
+  numHistoryShards: 4 # can't be changed after the cluster is created
   datastores:
     dsql-default:
       sql:
         pluginName: "dsql"
-        databaseName: "temporal"
+        databaseName: "postgres"
         connectAddr: "your-dsql-cluster.dsql.us-east-1.on.aws:5432"
         connectProtocol: "tcp"
         user: "admin" # See docs/dsql/deployment.md#least-privilege-role
         maxConns: 20
         maxConnLifetime: "50m"
         taskScanPartitions: 1
-    dsql-visibility:
+    # In-memory visibility is for trying things out only; use a durable store for retained data.
+    sqlite-visibility:
       sql:
-        pluginName: "dsql"
-        databaseName: "temporal_visibility"
-        connectAddr: "your-dsql-cluster.dsql.us-east-1.on.aws:5432"
+        user: ""
+        password: ""
+        pluginName: "sqlite"
+        databaseName: "default"
+        connectAddr: "localhost"
         connectProtocol: "tcp"
-        user: "admin" # See docs/dsql/deployment.md#least-privilege-role
-        maxConns: 10
-        maxConnLifetime: "50m"
+        connectAttributes:
+          mode: "memory"
+          cache: "private"
+        maxConns: 1
+        maxIdleConns: 1
+        maxConnLifetime: "1h"
+        tls:
+          enabled: false
+          caFile: ""
+          certFile: ""
+          keyFile: ""
+          enableHostVerification: false
+          serverName: ""
 
 global:
   membership:
@@ -38,6 +51,7 @@ services:
   frontend:
     rpc:
       grpcPort: 7233
+      httpPort: 7243
       membershipPort: 6933
       bindOnLocalHost: true
 
@@ -70,6 +84,7 @@ clusterMetadata:
       initialFailoverVersion: 1
       rpcName: "frontend"
       rpcAddress: "localhost:7233"
+      httpAddress: "localhost:7243"
 
 dcRedirectionPolicy:
   policy: "noop"

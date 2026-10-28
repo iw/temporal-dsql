@@ -88,13 +88,8 @@ func newDBWithDependencies(
 	}
 	mdb.converter = &converter{}
 
-	// Initialize RetryManager if we have logger and metrics
-	// CRITICAL FIX: Remove the tx == nil condition to enable retry for transactions
-	if logger != nil && metricsHandler != nil && handle != nil {
-		db, err := handle.DB()
-		if err == nil && db != nil {
-			mdb.retryManager = NewRetryManager(db.DB, retryConfig, logger, metricsHandler)
-		}
+	if logger != nil && metricsHandler != nil {
+		mdb.retryManager = NewRetryManager(retryConfig, logger, metricsHandler)
 	}
 
 	rm := mdb.retryManager
@@ -161,7 +156,7 @@ func (pdb *db) BeginTx(ctx context.Context) (sqlplugin.Tx, error) {
 	}
 
 	// Create transaction-level db with retry manager inherited from parent
-	// This ensures that transaction-level operations can use retry logic
+	// Core owns retries through the transaction retry policy.
 	var logger log.Logger
 	var metricsHandler metrics.Handler
 	retryConfig := DefaultRetryConfig()

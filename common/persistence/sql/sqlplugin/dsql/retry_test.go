@@ -1,9 +1,6 @@
 package dsql
 
 import (
-	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -12,24 +9,12 @@ import (
 	"go.temporal.io/server/common/log"
 )
 
-// mockDB is a minimal mock for testing RetryManager without a real database
-type mockDB struct {
-	beginTxFunc func(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
-}
-
-func (m *mockDB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
-	if m.beginTxFunc != nil {
-		return m.beginTxFunc(ctx, opts)
-	}
-	return nil, errors.New("mock BeginTx not implemented")
-}
-
 func TestRetryManager_Basic(t *testing.T) {
 	config := DefaultRetryConfig()
 	config.MaxRetries = 2
 	config.BaseDelay = 1 * time.Millisecond // Fast for testing
 
-	rm := NewRetryManager(nil, config, log.NewNoopLogger(), nil)
+	rm := NewRetryManager(config, log.NewNoopLogger(), nil)
 
 	// Test that RetryManager is created with correct config
 	assert.Equal(t, 2, rm.config.MaxRetries)
@@ -43,7 +28,7 @@ func TestRetryManager_SuccessfulOperation(t *testing.T) {
 	config.MaxRetries = 2
 	config.BaseDelay = 1 * time.Millisecond
 
-	rm := NewRetryManager(nil, config, log.NewNoopLogger(), nil)
+	rm := NewRetryManager(config, log.NewNoopLogger(), nil)
 
 	// Verify the retry manager was created with correct configuration
 	assert.Equal(t, 2, rm.config.MaxRetries)
@@ -58,31 +43,6 @@ func TestRetryManager_ConditionFailedError_NoRetry(t *testing.T) {
 	assert.True(t, IsConditionFailedError(err))
 	assert.Equal(t, ErrorTypeConditionFailed, ClassifyError(err))
 	assert.False(t, IsRetryableError(err))
-}
-
-func TestRetryManager_RetryableError_WithRetries(t *testing.T) {
-	// Skip this test for now since it requires createPgError from errors_test.go
-	t.Skip("Skipping test that requires createPgError - will be implemented in optional task 2.4")
-}
-
-func TestRetryManager_PermanentError_NoRetry(t *testing.T) {
-	// Skip this test for now since it requires createPgError from errors_test.go
-	t.Skip("Skipping test that requires createPgError - will be implemented in optional task 2.4")
-}
-
-func TestRetryManager_ContextCancellation(t *testing.T) {
-	// Skip this test for now since it requires createPgError from errors_test.go
-	t.Skip("Skipping test that requires createPgError - will be implemented in optional task 2.4")
-}
-
-func TestRetryManager_RunTxVoid(t *testing.T) {
-	// Test that the void wrapper function exists and can be called
-	// Actual database testing would be done in integration tests
-	config := DefaultRetryConfig()
-	rm := NewRetryManager(nil, config, log.NewNoopLogger(), nil)
-
-	// Verify the RunTxVoid method exists and has correct signature
-	assert.NotNil(t, rm.RunTxVoid)
 }
 
 func TestRetryConfig_Validation(t *testing.T) {
@@ -199,7 +159,7 @@ func TestCalculateBackoff(t *testing.T) {
 		JitterFactor: 0, // No jitter for predictable testing
 	}
 
-	rm := NewRetryManager(nil, config, log.NewNoopLogger(), nil)
+	rm := NewRetryManager(config, log.NewNoopLogger(), nil)
 
 	tests := []struct {
 		attempt  int
@@ -220,12 +180,4 @@ func TestCalculateBackoff(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
-}
-
-// Test the backwards-compatible helper functions
-func TestRunTxWithRetry_BackwardsCompatible(t *testing.T) {
-	// Test that the backwards-compatible functions exist and have correct signatures
-	// Actual database testing would be done in integration tests
-	assert.NotNil(t, RunTxWithRetry)
-	assert.NotNil(t, RunTxWithRetryVoid)
 }

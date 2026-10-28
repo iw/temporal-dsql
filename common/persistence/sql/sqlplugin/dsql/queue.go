@@ -13,7 +13,10 @@ const (
 	templateGetMessageQuery          = `SELECT message_id, message_payload, message_encoding FROM queue WHERE queue_type = $1 and message_id = $2`
 	templateGetMessagesQuery         = `SELECT message_id, message_payload, message_encoding FROM queue WHERE queue_type = $1 and message_id > $2 and message_id <= $3 ORDER BY message_id ASC LIMIT $4`
 	templateDeleteMessageQuery       = `DELETE FROM queue WHERE queue_type = $1 and message_id = $2`
-	templateRangeDeleteMessagesQuery = `DELETE FROM queue WHERE queue_type = $1 and message_id > $2 and message_id <= $3`
+	templateRangeDeleteMessagesQuery = `DELETE FROM queue WHERE (queue_type, message_id) IN (
+ SELECT queue_type, message_id FROM queue
+ WHERE queue_type = $1 AND message_id > $2 AND message_id <= $3
+ ORDER BY queue_type, message_id LIMIT $4)`
 
 	templateGetLastMessageIDQuery = `SELECT message_id FROM queue WHERE queue_type=$1 ORDER BY message_id DESC LIMIT 1 FOR UPDATE`
 
@@ -76,12 +79,12 @@ func (pdb *db) DeleteFromMessages(
 	)
 }
 
-// RangeDeleteFromMessages deletes messages before messageID from the queue
+// RangeDeleteFromMessages deletes messages in (MinMessageID, MaxMessageID].
 func (pdb *db) RangeDeleteFromMessages(
 	ctx context.Context,
 	filter sqlplugin.QueueMessagesRangeFilter,
 ) (sql.Result, error) {
-	return pdb.ExecContext(ctx,
+	return pdb.deleteInBatches(ctx, taskDeleteBatchSize,
 		templateRangeDeleteMessagesQuery,
 		filter.QueueType,
 		filter.MinMessageID,

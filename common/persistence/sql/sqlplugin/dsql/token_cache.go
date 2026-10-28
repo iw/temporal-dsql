@@ -339,7 +339,7 @@ func (tc *TokenCache) recordTokenRefreshFailure() {
 
 func (tc *TokenCache) logTokenRefresh(host, region, user string, duration time.Duration) {
 	if tc.logger != nil {
-		tc.logger.Info("DSQL IAM token refreshed",
+		tc.logger.Debug("DSQL IAM token refreshed",
 			tag.NewStringTag("host", host),
 			tag.NewStringTag("region", region),
 			tag.NewStringTag("user", user),

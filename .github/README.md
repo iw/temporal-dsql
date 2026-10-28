@@ -5,18 +5,18 @@ Temporal server with an [Amazon Aurora DSQL](https://aws.amazon.com/rds/aurora/d
 This is a community distribution of [Temporal](https://github.com/temporalio/temporal). It isn't affiliated with or endorsed by Temporal Technologies, Inc. "Temporal" is a trademark of Temporal Technologies, Inc.
 
 > [!WARNING]
-> **Experimental: don't use this in production yet.** A review in October 2026 found correctness defects in shard ownership, transaction retries and namespace updates. They're tracked as [open issues](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+is%3Aopen+label%3Adsql-review-2026-10), and the [critical and high ones](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+is%3Aopen+label%3A%22severity%3A+critical%22%2C%22severity%3A+high%22) should be fixed first.
+> **Experimental: don't use this in production yet.** The critical and high findings from the October 2026 review are fixed. See the [remaining open issues](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+is%3Aopen+label%3Adsql-review-2026-10).
 
 ## What this adds to Temporal
 
 - A `dsql` SQL persistence plugin for Temporal's default store, in [`common/persistence/sql/sqlplugin/dsql`](../common/persistence/sql/sqlplugin/dsql)
 - A DSQL schema, in [`schema/dsql`](../schema/dsql), and a schema tool, `temporal-dsql-tool`
 - IAM authentication with generated tokens, so no database password is stored
-- pgxpool connection management and optional DynamoDB rate limiting; connection leasing is unsupported until #33
+- pgxpool connection management and optional DynamoDB rate limiting; pools must be sized to fit the cluster's connection limit
 
 DSQL holds the persistence store only. Visibility needs a separate store, such as OpenSearch, Elasticsearch, PostgreSQL, MySQL or SQLite.
 
-Everything outside the plugin, its schema and its tooling is upstream Temporal code.
+The fork also changes some upstream code to work within DSQL's limits, such as transaction retries and the history and queue range deletes.
 
 ## Compatibility
 
@@ -46,38 +46,9 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
 
    Start from a new cluster at version 1.2. To upgrade a cluster at 1.0 or 1.1, see the [deployment guide](../docs/dsql/deployment.md#upgrading-from-v11).
 
-3. Copy [`config/development-dsql.yaml`](../config/development-dsql.yaml) and replace its `persistence` block with this one:
+3. Copy [`config/development-dsql.yaml`](../config/development-dsql.yaml) and replace its `connectAddr` placeholder with your cluster endpoint. It uses the DSQL database `postgres` and a separate in-memory SQLite visibility store for trying things out only. Keep [`config/dynamicconfig/development-dsql.yaml`](../config/dynamicconfig/development-dsql.yaml) at the configured path, or adjust `dynamicConfigClient.filepath`.
 
-   ```yaml
-   persistence:
-     defaultStore: dsql
-     visibilityStore: visibility
-     numHistoryShards: 4              # can't be changed after the cluster is created
-     datastores:
-       dsql:
-         sql:
-           pluginName: "dsql"
-           databaseName: "postgres"   # a DSQL cluster has one database, named postgres
-           connectAddr: "<cluster-id>.dsql.us-east-1.on.aws:5432"
-           connectProtocol: "tcp"
-           tls:
-             enabled: true
-           maxConns: 20
-           maxIdleConns: 20
-       visibility:                    # in memory, for trying it out only
-         sql:
-           pluginName: "sqlite"
-           databaseName: "default"
-           connectAddr: "localhost"
-           connectProtocol: "tcp"
-           connectAttributes:
-             mode: "memory"
-             cache: "private"
-           maxConns: 1
-           maxIdleConns: 1
-   ```
-
-   The plugin connects as the DSQL `admin` role with IAM tokens and ignores `user` and `password`. With `tls.enabled` alone the connection is encrypted but the server certificate isn't verified; `enableHostVerification: true` verifies it ([#39](https://github.com/iw/temporal-dsql/issues/39)). The plugin reads the region from `REGION` or `AWS_REGION`, and AWS credentials from the default credential chain.
+   The plugin connects as `user`, which defaults to `admin`, using IAM tokens. It ignores `password` and defaults to `sslmode=verify-full` for server certificate and hostname verification. It reads the region from `REGION` or `AWS_REGION`, and credentials from the default AWS credential chain. See [least-privilege role setup](../docs/dsql/deployment.md#least-privilege-role) before choosing another role.
 
 4. Start the server:
 
@@ -85,7 +56,7 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
    ./temporal-server --config-file <your-config>.yaml --allow-no-auth start
    ```
 
-For production settings, see the [deployment guide](../docs/dsql/deployment.md).
+For production settings, see the [deployment guide](../docs/dsql/deployment.md), which also covers rollback and why there's no data migration.
 
 ## Documentation
 

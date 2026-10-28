@@ -88,7 +88,6 @@ func TestDSQLMetricsCreation(t *testing.T) {
 	}
 
 	// Test that no-op metrics don't panic
-	nilMetrics.ObserveTxLatency("test", time.Millisecond)
 	nilMetrics.IncTxErrorClass("test", "retryable")
 	nilMetrics.IncTxExhausted("test")
 	nilMetrics.IncTxConflict("test")
