@@ -13,8 +13,9 @@ This is a community distribution of [Temporal](https://github.com/temporalio/tem
 - A DSQL schema, in [`schema/dsql`](../schema/dsql), and a schema tool, `temporal-dsql-tool`
 - IAM authentication with generated tokens, so no database password is stored
 - pgxpool connection management and optional DynamoDB token bucket rate limiting; pools must be sized to fit the cluster's connection limit
+- A DSQL visibility store, in its own schema on the same cluster or another, with a query dialect for DSQL
 
-DSQL holds the persistence store only. Visibility needs a separate store, such as OpenSearch, Elasticsearch, PostgreSQL, MySQL or SQLite.
+DSQL visibility suits namespaces whose retained executions number in the tens of thousands. For larger namespaces, or heavy use of Text and KeywordList search attributes, use OpenSearch or Elasticsearch; see [visibility](../docs/dsql/visibility.md).
 
 The fork also changes some upstream code to work within DSQL's limits, such as transaction retries and the history and queue range deletes. See [upstream changes](../docs/dsql/upstream-changes.md) for what remains and its path forward.
 
@@ -44,6 +45,8 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
    ```
 
    Create a fresh schema at version 1.2. Both schema setup paths are documented in the [deployment guide](../docs/dsql/deployment.md#1-schema-setup).
+
+   To keep visibility on DSQL as well, also run `setup-schema --schema-name dsql/visibility --version 1.0`. The deployment guide covers its [schema](../docs/dsql/deployment.md#visibility-schema) and datastore.
 
 3. Copy [`config/development-dsql.yaml`](../config/development-dsql.yaml) and replace its `connectAddr` placeholder with your cluster endpoint. It uses the DSQL database `postgres` and a separate in-memory SQLite visibility store for trying things out only. Keep [`config/dynamicconfig/development-dsql.yaml`](../config/dynamicconfig/development-dsql.yaml) at the configured path, or adjust `dynamicConfigClient.filepath`.
 

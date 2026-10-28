@@ -1,6 +1,6 @@
 # Aurora DSQL Support for Temporal
 
-Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL database. This plugin enables Temporal to use DSQL as its persistence (default) store. Visibility isn't supported on DSQL, so configure a separate visibility store.
+Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL database. This plugin enables Temporal to use DSQL as its persistence (default) store, and optionally as its visibility store, which suits namespaces whose retained executions number in the tens of thousands.
 
 > **Status: experimental; not recommended for production.** The critical and high findings from the October 2026 review are fixed. Remaining findings are tracked in the [open review issues](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+is%3Aopen+label%3Adsql-review-2026-10).
 
@@ -18,6 +18,7 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 |----------|-------------|
 | [Deployment Guide](deployment.md) | Deployment: schema setup, configuration, and operational guidance |
 | [Connection Pool](connection-pool.md) | Pool sizing, lifetime, deployment checks |
+| [Visibility](visibility.md) | The DSQL visibility store: schema, indexes, query dialect and limits |
 | [Implementation Details](implementation.md) | Code structure, schema layout, transaction retries, shard ownership checks and batched deletion |
 | [Metrics Reference](metrics.md) | Emitted metrics and alerting recommendations |
 | [Upstream Changes](upstream-changes.md) | Changes outside fork-owned packages and their path upstream |
@@ -25,7 +26,7 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 
 ## Quick Reference
 
-**Schema version:** 1.2
+**Schema versions:** persistence 1.2, visibility 1.0
 
 **How the plugin handles DSQL differences:**
 
