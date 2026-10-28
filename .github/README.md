@@ -5,7 +5,7 @@ Temporal server with an [Amazon Aurora DSQL](https://aws.amazon.com/rds/aurora/d
 This is a community distribution of [Temporal](https://github.com/temporalio/temporal). It isn't affiliated with or endorsed by Temporal Technologies, Inc. "Temporal" is a trademark of Temporal Technologies, Inc.
 
 > [!WARNING]
-> **Experimental: don't use this in production yet.** The critical and high findings from the October 2026 review are fixed. See the [remaining open issues](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+is%3Aopen+label%3Adsql-review-2026-10).
+> **Experimental: don't use this in production yet.** Known issues are tracked as [GitHub issues](https://github.com/iw/temporal-dsql/issues).
 
 ## What this adds to Temporal
 
@@ -55,7 +55,7 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
    ./temporal-server --config-file <your-config>.yaml --allow-no-auth start
    ```
 
-See the [deployment guide](../docs/dsql/deployment.md) for configuration and operational guidance.
+The [deployment guide](../docs/dsql/deployment.md) covers the rest of the configuration: dynamic config, connection pool sizing, rate limiting, monitoring and troubleshooting.
 
 ## Documentation
 
