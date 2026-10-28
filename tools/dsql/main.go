@@ -68,6 +68,11 @@ func BuildCLIOptions() *cli.App {
 			Usage:  "AWS region (defaults to REGION or AWS_REGION)",
 			EnvVar: "REGION,AWS_REGION",
 		},
+		cli.StringFlag{
+			Name:  "sslmode",
+			Value: "verify-full",
+			Usage: "PostgreSQL TLS mode (verify-full verifies the server certificate and hostname)",
+		},
 		cli.BoolFlag{
 			Name:  schema.CLIFlagQuiet,
 			Usage: "Don't set exit status to 1 on error",

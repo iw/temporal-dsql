@@ -45,10 +45,8 @@ const (
 )
 
 const (
-	sslMode        = "sslmode"
-	sslModeNoop    = "disable"
-	sslModeRequire = "require"
-	sslModeFull    = "verify-full"
+	sslMode     = "sslmode"
+	sslModeFull = "verify-full"
 
 	sslCA   = "sslrootcert"
 	sslKey  = "sslkey"
@@ -164,19 +162,14 @@ func buildDSNAttr(cfg *config.SQL) (url.Values, error) {
 		parameters.Set(key, value)
 	}
 
+	// DSQL requires TLS. The boolean zero values do not opt out of verification.
+	if parameters.Get(sslMode) == "" {
+		parameters.Set(sslMode, sslModeFull)
+	}
+	if cfg.TLS != nil && parameters.Get(sslCA) == "" && cfg.TLS.CaFile != "" {
+		parameters.Set(sslCA, cfg.TLS.CaFile)
+	}
 	if cfg.TLS != nil && cfg.TLS.Enabled {
-		if parameters.Get(sslMode) == "" {
-			if cfg.TLS.EnableHostVerification {
-				parameters.Set(sslMode, sslModeFull)
-			} else {
-				parameters.Set(sslMode, sslModeRequire)
-			}
-		}
-
-		if parameters.Get(sslCA) == "" && cfg.TLS.CaFile != "" {
-			parameters.Set(sslCA, cfg.TLS.CaFile)
-		}
-
 		if parameters.Get(sslKey) == "" {
 			if parameters.Get(sslCert) != "" {
 				return nil, errors.New("failed to build postgresql DSN: sslcert connectAttribute is set but sslkey is not set")
@@ -193,8 +186,6 @@ func buildDSNAttr(cfg *config.SQL) (url.Values, error) {
 		} else if parameters.Get(sslCert) == "" {
 			return nil, errors.New("failed to build postgresql DSN: sslkey connectAttribute is set but sslcert is not set")
 		}
-	} else if parameters.Get(sslMode) == "" {
-		parameters.Set(sslMode, sslModeNoop)
 	}
 
 	return parameters, nil

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -373,5 +374,73 @@ func TestPoolMetrics(t *testing.T) {
 	case <-m.poolCollectorDone:
 	default:
 		t.Fatal("collector did not stop")
+	}
+}
+
+func TestPoolRoleAndToken(t *testing.T) {
+	for _, user := range []string{"", "admin", "temporal"} {
+		t.Run("user="+user, func(t *testing.T) {
+			core, logs := observer.New(zap.InfoLevel)
+			logger := log.NewZapLogger(zap.New(core))
+			cache := NewTokenCache(&mockCredentialsProvider{}, logger, nil)
+			t.Cleanup(cache.Stop)
+			p := &plugin{rateLimiter: poolTestLimiter(func(context.Context) error { return nil })}
+			cfg := &config.SQL{User: user, Password: "ignored-password", ConnectAddr: "db.example.invalid:5432", DatabaseName: "postgres"}
+			expectedUser, action := user, "DbConnect"
+			if user == "" || user == "admin" {
+				expectedUser, action = "admin", "DbConnectAdmin"
+			}
+			for range 2 {
+				provider := p.connectionTokenProvider(cfg, cache, "db.example.invalid", "us-east-1", logger)
+				pool, err := p.poolConfig(cfg, resolver.NewNoopResolver(), provider, logger)
+				require.NoError(t, err)
+				require.Equal(t, expectedUser, pool.ConnConfig.User)
+				require.NotEqual(t, cfg.Password, pool.ConnConfig.Password)
+				require.NoError(t, pool.BeforeConnect(t.Context(), pool.ConnConfig))
+				parsed, err := url.Parse("https://" + pool.ConnConfig.Password)
+				require.NoError(t, err)
+				require.Equal(t, action, parsed.Query().Get("Action"))
+				require.NotNil(t, cache.cachedToken(poolKey{"db.example.invalid", "us-east-1", expectedUser, GetConfiguredTokenDuration()}))
+				require.Equal(t, "ignored-password", cfg.Password)
+			}
+			require.Equal(t, 1, logs.FilterMessage("DSQL password is ignored; connections use IAM authentication").Len())
+			require.Equal(t, expectedUser, logs.FilterMessage("Creating DSQL connection with IAM authentication").All()[0].ContextMap()["user"])
+		})
+	}
+}
+
+func TestPoolTLSWarnings(t *testing.T) {
+	for _, mode := range []string{"", "verify-full", "verify-ca", "require", "prefer", "allow", "disable"} {
+		t.Run("sslmode="+mode, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			logger := log.NewZapLogger(zap.New(core))
+			p := &plugin{}
+			cfg := &config.SQL{ConnectAddr: "db.example.invalid:5432", DatabaseName: "postgres"}
+			if mode != "" {
+				cfg.ConnectAttributes = map[string]string{" sslmode ": " " + mode + " "}
+			}
+			for range 2 {
+				pool, err := p.poolConfig(cfg, resolver.NewNoopResolver(), nil, logger)
+				require.NoError(t, err)
+				if mode == "" || mode == "verify-full" {
+					require.NotNil(t, pool.ConnConfig.TLSConfig)
+					require.False(t, pool.ConnConfig.TLSConfig.InsecureSkipVerify)
+					require.Equal(t, "db.example.invalid", pool.ConnConfig.TLSConfig.ServerName)
+				}
+				if mode == "disable" {
+					require.Nil(t, pool.ConnConfig.TLSConfig)
+				}
+				if mode == "require" {
+					require.True(t, pool.ConnConfig.TLSConfig.InsecureSkipVerify)
+				}
+			}
+			if mode == "" || mode == "verify-full" {
+				require.Zero(t, logs.Len())
+			} else {
+				require.Equal(t, 1, logs.Len())
+				require.Contains(t, logs.All()[0].Message, "not fully verified")
+				require.Equal(t, mode, logs.All()[0].ContextMap()["sslmode"])
+			}
+		})
 	}
 }

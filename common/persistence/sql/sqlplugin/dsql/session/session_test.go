@@ -5,40 +5,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/auth"
 	"go.temporal.io/server/common/config"
 )
 
-func TestBuildDSNAttr_NoTLS_NoConnectAttributes(t *testing.T) {
-	cfg := &config.SQL{}
-	result, err := buildDSNAttr(cfg)
-	require.NoError(t, err)
-	require.Equal(t, "disable", result.Get(sslMode), "should default to sslmode=disable when no TLS and no connect attributes")
+func TestBuildDSNAttr_DefaultVerifyFull(t *testing.T) {
+	for _, tls := range []*auth.TLS{nil, {}, {Enabled: true}, {EnableHostVerification: true}, {Enabled: true, EnableHostVerification: true}} {
+		cfg := &config.SQL{User: "admin", ConnectAddr: "db.example.invalid:5432", DatabaseName: "postgres", TLS: tls}
+		result, err := buildDSNAttr(cfg)
+		require.NoError(t, err)
+		require.Equal(t, "verify-full", result.Get(sslMode))
+		dsn, err := BuildDSN(cfg, &mockServiceResolver{addr: cfg.ConnectAddr})
+		require.NoError(t, err)
+		parsed, err := pgx.ParseConfig(dsn)
+		require.NoError(t, err)
+		require.NotNil(t, parsed.TLSConfig)
+		require.Equal(t, "db.example.invalid", parsed.TLSConfig.ServerName)
+		require.False(t, parsed.TLSConfig.InsecureSkipVerify)
+		require.Empty(t, parsed.Fallbacks)
+	}
 }
 
-func TestBuildDSNAttr_TLSEnabled_NoHostVerification(t *testing.T) {
-	cfg := &config.SQL{
-		TLS: &auth.TLS{
-			Enabled:                true,
-			EnableHostVerification: false,
-		},
-	}
-	result, err := buildDSNAttr(cfg)
+func TestBuildDSNAttr_CAFileWithoutEnabled(t *testing.T) {
+	result, err := buildDSNAttr(&config.SQL{TLS: &auth.TLS{CaFile: "/path/to/ca.crt"}})
 	require.NoError(t, err)
-	require.Equal(t, "require", result.Get(sslMode), "should set sslmode=require when TLS enabled without host verification")
-}
-
-func TestBuildDSNAttr_TLSEnabled_WithHostVerification(t *testing.T) {
-	cfg := &config.SQL{
-		TLS: &auth.TLS{
-			Enabled:                true,
-			EnableHostVerification: true,
-		},
-	}
-	result, err := buildDSNAttr(cfg)
-	require.NoError(t, err)
-	require.Equal(t, "verify-full", result.Get(sslMode), "should set sslmode=verify-full when TLS enabled with host verification")
+	require.Equal(t, "/path/to/ca.crt", result.Get(sslCA))
+	require.Equal(t, "verify-full", result.Get(sslMode))
 }
 
 func TestBuildDSNAttr_TLSEnabled_WithCertificates(t *testing.T) {
@@ -59,7 +53,7 @@ func TestBuildDSNAttr_TLSEnabled_WithCertificates(t *testing.T) {
 	require.Equal(t, "/path/to/client.key", result.Get(sslKey))
 }
 
-func TestBuildDSNAttr_CustomSSLMode_PreferredOverDisable(t *testing.T) {
+func TestBuildDSNAttr_CustomSSLMode_PreferredOverDefault(t *testing.T) {
 	cfg := &config.SQL{
 		ConnectAttributes: map[string]string{
 			"sslmode": "verify-ca",
@@ -67,10 +61,10 @@ func TestBuildDSNAttr_CustomSSLMode_PreferredOverDisable(t *testing.T) {
 	}
 	result, err := buildDSNAttr(cfg)
 	require.NoError(t, err)
-	require.Equal(t, "verify-ca", result.Get(sslMode), "should use custom sslmode instead of default disable")
+	require.Equal(t, "verify-ca", result.Get(sslMode), "should use custom sslmode instead of default verify-full")
 }
 
-func TestBuildDSNAttr_TLSEnabledButCustomSSLModeInAttributes_PreferredOverDisable(t *testing.T) {
+func TestBuildDSNAttr_TLSEnabledButCustomSSLModeInAttributes_PreferredOverDefault(t *testing.T) {
 	cfg := &config.SQL{
 		TLS: &auth.TLS{
 			Enabled:                true,
@@ -82,7 +76,7 @@ func TestBuildDSNAttr_TLSEnabledButCustomSSLModeInAttributes_PreferredOverDisabl
 	}
 	result, err := buildDSNAttr(cfg)
 	require.NoError(t, err)
-	require.Equal(t, "verify-ca", result.Get(sslMode), "should use custom sslmode instead of default disable")
+	require.Equal(t, "verify-ca", result.Get(sslMode), "should use custom sslmode instead of default verify-full")
 }
 
 func TestBuildDSNAttr_ConnectAttributes(t *testing.T) {
@@ -96,7 +90,7 @@ func TestBuildDSNAttr_ConnectAttributes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "10", result.Get("connect_timeout"))
 	require.Equal(t, "temporal", result.Get("application_name"))
-	require.Equal(t, "disable", result.Get(sslMode), "should still set default sslmode")
+	require.Equal(t, "verify-full", result.Get(sslMode), "should still set default sslmode")
 }
 
 func TestBuildDSNAttr_ConnectAttributesWithSpaces(t *testing.T) {
@@ -147,7 +141,7 @@ func TestBuildDSN(t *testing.T) {
 	require.Equal(t, "localhost:5432", u.Host)
 	require.Equal(t, "/testdb", u.Path)
 	require.Equal(t, "10", u.Query().Get("connect_timeout"))
-	require.Equal(t, "disable", u.Query().Get("sslmode"))
+	require.Equal(t, "verify-full", u.Query().Get("sslmode"))
 }
 
 func TestBuildDSN_PasswordEscaping(t *testing.T) {

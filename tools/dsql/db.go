@@ -112,7 +112,6 @@ func NewDSQLSchemaDBFromCLI(c *cli.Context, logger log.Logger) (*DSQLSchemaDB, e
 			func(o *auth.TokenOptions) { o.ExpiresIn = defaultTokenTTL },
 		)
 	} else {
-		// If/when you support custom DSQL roles
 		token, err = auth.GenerateDbConnectAuthToken(
 			ctx,
 			endpoint,
@@ -125,14 +124,11 @@ func NewDSQLSchemaDBFromCLI(c *cli.Context, logger log.Logger) (*DSQLSchemaDB, e
 		return nil, fmt.Errorf("generate dsql auth token: %w", err)
 	}
 
-	dsn := fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s?sslmode=require",
-		url.PathEscape(user),
-		url.PathEscape(token),
-		endpoint,
-		port,
-		url.PathEscape(dbName),
-	)
+	sslMode := c.GlobalString("sslmode")
+	if sslMode != "verify-full" {
+		logger.Warn("DSQL server certificate and hostname are not fully verified; use sslmode=verify-full", tag.NewStringTag("sslmode", sslMode))
+	}
+	dsn := schemaDSN(endpoint, port, user, token, dbName, sslMode)
 
 	logger.Info("Connecting to DSQL for schema operations",
 		tag.NewStringTag("endpoint", endpoint),
@@ -151,6 +147,12 @@ func NewDSQLSchemaDBFromCLI(c *cli.Context, logger log.Logger) (*DSQLSchemaDB, e
 	}
 
 	return &DSQLSchemaDB{db: db, logger: logger}, nil
+}
+
+func schemaDSN(endpoint string, port int, user, token, dbName, sslMode string) string {
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		url.PathEscape(user), url.PathEscape(token), endpoint, port,
+		url.PathEscape(dbName), url.QueryEscape(sslMode))
 }
 
 func (d *DSQLSchemaDB) Type() string { return dsqlDBType }
