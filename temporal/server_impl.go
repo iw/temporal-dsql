@@ -158,10 +158,14 @@ func initSystemNamespaces(
 ) error {
 	clusterName := persistenceClient.ClusterName(currentClusterName)
 	metricsHandler = metricsHandler.WithTags(metrics.ServiceNameTag(primitives.ServerService))
+
+	// Create ephemeral persistence config - this pool is short-lived for namespace initialization only
+	ephemeralCfg := withEphemeralPoolHint(cfg)
+
 	dataStoreFactory := persistenceClient.DataStoreFactoryProvider(
 		clusterName,
 		persistenceServiceResolver,
-		cfg,
+		ephemeralCfg,
 		customDataStoreFactory,
 		logger,
 		metricsHandler,
@@ -170,7 +174,7 @@ func initSystemNamespaces(
 	)
 	factory := persistenceFactoryProvider(persistenceClient.NewFactoryParams{
 		DataStoreFactory:           dataStoreFactory,
-		Cfg:                        cfg,
+		Cfg:                        ephemeralCfg,
 		PersistenceMaxQPS:          nil,
 		PersistenceNamespaceMaxQPS: nil,
 		ClusterName:                persistenceClient.ClusterName(currentClusterName),

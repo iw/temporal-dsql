@@ -462,6 +462,11 @@ type (
 		TaskScanPartitions int `yaml:"taskScanPartitions"`
 		// TLS is the configuration for TLS connections
 		TLS *auth.TLS `yaml:"tls"`
+		// PoolSizeHint indicates expected pool usage pattern. Used by DSQL plugin to size its pgxpool connection pool.
+		// Values: "" or "service" (default) = full pool kept open for long-lived service operations
+		//         "ephemeral" = minimal pool for short-lived operations (schema checks, metadata init)
+		// Other plugins may ignore this field.
+		PoolSizeHint string `yaml:"poolSizeHint"`
 	}
 
 	// CustomDatastoreConfig is the configuration for connecting to a custom datastore that is not supported by temporal core

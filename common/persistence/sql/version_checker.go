@@ -55,7 +55,11 @@ func checkCompatibleVersion(
 	dbKind sqlplugin.DbKind,
 	logger log.Logger,
 ) error {
-	db, err := NewSQLAdminDB(dbKind, cfg, r, logger, metrics.NoopMetricsHandler)
+	// Use ephemeral pool hint - this is a short-lived connection for version check only
+	ephemeralCfg := *cfg
+	ephemeralCfg.PoolSizeHint = "ephemeral"
+
+	db, err := NewSQLAdminDB(dbKind, &ephemeralCfg, r, logger, metrics.NoopMetricsHandler)
 	if err != nil {
 		return err
 	}

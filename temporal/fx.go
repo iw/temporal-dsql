@@ -639,6 +639,28 @@ func WorkerServiceProvider(
 	return NewService(app, serviceName, params.Logger), app.Err()
 }
 
+// withEphemeralPoolHint creates a copy of the persistence config with PoolSizeHint set to "ephemeral"
+// for all SQL datastores. This signals to the DSQL plugin to use a small pgxpool with no minimum connection count
+// for short-lived operations like schema version checks and metadata initialization.
+func withEphemeralPoolHint(cfg *config.Persistence) *config.Persistence {
+	// Create a shallow copy of the persistence config
+	ephemeralCfg := *cfg
+
+	// Deep copy the DataStores map with ephemeral hint set on SQL configs
+	ephemeralCfg.DataStores = make(map[string]config.DataStore, len(cfg.DataStores))
+	for name, ds := range cfg.DataStores {
+		dsCopy := ds
+		if ds.SQL != nil {
+			sqlCopy := *ds.SQL
+			sqlCopy.PoolSizeHint = "ephemeral"
+			dsCopy.SQL = &sqlCopy
+		}
+		ephemeralCfg.DataStores[name] = dsCopy
+	}
+
+	return &ephemeralCfg
+}
+
 // ApplyClusterMetadataConfigProvider performs a config check against the configured persistence store for cluster metadata.
 // If there is a mismatch, the persisted values take precedence and will be written over in the config objects.
 // This is to keep this check hidden from downstream calls.
@@ -657,10 +679,14 @@ func ApplyClusterMetadataConfigProvider(
 	logger = log.With(logger, tag.ComponentMetadataInitializer)
 	metricsHandler = metricsHandler.WithTags(metrics.ServiceNameTag(primitives.ServerService))
 	clusterName := persistenceClient.ClusterName(svc.ClusterMetadata.CurrentClusterName)
+
+	// Create ephemeral persistence config - this pool is short-lived for metadata initialization only
+	ephemeralPersistence := withEphemeralPoolHint(&svc.Persistence)
+
 	dataStoreFactory := persistenceClient.DataStoreFactoryProvider(
 		clusterName,
 		persistenceServiceResolver,
-		&svc.Persistence,
+		ephemeralPersistence,
 		customDataStoreFactory,
 		logger,
 		metricsHandler,
@@ -669,7 +695,7 @@ func ApplyClusterMetadataConfigProvider(
 	)
 	factory := persistenceFactoryProvider(persistenceClient.NewFactoryParams{
 		DataStoreFactory:           dataStoreFactory,
-		Cfg:                        &svc.Persistence,
+		Cfg:                        ephemeralPersistence,
 		PersistenceMaxQPS:          nil,
 		PersistenceNamespaceMaxQPS: nil,
 		ClusterName:                persistenceClient.ClusterName(svc.ClusterMetadata.CurrentClusterName),
