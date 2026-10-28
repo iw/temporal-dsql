@@ -7,6 +7,8 @@ import (
 
 // WorkloadConfig configures simulated database workload.
 type WorkloadConfig struct {
+	Phases []WorkloadPhase `json:"phases" yaml:"phases"`
+
 	// Enabled controls whether workload simulation runs.
 	Enabled bool `json:"enabled" yaml:"enabled"`
 

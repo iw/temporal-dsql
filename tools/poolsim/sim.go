@@ -40,10 +40,11 @@ func (q *eventQueue) Pop() any {
 
 // Sim is the discrete event simulator.
 type Sim struct {
-	now time.Time
-	end time.Time
-	seq int64
-	q   eventQueue
+	quiet bool
+	now   time.Time
+	end   time.Time
+	seq   int64
+	q     eventQueue
 }
 
 // NewSim creates a new simulator with the given start time and duration.
@@ -88,10 +89,12 @@ func (s *Sim) Run() {
 		eventCount++
 
 		// Progress report every simulated minute
-		if s.now.Sub(lastReport) >= time.Minute {
+		if !s.quiet && s.now.Sub(lastReport) >= time.Minute {
 			fmt.Printf("  [sim] t=%s events=%d queue=%d\n", s.now.Format("15:04:05"), eventCount, s.q.Len())
 			lastReport = s.now
 		}
 	}
-	fmt.Printf("  [sim] total events=%d\n", eventCount)
+	if !s.quiet {
+		fmt.Printf("  [sim] total events=%d\n", eventCount)
+	}
 }

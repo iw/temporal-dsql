@@ -1,0 +1,213 @@
+# Adds peak and expiry-wave spikes to compare-400wps-200.yaml; all maxInUse
+# levels (including base levels) are scaled by 0.4 for the 200-connection pools.
+# Phase holds are stretched from real 5-50ms holds to reduce simulation events
+# while preserving pool-driving concurrency. Queue waits scale with holds;
+# compare phase wait percentiles between models, not as production latencies.
+seed: 42
+model: reservoir-sql
+limiter: tokenBucket
+duration: 3h
+sampleEvery: 10s
+steadyAfter: 90m
+cluster:
+  maxConnections: 10000
+  handshake: {min: 50ms, max: 200ms}
+limiterLatency: {min: 5ms, max: 10ms}
+# A bucket permits bursts above 100/s; an oversubscribed target cannot converge.
+# Disable these legacy assertions explicitly, retain counters for comparison.
+assertMaxConnectsPerSec: -1
+assertConvergeWithin: -1s
+assertMaxClosurePerSec: -1
+assertZeroEmptyEvents: false
+assertZeroDSQLRejections: false
+assertZeroDeadRequests: false
+scenario: {kind: cold_start}
+services:
+  - name: history
+    replicas: 16
+    targetReady: 200
+    maxOpen: 200
+    inflightLimit: 8
+    baseLifetime: 11m
+    jitter: 2m
+    guardWindow: 45s
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 200
+      minConns: 200
+      # 50m + [0,4m) jitter + 45s guard + 5m transaction < 60m.
+      # Even a full 5-minute transaction at the latest allowed acquire is safe.
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 12
+      holdTime: 10ms
+      holdJitter: 10ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+      phases:
+        - name: peak
+          at: 40m
+          ramp: 5m
+          duration: 30m
+          maxInUse: 180
+          arrivalBurst: 180
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+        - name: spike-1
+          at: 100m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 240
+          arrivalBurst: 240
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+        - name: spike-2
+          at: 150m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 240
+          arrivalBurst: 240
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+  - name: matching
+    replicas: 16
+    targetReady: 200
+    maxOpen: 200
+    inflightLimit: 8
+    baseLifetime: 11m
+    jitter: 2m
+    guardWindow: 45s
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 200
+      minConns: 200
+      # 50m + [0,4m) jitter + 45s guard + 5m transaction < 60m.
+      # Even a full 5-minute transaction at the latest allowed acquire is safe.
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 8
+      holdTime: 5ms
+      holdJitter: 5ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+      phases:
+        - name: peak
+          at: 40m
+          ramp: 5m
+          duration: 30m
+          maxInUse: 120
+          arrivalBurst: 120
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+        - name: spike-1
+          at: 100m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 180
+          arrivalBurst: 180
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+        - name: spike-2
+          at: 150m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 180
+          arrivalBurst: 180
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+  - name: frontend
+    replicas: 9
+    targetReady: 200
+    maxOpen: 200
+    inflightLimit: 8
+    baseLifetime: 11m
+    jitter: 2m
+    guardWindow: 45s
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 200
+      minConns: 200
+      # 50m + [0,4m) jitter + 45s guard + 5m transaction < 60m.
+      # Even a full 5-minute transaction at the latest allowed acquire is safe.
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 6
+      holdTime: 5ms
+      holdJitter: 5ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+      phases:
+        - name: peak
+          at: 40m
+          ramp: 5m
+          duration: 30m
+          maxInUse: 40
+          arrivalBurst: 40
+          spawnEvery: 100ms
+          holdTime: 250ms
+          holdJitter: 500ms
+        - name: spike-1
+          at: 100m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 60
+          arrivalBurst: 60
+          spawnEvery: 100ms
+          holdTime: 250ms
+          holdJitter: 500ms
+        - name: spike-2
+          at: 150m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 60
+          arrivalBurst: 60
+          spawnEvery: 100ms
+          holdTime: 250ms
+          holdJitter: 500ms
+  - name: worker
+    replicas: 3
+    targetReady: 200
+    maxOpen: 200
+    inflightLimit: 8
+    baseLifetime: 11m
+    jitter: 2m
+    guardWindow: 45s
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 200
+      minConns: 200
+      # 50m + [0,4m) jitter + 45s guard + 5m transaction < 60m.
+      # Even a full 5-minute transaction at the latest allowed acquire is safe.
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 4
+      holdTime: 20ms
+      holdJitter: 10ms
+      spawnEvery: 1s
+      arrivalBurst: 5
+      maxWait: 10s

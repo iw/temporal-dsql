@@ -12,6 +12,7 @@ func main() {
 	configPath := flag.String("config", "", "Path to config file (YAML or JSON)")
 	outPath := flag.String("out", "", "Path to output CSV file")
 	cpuprofile := flag.String("cpuprofile", "", "Write CPU profile to file")
+	compare := flag.String("compare", "", "Comma-separated variants: as-deployed,option-a,pgxpool,reservoir")
 	flag.Parse()
 
 	// CPU profiling
@@ -40,6 +41,14 @@ func main() {
 		}
 	} else {
 		cfg = DefaultConfig()
+	}
+
+	if *compare != "" || usesComparison(cfg) {
+		if err := runComparisons(cfg, *compare, *outPath); err != nil {
+			fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Seed random for reproducibility (using global source)
