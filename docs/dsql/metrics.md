@@ -45,7 +45,7 @@ The connector samples `pgxpool.Stat()` every 15 seconds. Gauges are snapshots; c
 
 In pgx v5.7.2, `NewConnsCount` increments before `BeforeConnect`, so it includes failed construction attempts, not just successful handshakes. `TotalConns` includes constructing connections; subtract `dsql_pool_constructing` to estimate established connections. Canceled acquires are counted separately from successful waits.
 
-Service pools retain their full configured size. Ephemeral startup pools have max 5/min 0. The sum of every service pool's `maxConns` across all Temporal processes must fit the cluster limit (10,000 by default). `database/sql` statistics describe only the outer adapter, so they are not the source for these DSQL pool metrics.
+Service pools retain their full configured size. Ephemeral startup pools have max 5/min 0. The sum of every service pool's `maxConns` across all Temporal processes, including deploy overlap, must fit the cluster limit (10,000 by default). `database/sql` statistics describe only the outer adapter, so they are not the source for these DSQL pool metrics.
 
 ## Rate Limiter Metrics
 
@@ -56,14 +56,21 @@ Existing rate-limiter metric names are retained:
 | `dsql_rate_limiter_acquires_total` | Counter | Limiter acquisitions |
 | `dsql_rate_limiter_acquire_failures_total` | Counter | Limiter acquisition failures |
 | `dsql_rate_limiter_wait_time` | Timer | Limiter wait time |
+| `dsql_rate_limiter_fallbacks_total` | Counter | Calls routed to the local limiter after a DynamoDB failure, including calls during the 30-second cooldown |
 
-Their existing recording behavior is unchanged. Use limiter logs and connection errors alongside them. The eight-slot process-wide semaphore bounds limiter/token calls, not handshakes.
+The first three metrics retain their existing recording behavior. The fallback counter is recorded by the wrapper around either distributed mode. Use limiter logs and connection errors alongside them. The eight-slot process-wide semaphore bounds limiter/token calls, not handshakes.
+
+Both distributed limiters fall back to local pacing for 30 seconds after DynamoDB API, throttling or network failures. A warning is logged at most once a minute. During an outage, each process applies `DSQL_CONNECTION_RATE_LIMIT` and `DSQL_CONNECTION_BURST_LIMIT`; DSQL rejects fleet excess with 53400 (not attempted). Lower the local burst to reduce excess. Horizon rejection, condition failures and cancellation do not increment the fallback counter. Alert on sustained fallback activity:
+
+```promql
+rate(dsql_rate_limiter_fallbacks_total[5m]) > 0
+```
 
 ## Migration notes
 
 Removed metrics: `dsql_reservoir_*`, `dsql_refiller_inflight`, `dsql_db_closed_*`, the old pool keeper metrics (`dsql_pool_keeper_*`), and `dsql_pool_wait_duration`. pgx v5.7.2 exposes cumulative acquire duration, which includes successful immediate acquires as well as waits; it is not a faithful replacement for the old wait-duration timer. Update dashboards and alerts instead of reusing that name.
 
-Slot-block gauges (`dsql_slot_blocks_owned`, `dsql_slot_blocks_slots_used`) remain defined for the retained lease implementation, but the connection path no longer uses it. Enabling the lease refuses startup until #33.
+The slot-block connection lease and its gauges (`dsql_slot_blocks_owned`, `dsql_slot_blocks_slots_used`) were removed (#33). Remove these gauges from dashboards. The retired enable flag still refuses startup: size every pool's `maxConns`, including deploy overlap, to fit the cluster limit, then unset the flag. The lease's DynamoDB table can be deleted once no old deployment uses it.
 
 ## Monitoring and alerts
 

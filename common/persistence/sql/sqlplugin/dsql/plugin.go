@@ -96,8 +96,8 @@ func (p *plugin) createDSQLConnection(
 	cfg *config.SQL, r resolver.ServiceResolver, logger log.Logger, metricsHandler metrics.Handler,
 ) (*sqlx.DB, error) {
 	p.warnIgnoredSettings(logger)
-	if IsDistributedConnLeaseEnabled() {
-		return nil, errors.New("DSQL connection lease is not supported with pgxpool yet (issue #33)")
+	if err := removedConnectionLeaseError(); err != nil {
+		return nil, err
 	}
 	if cfg.DatabaseName != "" {
 		return p.createDSQLConnectionWithAuth(cfg, r, logger, metricsHandler)
@@ -173,6 +173,7 @@ func (p *plugin) createDSQLConnectionWithAuth(
 					tag.NewStringTag("endpoint", clusterEndpoint),
 					tag.NewInt64("limit_per_second", int64(getEnvInt(DistributedRateLimiterLimitEnvVar, DefaultDistributedRateLimiterLimit))))
 			}
+			p.rateLimiter = newFailOpenRateLimiter(p.rateLimiter, logger, metricsHandler)
 		} else {
 			// Use local rate limiter (per-instance)
 			p.rateLimiter = NewConnectionRateLimiter()

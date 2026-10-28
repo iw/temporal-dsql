@@ -42,16 +42,6 @@ type DSQLMetrics interface {
 	GetHandler() metrics.Handler
 }
 
-// SlotBlockMetrics defines the interface for slot block manager metrics.
-// This interface is used by the SlotBlockManager to record metrics.
-type SlotBlockMetrics interface {
-	// RecordSlotBlocksOwned records the number of slot blocks currently owned
-	RecordSlotBlocksOwned(count int)
-
-	// RecordSlotBlockSlotsUsed records the number of slots currently in use
-	RecordSlotBlockSlotsUsed(count int64)
-}
-
 // dsqlMetricsImpl implements the DSQLMetrics interface using Temporal's metrics system
 type dsqlMetricsImpl struct {
 	handler      metrics.Handler
@@ -77,10 +67,6 @@ type dsqlMetricsImpl struct {
 	rateLimiterAcquires        metrics.CounterIface
 	rateLimiterAcquireFailures metrics.CounterIface
 	rateLimiterWaitTime        metrics.TimerIface
-
-	// Slot block metrics - for distributed connection limiting
-	slotBlocksOwned    metrics.GaugeIface
-	slotBlockSlotsUsed metrics.GaugeIface
 
 	// Legacy metrics for backward compatibility
 	retryCounter              metrics.CounterIface
@@ -130,10 +116,6 @@ func NewDSQLMetrics(metricsHandler metrics.Handler) DSQLMetrics {
 		rateLimiterAcquires:        metricsHandler.Counter("dsql_rate_limiter_acquires_total"),
 		rateLimiterAcquireFailures: metricsHandler.Counter("dsql_rate_limiter_acquire_failures_total"),
 		rateLimiterWaitTime:        metricsHandler.Timer("dsql_rate_limiter_wait_time"),
-
-		// Slot block metrics - for distributed connection limiting
-		slotBlocksOwned:    metricsHandler.Gauge("dsql_slot_blocks_owned"),
-		slotBlockSlotsUsed: metricsHandler.Gauge("dsql_slot_blocks_slots_used"),
 
 		// Legacy metrics for backward compatibility
 		retryCounter:              metricsHandler.Counter("dsql_tx_retries_total"),
@@ -382,39 +364,4 @@ func (m *DSQLOperationMetrics) RecordUnsupportedFeature(feature string) {
 // RecordFinalAttempts records the total number of attempts made (legacy)
 func (m *DSQLOperationMetrics) RecordFinalAttempts(attempts int) {
 	m.metrics.RecordRetryAttempts(m.operation, attempts)
-}
-
-// noOpSlotBlockMetrics is a no-op implementation of SlotBlockMetrics for when metrics are disabled
-type noOpSlotBlockMetrics struct{}
-
-func (n *noOpSlotBlockMetrics) RecordSlotBlocksOwned(count int)      {}
-func (n *noOpSlotBlockMetrics) RecordSlotBlockSlotsUsed(count int64) {}
-
-// NewSlotBlockMetrics creates a new SlotBlockMetrics implementation.
-// If metricsHandler is nil, returns a no-op implementation.
-func NewSlotBlockMetrics(metricsHandler metrics.Handler) SlotBlockMetrics {
-	if metricsHandler == nil {
-		return &noOpSlotBlockMetrics{}
-	}
-
-	return &slotBlockMetricsImpl{
-		slotBlocksOwned:    metricsHandler.Gauge("dsql_slot_blocks_owned"),
-		slotBlockSlotsUsed: metricsHandler.Gauge("dsql_slot_blocks_slots_used"),
-	}
-}
-
-// slotBlockMetricsImpl implements the SlotBlockMetrics interface
-type slotBlockMetricsImpl struct {
-	slotBlocksOwned    metrics.GaugeIface
-	slotBlockSlotsUsed metrics.GaugeIface
-}
-
-// RecordSlotBlocksOwned records the number of slot blocks currently owned
-func (m *slotBlockMetricsImpl) RecordSlotBlocksOwned(count int) {
-	m.slotBlocksOwned.Record(float64(count))
-}
-
-// RecordSlotBlockSlotsUsed records the number of slots currently in use
-func (m *slotBlockMetricsImpl) RecordSlotBlockSlotsUsed(count int64) {
-	m.slotBlockSlotsUsed.Record(float64(count))
 }

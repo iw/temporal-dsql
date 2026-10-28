@@ -311,7 +311,7 @@ func TestPoolLeaseUnsupported(t *testing.T) {
 	t.Setenv(DistributedConnLeaseEnabledEnvVar, "true")
 	p := &plugin{}
 	_, err := p.createDSQLConnection(&config.SQL{}, nil, log.NewNoopLogger(), nil)
-	require.ErrorContains(t, err, "connection lease is not supported with pgxpool yet (issue #33)")
+	require.EqualError(t, err, "DSQL connection lease was removed (#33). Size the pools so the fleet's total connections, including the overlap during deploys, fits the cluster's connection limit, then unset DSQL_DISTRIBUTED_CONN_LEASE_ENABLED")
 }
 
 func TestPoolWarnings(t *testing.T) {
@@ -320,6 +320,13 @@ func TestPoolWarnings(t *testing.T) {
 	p := &plugin{}
 	t.Setenv("DSQL_RESERVOIR_ENABLED", "")
 	t.Setenv("DSQL_POOL_KEEPER_TICK_INTERVAL", "1s")
+	retired := []string{
+		"DSQL_DISTRIBUTED_CONN_LEASE_TABLE", "DSQL_DISTRIBUTED_CONN_LIMIT",
+		"DSQL_SLOT_BLOCK_SIZE", "DSQL_SLOT_BLOCK_COUNT", "DSQL_SLOT_BLOCK_TTL", "DSQL_SLOT_BLOCK_RENEW_INTERVAL",
+	}
+	for _, name := range retired {
+		t.Setenv(name, "")
+	}
 	for range 2 {
 		p.warnIgnoredSettings(logger)
 	}
@@ -327,6 +334,9 @@ func TestPoolWarnings(t *testing.T) {
 	fields := observed.All()[0].ContextMap()
 	require.Contains(t, fields["ignored_settings"], "DSQL_RESERVOIR_ENABLED")
 	require.Contains(t, fields["ignored_settings"], "DSQL_POOL_KEEPER_TICK_INTERVAL")
+	for _, name := range retired {
+		require.Contains(t, fields["ignored_settings"], name)
+	}
 	for range 2 {
 		_, err := p.poolConfig(&config.SQL{ConnectAddr: "127.0.0.1:5432", MaxConnLifetime: time.Hour}, resolver.NewNoopResolver(), nil, logger)
 		require.NoError(t, err)
