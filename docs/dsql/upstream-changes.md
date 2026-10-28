@@ -3,8 +3,13 @@
 The DSQL plugin, schemas, schema tool and documentation live in fork-owned
 directories. A small set of changes remains in upstream packages to support
 transaction retries, execution reads, pool sizing and bounded deletes. This
-document records those changes and their intended path forward. Visibility
-continues to use a separate, existing backend.
+document records those changes and their path forward. Visibility continues to
+use a separate, existing backend.
+
+Upstream is unlikely to accept the DSQL plugin, so these changes stay in this
+fork. The plan is to split it into `temporal-dsql-server`, which keeps them as a
+small patch set rebased onto each upstream release tag, and a separate
+`temporal-dsql-plugin` module.
 
 ## Transaction retry hook
 
@@ -23,8 +28,8 @@ only when its underlying database supports it. Keeping classification in the
 plugin avoids teaching shared SQL code about DSQL error codes, while retrying the
 whole transaction avoids replaying only part of a failed write.
 
-Path forward: propose an opt-in plugin hook upstream, including its interface,
-forwarding methods and tests.
+Path forward: keep it, with its interface, forwarding methods and tests, in the
+server's patch set.
 
 ## Plugin-provided execution store
 
@@ -35,8 +40,8 @@ buffered events, CHASM nodes and requested signal IDs in one transaction in
 `GetWorkflowExecution`. Other methods delegate to the common store.
 
 This reduces transaction boundaries for workflow-state reads on DSQL. Other
-plugins retain the common store. Path forward: propose the opt-in factory hook
-upstream; the DSQL wrapper remains in the plugin.
+plugins retain the common store. Path forward: keep the factory hook in the
+server's patch set; the DSQL wrapper stays in the plugin.
 
 ## Pool sizing for short-lived operations
 
@@ -52,8 +57,8 @@ The service configurations retain their original sizing.
 
 DSQL needs this distinction because filling a full service pool for startup-only
 work wastes connection capacity and connection-rate budget, especially during
-rolling deployments. Path forward: propose the hint upstream, or replace it with
-a plugin-side signal for short-lived pools.
+rolling deployments. Path forward: keep it in the server's patch set, or replace it
+with a plugin-side signal for short-lived pools.
 
 ## History branch deletes (#26)
 
@@ -65,10 +70,9 @@ if deletion stops partway through. The file also preserves
 `TransactionSizeLimitError` from `AppendHistoryNodes`, so oversized writes retain
 their non-retryable classification.
 
-Path forward: propose the delete ordering and transaction boundary upstream.
-Removing the encompassing transaction lets any SQL backend bound its range
-deletes; DSQL supplies the batching implementation to stay within its transaction
-limits. Review the typed-error preservation alongside the retry hook.
+Path forward: keep the delete ordering, the transaction boundary and the
+typed-error preservation in the server's patch set, alongside the retry hook.
+DSQL supplies the batching that keeps each delete within its transaction limits.
 
 ## Queue v2 range deletes (#69)
 
@@ -84,15 +88,14 @@ update fails, readers skip missing rows and a retry can finish the operation.
 injection from the transaction wrapper to the database wrapper to match this
 boundary.
 
-Path forward: propose this upstream with its regression tests, like the history
-deletes. Other SQL backends can also benefit from keeping large range deletes
-outside the metadata transaction.
+Path forward: keep it, with its regression tests, in the server's patch set, like
+the history deletes.
 
 ## Registration, dependencies and build support
 
 | Files | Change and reason | Path forward |
 | --- | --- | --- |
-| `cmd/server/main.go` | Blank-imports the DSQL plugin so its `init` registers it with the SQL persistence factory. A server binary must import the plugin to select it by name. | Keep until the server can be built as a separate module that imports the plugin. |
+| `cmd/server/main.go` | Blank-imports the DSQL plugin so its `init` registers it with the SQL persistence factory. A server binary must import the plugin to select it by name. | Keep. After the split, the server imports the plugin from its own module. |
 | `go.mod`, `go.sum` | Add direct AWS SDK v2 dependencies for configuration, DSQL IAM authentication and DynamoDB connection-rate limiting, with the associated dependency versions and checksums. | Keep while the plugin is part of this module. |
 | `.dockerignore` | Allows the built `temporal-server` into the Docker build context for packaging the server with the plugin. | Keep. |
 | `.gitignore` | Ignores the pool simulator binary, the local DSQL Dockerfile and Terraform state files, keeping generated artifacts and potentially sensitive state out of the repository. | Keep. |
@@ -126,8 +129,8 @@ These files extend existing packages without editing upstream files:
   sets from versions 1.0 and 1.1 to 1.2, including compatibility versions, CHASM
   table creation and removal of the buffered-events index.
 
-The retry and queue tests belong with their proposed upstream changes. The
-metadata-manager test can be proposed independently. The DSQL migration test
+The retry and queue tests belong with their changes in the server's patch set.
+The metadata-manager test guards upstream behaviour that the fork once broke. The DSQL migration test
 remains fork-specific and exercises the schema package's private change-set
 builder. The schema-name discovery check lives in the fork-owned
 `tools/dsql/main_test.go` and verifies that `PathsByDir("dsql")` contains
