@@ -245,7 +245,7 @@ func (m *SlotBlockManager) tryAcquireBlock(ctx context.Context, blockIdx int) (b
 	return true, nil
 }
 
-// Acquire implements the LeaseManager interface for the reservoir refiller.
+// Acquire allocates a connection slot (unwired pending #33).
 // It checks if we have available slots and returns a "lease ID" (just a counter).
 // The actual slot tracking is done internally.
 func (m *SlotBlockManager) Acquire(ctx context.Context) (string, error) {
@@ -277,7 +277,7 @@ func (m *SlotBlockManager) Acquire(ctx context.Context) (string, error) {
 	return fmt.Sprintf("slot-%d", newUsed), nil
 }
 
-// Release implements the LeaseManager interface for the reservoir refiller.
+// Release returns a connection slot (unwired pending #33).
 // It decrements the used slot count.
 func (m *SlotBlockManager) Release(ctx context.Context, leaseID string) error {
 	if leaseID == "" {

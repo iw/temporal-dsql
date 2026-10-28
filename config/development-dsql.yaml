@@ -18,8 +18,7 @@ persistence:
         connectAttributes:
           sslmode: "require"
         maxConns: 20
-        maxIdleConns: 20
-        maxConnLifetime: "1h"
+        maxConnLifetime: "50m"
         taskScanPartitions: 1
     dsql-visibility:
       sql:
@@ -32,8 +31,7 @@ persistence:
         connectAttributes:
           sslmode: "require"
         maxConns: 10
-        maxIdleConns: 10
-        maxConnLifetime: "1h"
+        maxConnLifetime: "50m"
 
 global:
   membership:

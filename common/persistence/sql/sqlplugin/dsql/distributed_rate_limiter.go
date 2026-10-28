@@ -48,7 +48,7 @@ const (
 // Do NOT call for every query; only for connection establishment.
 //
 // This implements the driver.RateLimiter interface so it can be used with the
-// token-refreshing driver to rate-limit ALL connection attempts, including
+// pgxpool BeforeConnect hook to rate-limit all connection attempts, including
 // pool growth initiated by database/sql internally.
 type DistributedRateLimiter struct {
 	ddb       *dynamodb.Client

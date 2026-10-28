@@ -89,49 +89,6 @@ func TestConnectionRateLimiter_WaitTimeout(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestStaggeredStartupDelay_Enabled(t *testing.T) {
-	os.Unsetenv(StaggeredStartupEnvVar)
-	os.Unsetenv(StaggeredStartupMaxDelayEnvVar)
-
-	// Run multiple times to verify randomness
-	delays := make([]time.Duration, 10)
-	for i := 0; i < 10; i++ {
-		delays[i] = StaggeredStartupDelay()
-		require.GreaterOrEqual(t, delays[i], time.Duration(0))
-		require.LessOrEqual(t, delays[i], DefaultStaggeredStartupMaxDelay)
-	}
-
-	// At least some should be different (probabilistic, but very likely)
-	allSame := true
-	for i := 1; i < len(delays); i++ {
-		if delays[i] != delays[0] {
-			allSame = false
-			break
-		}
-	}
-	require.False(t, allSame, "delays should be random")
-}
-
-func TestStaggeredStartupDelay_Disabled(t *testing.T) {
-	os.Setenv(StaggeredStartupEnvVar, "false")
-	defer os.Unsetenv(StaggeredStartupEnvVar)
-
-	delay := StaggeredStartupDelay()
-	require.Equal(t, time.Duration(0), delay)
-}
-
-func TestStaggeredStartupDelay_CustomMaxDelay(t *testing.T) {
-	os.Unsetenv(StaggeredStartupEnvVar)
-	os.Setenv(StaggeredStartupMaxDelayEnvVar, "100ms")
-	defer os.Unsetenv(StaggeredStartupMaxDelayEnvVar)
-
-	for i := 0; i < 10; i++ {
-		delay := StaggeredStartupDelay()
-		require.GreaterOrEqual(t, delay, time.Duration(0))
-		require.LessOrEqual(t, delay, 100*time.Millisecond)
-	}
-}
-
 func TestGetEnvInt(t *testing.T) {
 	tests := []struct {
 		name       string

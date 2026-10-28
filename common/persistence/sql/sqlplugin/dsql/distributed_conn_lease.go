@@ -25,7 +25,7 @@ const (
 	DefaultDistributedConnLeaseTTL = 3 * time.Minute
 )
 
-// ConnLeaseManager is the interface required by the reservoir refiller.
+// ConnLeaseManager describes the retained connection lease implementation (unwired pending #33).
 // It is implemented by DistributedConnLeases.
 //
 // Acquire blocks (caller-controlled) until a lease is acquired or an error occurs.

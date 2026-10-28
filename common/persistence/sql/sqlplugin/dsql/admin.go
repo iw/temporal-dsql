@@ -50,7 +50,7 @@ func (pdb *db) Exec(stmt string, args ...any) error {
 		return err
 	}
 	_, err = db.Exec(stmt, args...)
-	return pdb.handle.ConvertError(err)
+	return pdb.maybeConvertError(err)
 }
 
 // CreateSchemaVersionTables sets up the schema version tables
@@ -69,7 +69,7 @@ func (pdb *db) ReadSchemaVersion(database string) (string, error) {
 		return "", err
 	}
 	err = db.Get(&version, readSchemaVersionQuery, database)
-	return version, pdb.handle.ConvertError(err)
+	return version, pdb.maybeConvertError(err)
 }
 
 // UpdateSchemaVersion updates the schema version for the keyspace
@@ -80,8 +80,7 @@ func (pdb *db) UpdateSchemaVersion(database string, newVersion string, minCompat
 // WriteSchemaUpdateLog adds an entry to the schema update history table
 func (pdb *db) WriteSchemaUpdateLog(oldVersion string, newVersion string, manifestMD5 string, desc string) error {
 	now := time.Now().UTC()
-	err := pdb.Exec(writeSchemaUpdateHistoryQuery, now.Year(), int(now.Month()), now, oldVersion, newVersion, manifestMD5, desc)
-	return pdb.handle.ConvertError(err)
+	return pdb.Exec(writeSchemaUpdateHistoryQuery, now.Year(), int(now.Month()), now, oldVersion, newVersion, manifestMD5, desc)
 }
 
 // ListTables returns a list of tables in this database

@@ -18,20 +18,10 @@ const (
 	dsnFmt = "postgres://%v:%v@%v/%v?%v"
 )
 
-// DSQL-optimized pool defaults
-// These values are chosen to work well with Aurora DSQL's characteristics:
-//   - IAM tokens have configurable TTL (default 15 minutes via DSQL_TOKEN_DURATION)
-//   - Token-refreshing driver provides fresh tokens for each new connection
-//   - Pool MUST stay at max size to avoid connection creation under load
-//     (DSQL has 100 conn/sec cluster-wide rate limit)
-//   - Pool is pre-warmed at startup with staggered delays to spread connection ages
-//   - Pool Keeper continuously tops up pool as connections expire
+// These defaults are retained for direct Session users. The plugin uses BuildDSN
+// and DefaultMaxConns only; connection_pool.go configures its pgxpool lifecycle.
 const (
-	// DefaultMaxConnLifetime controls when Go's pool closes connections.
-	// Set to ~70% of token TTL to ensure connections rotate with fresh tokens.
-	// For 15-minute token TTL: 10 minutes provides safe margin.
-	// Go handles closure; Pool Keeper handles refill.
-	// Env override: TEMPORAL_SQL_MAX_CONN_LIFETIME
+	// DefaultMaxConnLifetime is the legacy direct-session lifetime.
 	DefaultMaxConnLifetime time.Duration = 10 * time.Minute
 
 	// DefaultMaxConnIdleTime is 0 (disabled).
@@ -150,7 +140,7 @@ func buildDSN(
 }
 
 // BuildDSN builds a DSN string from the given configuration.
-// This is exported for use by the token-refreshing driver.
+// The plugin parses this DSN with pgxpool.ParseConfig.
 func BuildDSN(
 	cfg *config.SQL,
 	r resolver.ServiceResolver,
