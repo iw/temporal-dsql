@@ -94,10 +94,12 @@
 - `docs/dsql/implementation.md` - Technical implementation details
 - `docs/dsql/connection-pool.md` - Pool architecture, sizing, rollout and rollback
 - `docs/dsql/metrics.md` - Metrics reference
+- `docs/dsql/ci.md` - CI and release pipeline
 
 #### Tooling
 - `tools/poolsim/` - Discrete event simulator retaining the historical reservoir model
 - `tools/dsql/` - DSQL schema management tool
+- `.dagger/modules/ci/` and `.buildkite/` - Dagger CI module and Buildkite pipeline (`docs/dsql/ci.md`)
 
 ### Known Constraints
 
@@ -144,4 +146,5 @@ These come from benchmark runs against a live DSQL cluster, before the 2026-10-1
 | `docs/dsql/implementation.md` | Technical implementation details |
 | `docs/dsql/connection-pool.md` | Pool architecture, sizing, rollout and rollback |
 | `docs/dsql/metrics.md` | Metrics reference |
+| `docs/dsql/ci.md` | CI and release pipeline |
 | `tools/poolsim/README.md` | Pool simulator documentation |

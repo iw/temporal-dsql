@@ -20,6 +20,7 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 | [Connection Pool](connection-pool.md) | Pool sizing, lifetime, rollout and rollback |
 | [Implementation Details](implementation.md) | Code structure, schema changes, OCC handling, CAS updates |
 | [Metrics Reference](metrics.md) | All emitted metrics with alerting recommendations |
+| [CI and Release](ci.md) | Dagger module, Buildkite pipeline on Namespace agents, and the release flow |
 
 ## Quick Reference
 

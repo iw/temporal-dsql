@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#
+# Starts the Dagger engine that .dagger/modules/ci is pinned to and puts the
+# matching CLI on PATH. Only steps that set DAGGER_ENGINE_BOOTSTRAP=true pay
+# for it; pipeline.yml sets it for every step it defines. The same file works
+# as an agent-level pre-command hook.
+
+set -euo pipefail
+
+if [[ "${DAGGER_ENGINE_BOOTSTRAP:-}" == "true" ]]; then
+	eval "$("${BUILDKITE_BUILD_CHECKOUT_PATH:-.}/.dagger/engine.sh")"
+fi
