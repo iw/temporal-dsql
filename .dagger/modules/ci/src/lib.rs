@@ -154,6 +154,7 @@ impl Ci {
         args.extend(packages.unwrap_or_else(|| {
             strings(&[
                 "./common/persistence/sql/...",
+                "./common/persistence/visibility/...",
                 "./schema/...",
                 "./tools/dsql/...",
                 "./tools/poolsim/...",
