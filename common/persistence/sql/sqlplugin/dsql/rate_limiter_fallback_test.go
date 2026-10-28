@@ -20,84 +20,68 @@ import (
 )
 
 func TestRateLimiterFallbackRecovery(t *testing.T) {
-	clearSettingsEnv(t)
-	for _, mode := range []string{"gcra", "counter"} {
-		t.Run(mode, func(t *testing.T) {
-			for _, cause := range []error{
-				&types.InternalServerError{}, &types.ProvisionedThroughputExceededException{},
-				&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")},
-			} {
-				t.Run(fmt.Sprintf("%T", cause), func(t *testing.T) {
-					fake := &gcraFake{}
-					var calls atomic.Int64
-					var healthy atomic.Bool
-					client := updateItemFunc(func(ctx context.Context, in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-						calls.Add(1)
-						if !healthy.Load() {
-							return nil, cause
-						}
-						if mode == "counter" {
-							return &dynamodb.UpdateItemOutput{}, nil
-						}
-						return fake.UpdateItem(ctx, in)
-					})
-					var distributed driver.RateLimiter = gcraTestLimiter(t, client)
-					if mode == "counter" {
-						counter := newDistributedRateLimiter(client, testSettings(t, map[string]string{
-							"region": "us-east-1", "cluster_endpoint": "test-endpoint",
-							"rate_limiter": "dynamodb_counter", "rate_limiter_table": "test-table",
-						}))
-						distributed = counter
-					}
-					core, observed := observer.New(zap.WarnLevel)
-					handler := metricstest.NewCaptureHandler()
-					capture := handler.StartCapture()
-					defer handler.StopCapture(capture)
-					l := newFailOpenRateLimiterWithSettings(distributed, testSettings(t, nil), log.NewZapLogger(zap.New(core)), handler)
-					now := time.Unix(1000, 0)
-					l.now = func() time.Time { return now }
-					var locals atomic.Int64
-					l.local = poolTestLimiter(func(ctx context.Context) error { locals.Add(1); return ctx.Err() })
-					require.NoError(t, l.Wait(t.Context()))
-					require.Equal(t, int64(1), calls.Load())
-					require.Equal(t, 1, observed.Len())
-					results := make(chan error, 40)
-					for range 40 {
-						go func() { results <- l.Wait(t.Context()) }()
-					}
-					for range 40 {
-						require.NoError(t, <-results)
-					}
-					require.Equal(t, int64(1), calls.Load())
-					now = now.Add(30*time.Second - time.Nanosecond)
-					require.NoError(t, l.Wait(t.Context()))
-					require.Equal(t, int64(1), calls.Load())
-					now = now.Add(time.Nanosecond)
-					require.NoError(t, l.Wait(t.Context())) // Still down: retry, renew cooldown, suppress warning.
-					require.Equal(t, int64(2), calls.Load())
-					require.Equal(t, 1, observed.Len())
-					now = now.Add(30 * time.Second)
-					require.NoError(t, l.Wait(t.Context()))
-					require.Equal(t, 2, observed.Len())
-					require.Equal(t, int64(44), locals.Load())
-					records := capture.Snapshot()[rateLimiterFallbackMetric]
-					require.Len(t, records, 44)
-					for _, record := range records {
-						require.Equal(t, int64(1), record.Value)
-					}
-					healthy.Store(true)
-					now = now.Add(30 * time.Second)
-					require.NoError(t, l.Wait(t.Context()))
-					require.GreaterOrEqual(t, calls.Load(), int64(4))
-					require.Equal(t, int64(44), locals.Load())
-				})
+	for _, cause := range []error{
+		&types.InternalServerError{}, &types.ProvisionedThroughputExceededException{},
+		&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")},
+	} {
+		t.Run(fmt.Sprintf("%T", cause), func(t *testing.T) {
+			fake := &gcraFake{}
+			var calls atomic.Int64
+			var healthy atomic.Bool
+			client := updateItemFunc(func(ctx context.Context, in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+				calls.Add(1)
+				if !healthy.Load() {
+					return nil, cause
+				}
+				return fake.UpdateItem(ctx, in)
+			})
+			var distributed driver.RateLimiter = gcraTestLimiter(t, client)
+			core, observed := observer.New(zap.WarnLevel)
+			handler := metricstest.NewCaptureHandler()
+			capture := handler.StartCapture()
+			defer handler.StopCapture(capture)
+			l := newFailOpenRateLimiterWithSettings(distributed, testSettings(t, nil), log.NewZapLogger(zap.New(core)), handler)
+			now := time.Unix(1000, 0)
+			l.now = func() time.Time { return now }
+			var locals atomic.Int64
+			l.local = poolTestLimiter(func(ctx context.Context) error { locals.Add(1); return ctx.Err() })
+			require.NoError(t, l.Wait(t.Context()))
+			require.Equal(t, int64(1), calls.Load())
+			require.Equal(t, 1, observed.Len())
+			results := make(chan error, 40)
+			for range 40 {
+				go func() { results <- l.Wait(t.Context()) }()
 			}
+			for range 40 {
+				require.NoError(t, <-results)
+			}
+			require.Equal(t, int64(1), calls.Load())
+			now = now.Add(30*time.Second - time.Nanosecond)
+			require.NoError(t, l.Wait(t.Context()))
+			require.Equal(t, int64(1), calls.Load())
+			now = now.Add(time.Nanosecond)
+			require.NoError(t, l.Wait(t.Context())) // Still down: retry, renew cooldown, suppress warning.
+			require.Equal(t, int64(2), calls.Load())
+			require.Equal(t, 1, observed.Len())
+			now = now.Add(30 * time.Second)
+			require.NoError(t, l.Wait(t.Context()))
+			require.Equal(t, 2, observed.Len())
+			require.Equal(t, int64(44), locals.Load())
+			records := capture.Snapshot()[rateLimiterFallbackMetric]
+			require.Len(t, records, 44)
+			for _, record := range records {
+				require.Equal(t, int64(1), record.Value)
+			}
+			healthy.Store(true)
+			now = now.Add(30 * time.Second)
+			require.NoError(t, l.Wait(t.Context()))
+			require.GreaterOrEqual(t, calls.Load(), int64(4))
+			require.Equal(t, int64(44), locals.Load())
 		})
 	}
 }
 
 func TestRateLimiterFallbackExclusions(t *testing.T) {
-	clearSettingsEnv(t)
 	for _, cause := range []error{
 		&types.ConditionalCheckFailedException{},
 		&dynamoDBLimiterError{err: &types.ConditionalCheckFailedException{}},
@@ -122,12 +106,9 @@ func TestRateLimiterFallbackExclusions(t *testing.T) {
 }
 
 func TestRateLimiterFallbackLocalSettings(t *testing.T) {
-	clearSettingsEnv(t)
-	t.Setenv(ConnectionRateLimitEnvVar, "1")
-	t.Setenv(ConnectionBurstLimitEnvVar, "2")
 	l := newFailOpenRateLimiterWithSettings(poolTestLimiter(func(context.Context) error {
 		return &dynamoDBLimiterError{err: errors.New("offline")}
-	}), testSettings(t, nil), nil, nil)
+	}), testSettings(t, map[string]string{"connection_rate_limit": "1", "connection_burst_limit": "2"}), nil, nil)
 	require.NoError(t, l.Wait(t.Context()))
 	require.NoError(t, l.Wait(t.Context()))
 	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
@@ -138,8 +119,7 @@ func TestRateLimiterFallbackLocalSettings(t *testing.T) {
 }
 
 func TestRateLimiterFallbackPolicyErrors(t *testing.T) {
-	clearSettingsEnv(t)
-	for _, mode := range []string{"horizon", "contention", "counter_timeout", "canceled_sdk"} {
+	for _, mode := range []string{"horizon", "contention", "canceled_sdk"} {
 		t.Run(mode, func(t *testing.T) {
 			client := updateItemFunc(func(context.Context, *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
 				if mode == "canceled_sdk" {
@@ -153,13 +133,6 @@ func TestRateLimiterFallbackPolicyErrors(t *testing.T) {
 				l := gcraTestLimiter(t, &gcraFake{})
 				l.Capacity, l.MaxWait = 1, 0
 				require.NoError(t, l.Wait(t.Context()))
-				distributed = l
-			case "counter_timeout":
-				l := newDistributedRateLimiter(client, testSettings(t, map[string]string{
-					"region": "us-east-1", "cluster_endpoint": "test-endpoint",
-					"rate_limiter": "dynamodb_counter", "rate_limiter_table": "test-table",
-				}))
-				l.MaxWait = -time.Second
 				distributed = l
 			default:
 				distributed = gcraTestLimiter(t, client)

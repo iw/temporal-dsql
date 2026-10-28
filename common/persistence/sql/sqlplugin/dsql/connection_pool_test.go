@@ -307,41 +307,15 @@ func TestPoolClose(t *testing.T) {
 	require.NoError(t, generic.Close())
 }
 
-func TestPoolLeaseUnsupported(t *testing.T) {
-	t.Setenv(DistributedConnLeaseEnabledEnvVar, "true")
-	p := &plugin{}
-	_, err := p.CreateDB(sqlplugin.DbKindMain, &config.SQL{}, nil, log.NewNoopLogger(), metrics.NoopMetricsHandler)
-	require.EqualError(t, err, "DSQL connection lease was removed (#33). Size the pools so the fleet's total connections, including the overlap during deploys, fits the cluster's connection limit, then unset DSQL_DISTRIBUTED_CONN_LEASE_ENABLED")
-}
-
 func TestPoolWarnings(t *testing.T) {
 	core, observed := observer.New(zap.WarnLevel)
 	logger := log.NewZapLogger(zap.New(core))
 	p := &plugin{}
-	t.Setenv("DSQL_RESERVOIR_ENABLED", "")
-	t.Setenv("DSQL_POOL_KEEPER_TICK_INTERVAL", "1s")
-	retired := []string{
-		"DSQL_DISTRIBUTED_CONN_LEASE_TABLE", "DSQL_DISTRIBUTED_CONN_LIMIT",
-		"DSQL_SLOT_BLOCK_SIZE", "DSQL_SLOT_BLOCK_COUNT", "DSQL_SLOT_BLOCK_TTL", "DSQL_SLOT_BLOCK_RENEW_INTERVAL",
-	}
-	for _, name := range retired {
-		t.Setenv(name, "")
-	}
-	for range 2 {
-		p.warnIgnoredSettings(logger)
-	}
-	require.Equal(t, 1, observed.Len())
-	fields := observed.All()[0].ContextMap()
-	require.Contains(t, fields["ignored_settings"], "DSQL_RESERVOIR_ENABLED")
-	require.Contains(t, fields["ignored_settings"], "DSQL_POOL_KEEPER_TICK_INTERVAL")
-	for _, name := range retired {
-		require.Contains(t, fields["ignored_settings"], name)
-	}
 	for range 2 {
 		_, err := p.poolConfig(&config.SQL{ConnectAddr: "127.0.0.1:5432", MaxConnLifetime: time.Hour}, resolver.NewNoopResolver(), nil, logger)
 		require.NoError(t, err)
 	}
-	require.Equal(t, 2, observed.Len())
+	require.Equal(t, 1, observed.Len())
 }
 
 func TestPoolMetrics(t *testing.T) {
@@ -388,7 +362,6 @@ func TestPoolMetrics(t *testing.T) {
 }
 
 func TestPoolRoleAndToken(t *testing.T) {
-	clearSettingsEnv(t)
 	for _, user := range []string{"", "admin", "temporal"} {
 		t.Run("user="+user, func(t *testing.T) {
 			core, logs := observer.New(zap.InfoLevel)

@@ -9,6 +9,7 @@ import (
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
 	dbschemas "go.temporal.io/server/schema"
+	dsqlschema "go.temporal.io/server/schema/dsql"
 	"go.temporal.io/server/tools/common/schema"
 )
 
@@ -42,7 +43,7 @@ func BuildCLIOptions() *cli.App {
 			Name:   schema.CLIFlagEndpoint,
 			Value:  "",
 			Usage:  "DSQL cluster endpoint hostname (no port). Example: <cluster>.dsql.<region>.on.aws",
-			EnvVar: "CLUSTER_ENDPOINT,SQL_HOST",
+			EnvVar: "SQL_HOST",
 		},
 		cli.IntFlag{
 			Name:   schema.CLIFlagPort,
@@ -63,10 +64,9 @@ func BuildCLIOptions() *cli.App {
 			EnvVar: "SQL_DATABASE",
 		},
 		cli.StringFlag{
-			Name:   "region",
-			Value:  "",
-			Usage:  "AWS region (defaults to REGION or AWS_REGION)",
-			EnvVar: "REGION,AWS_REGION",
+			Name:  "region",
+			Value: "",
+			Usage: "AWS region (inferred from the endpoint when omitted)",
 		},
 		cli.StringFlag{
 			Name:  "sslmode",
@@ -100,7 +100,7 @@ func BuildCLIOptions() *cli.App {
 				},
 				cli.BoolFlag{
 					Name:  schema.CLIFlagDisableVersioning,
-					Usage: "disable setup of schema versioning tables (recommended initially for DSQL)",
+					Usage: "disable setup of schema versioning tables",
 				},
 				cli.BoolFlag{
 					Name:  schema.CLIFlagOverwrite,
@@ -156,5 +156,16 @@ func updateSchema(c *cli.Context, logger log.Logger) error {
 	}
 	defer db.Close()
 
+	return updateSchemaDB(c, db, logger)
+}
+
+func updateSchemaDB(c *cli.Context, db schema.DB, logger log.Logger) error {
+	version, err := db.ReadSchemaVersion()
+	if err != nil {
+		return err
+	}
+	if version != "0.0" && version != dsqlschema.Version {
+		return fmt.Errorf("unsupported DSQL schema version %q; create a fresh schema at version %s", version, dsqlschema.Version)
+	}
 	return schema.Update(c, db, logger)
 }

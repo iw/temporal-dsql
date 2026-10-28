@@ -10,19 +10,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func testConfig(model string) *Config {
+func testConfig() *Config {
 	return &Config{
 		Seed: 42, Duration: 3 * time.Hour, SampleEvery: time.Second, LimiterPerSec: 100,
 		AssertMaxConnectsPerSec: -1, AssertConvergeWithin: -1, AssertMaxClosurePerSec: -1,
-		ComparisonConfig: ComparisonConfig{Model: model, Limiter: "perSecond", Cluster: ClusterConfig{MaxConnections: 10000, Handshake: LatencyRange{time.Millisecond, time.Millisecond}}},
+		SimulationConfig: SimulationConfig{Limiter: "perSecond", Cluster: ClusterConfig{MaxConnections: 10000, Handshake: LatencyRange{time.Millisecond, time.Millisecond}}},
 		Scenario:         ScenarioConfig{Kind: "cold_start"},
-		Services:         []ServiceConfig{{Name: "test", TargetReady: 2, BaseLifetime: 10 * time.Second, Jitter: time.Nanosecond, GuardWindow: time.Second, PoolConfig: PoolConfig{MaxOpen: 2, PGX: PGXConfig{MaxConns: 2, MaxConnLifetime: 10 * time.Second, HealthCheckPeriod: time.Second}}}},
+		Services:         []ServiceConfig{{Name: "test", PoolConfig: PoolConfig{PGX: PGXConfig{MaxConns: 2, MaxConnLifetime: 10 * time.Second, HealthCheckPeriod: time.Second}}}},
 	}
 }
 
-func testPool(t *testing.T, model string) (*comparisonRun, *modelPool) {
+func testPool(t *testing.T) (*simulationRun, *modelPool) {
 	t.Helper()
-	r, err := newComparison(testConfig(model), "")
+	r, err := newSimulation(testConfig())
 	require.NoError(t, err)
 	r.sim.q = nil // Tests schedule just the events relevant to each lifecycle boundary.
 	i := r.instances[0]
@@ -30,7 +30,7 @@ func testPool(t *testing.T, model string) (*comparisonRun, *modelPool) {
 	return r, i.main
 }
 
-func advance(r *comparisonRun, d time.Duration) {
+func advance(r *simulationRun, d time.Duration) {
 	until := r.sim.Now().Add(d)
 	for len(r.sim.q) > 0 && !r.sim.q[0].At.After(until) {
 		e := heap.Pop(&r.sim.q).(*Event)
@@ -41,7 +41,7 @@ func advance(r *comparisonRun, d time.Duration) {
 }
 
 func TestDSQLTokenBucket(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	callbacks := 0
 	for range 1001 {
 		r.cluster.dial(p, func(c *physicalConn, code string) {
@@ -70,18 +70,18 @@ func TestDSQLTokenBucket(t *testing.T) {
 }
 
 func TestDSQLCapAndAgeCut(t *testing.T) {
-	r, p := testPool(t, "reservoir-sql")
-	p.cfg.BaseLifetime = 2 * time.Hour
+	r, p := testPool(t)
+	p.cfg.PGX.MaxConnLifetime = 2 * time.Hour
+	p.cfg.PGX.MinConns = 2
 	r.cluster.cfg.MaxConnections = 2
 	p.start()
 	advance(r, 3*time.Millisecond)
 	r.cluster.dial(p, func(c *physicalConn, code string) { require.Nil(t, c); require.Equal(t, "53300", code) })
 	advance(r, time.Millisecond)
 	require.EqualValues(t, 1, r.stats.rejections["53300"])
-	idle := p.ready[0]
+
 	advance(r, time.Hour-2*time.Second)
 	req := p.request(10*time.Second, time.Second, nil)
-	require.Same(t, idle, req.conn)
 	advance(r, 3*time.Second)
 	require.True(t, req.done)
 	require.EqualValues(t, 1, r.stats.cutInUse)
@@ -89,35 +89,8 @@ func TestDSQLCapAndAgeCut(t *testing.T) {
 	require.EqualValues(t, 1, r.stats.failures["dead"])
 }
 
-func TestSQLLifetimeAndDoubling(t *testing.T) {
-	for _, variant := range []string{"as-deployed", "option-a"} {
-		t.Run(variant, func(t *testing.T) {
-			r, p := testPool(t, variant)
-			p.start()
-			advance(r, 3*time.Millisecond)
-			a := p.request(20*time.Second, time.Second, nil)
-			b := p.request(20*time.Second, time.Second, nil)
-			advance(r, 3*time.Millisecond)
-			require.Equal(t, 4, r.cluster.open, "SQL owns two and reservoir refills two alongside them")
-			require.Equal(t, 2, p.borrowed)
-			advance(r, 21*time.Second)
-			require.True(t, a.done)
-			require.True(t, b.done)
-			if variant == "as-deployed" {
-				require.Len(t, p.idle, 2)
-				require.True(t, a.conn.alive, "SQL does not enforce reservoir lifetime")
-				require.Equal(t, 4, r.cluster.open)
-			} else {
-				require.Empty(t, p.idle)
-				require.False(t, a.conn.alive)
-				require.Equal(t, 2, r.cluster.open)
-			}
-		})
-	}
-}
-
 func TestPGXExpiredRelease(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	req := p.request(11*time.Second, time.Second, nil)
 	advance(r, 2*time.Millisecond)
 	require.NotNil(t, req.conn)
@@ -132,7 +105,7 @@ func TestPGXExpiredRelease(t *testing.T) {
 }
 
 func TestPGXHealthRefillsMinConns(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	p.cfg.PGX.MinConns = 2
 	p.start()
 	advance(r, 2*time.Millisecond)
@@ -153,7 +126,7 @@ func TestPGXHealthRefillsMinConns(t *testing.T) {
 }
 
 func TestPGXOnDemandLimiterAndCancellation(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	r.limiter.mode = "tokenBucket"
 	r.limiter.bucket.tokens = 0
 	r.cfg.LimiterLatency = LatencyRange{5 * time.Millisecond, 5 * time.Millisecond}
@@ -169,33 +142,15 @@ func TestPGXOnDemandLimiterAndCancellation(t *testing.T) {
 	require.Equal(t, 0, p.instance.active)
 }
 
-func TestPGXGuardAndIdleOrder(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
-	p.cfg.PGX.MinConns = 2
-	p.start()
-	advance(r, 2*time.Millisecond)
-	last := p.idle[len(p.idle)-1]
-	req := p.request(time.Millisecond, time.Second, nil)
-	require.Same(t, last, req.conn, "puddle idle order is LIFO")
-	advance(r, 2*time.Millisecond)
-	last.expires = r.sim.Now().Add(500 * time.Millisecond)
-	next := p.request(time.Millisecond, time.Second, nil)
-	require.NotSame(t, last, next.conn)
-	require.False(t, last.alive)
-	require.Zero(t, r.stats.failures["dead"])
-}
-
-func TestPGXAcquireGuardOff(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
-	off := false
-	p.cfg.PGX.AcquireGuard = &off
+func TestPGXAcquireNearExpiry(t *testing.T) {
+	r, p := testPool(t)
 	p.cfg.PGX.MinConns = 2
 	p.start()
 	advance(r, 2*time.Millisecond)
 	last := p.idle[len(p.idle)-1]
 	last.expires = r.sim.Now().Add(500 * time.Millisecond)
 	req := p.request(600*time.Millisecond, time.Second, nil)
-	require.Same(t, last, req.conn, "stock Acquire hands out a connection inside the guard window")
+	require.Same(t, last, req.conn, "Acquire hands out the most recently returned idle connection")
 	require.False(t, req.waitedNew)
 	advance(r, 601*time.Millisecond)
 	require.True(t, req.done)
@@ -204,7 +159,7 @@ func TestPGXAcquireGuardOff(t *testing.T) {
 }
 
 func TestAdaptiveAIMDAndOutage(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	b := p.instance.adaptive
 	b.feedback(r.sim.Now(), "", .5)
 	require.InDelta(t, 10.5, b.rate, 1e-9)
@@ -222,55 +177,26 @@ func TestAdaptiveAIMDAndOutage(t *testing.T) {
 	require.Equal(t, "adaptive", r.limiter.mode)
 }
 
-func TestPoolCloseLeakAndRelease(t *testing.T) {
-	for _, variant := range []string{"as-deployed", "option-a", "pgxpool"} {
-		t.Run(variant, func(t *testing.T) {
-			r, p := testPool(t, variant)
-			if p.isPGX() {
-				p.cfg.PGX.MinConns = 2
-			}
-			p.start()
-			advance(r, 3*time.Millisecond)
-			req := p.request(time.Second, time.Second, nil)
-			advance(r, 3*time.Millisecond)
-			p.close()
-			advance(r, 2*time.Second)
-			require.True(t, req.done)
-			if variant == "as-deployed" {
-				require.Positive(t, r.cluster.open)
-			} else {
-				require.Zero(t, r.cluster.open)
-			}
-			advance(r, time.Hour)
-			require.Zero(t, r.cluster.open)
-		})
-	}
-}
-
-func TestSQLWaitTimeoutAndDeadRebuild(t *testing.T) {
-	r, p := testPool(t, "as-deployed")
+func TestPoolCloseAndRelease(t *testing.T) {
+	r, p := testPool(t)
+	p.cfg.PGX.MinConns = 2
 	p.start()
 	advance(r, 3*time.Millisecond)
-	a := p.request(time.Second, time.Second, nil)
-	b := p.request(time.Second, time.Second, nil)
-	timeout := p.request(time.Second, time.Millisecond, nil)
-	advance(r, 2*time.Millisecond)
-	require.True(t, timeout.done)
-	require.EqualValues(t, 1, r.stats.failures["timeout"])
-	r.cluster.drop(a.conn)
-	r.cluster.drop(b.conn)
-	require.EqualValues(t, 2, r.stats.failures["dead"])
+	req := p.request(time.Second, time.Second, nil)
+	p.close()
+	require.Equal(t, 1, r.cluster.open, "acquired connections drain after Close")
 	advance(r, 2*time.Second)
-	require.EqualValues(t, 2, r.stats.rebuilds, "dead errors must queue serialized rebuilds")
+	require.True(t, req.done)
+	require.Zero(t, r.cluster.open)
 }
 
 func TestSharedInstanceCapAndEphemeralClose(t *testing.T) {
-	cfg := testConfig("pgxpool")
+	cfg := testConfig()
 	cfg.Services[0].InflightLimit = 2
 	cfg.Services[0].Replicas = 2
 	cfg.Services[0].PGX.MinConns = 2
 	cfg.Services[0].Ephemeral = EphemeralConfig{Pools: 3, Connections: 3, Duration: time.Second}
-	r, err := newComparison(cfg, "")
+	r, err := newSimulation(cfg)
 	require.NoError(t, err)
 	advance(r, 3*time.Second)
 	for _, i := range r.instances {
@@ -283,32 +209,30 @@ func TestSharedInstanceCapAndEphemeralClose(t *testing.T) {
 	require.Equal(t, 4, r.cluster.open)
 }
 
-func TestComparisonDeterminismAndScenarios(t *testing.T) {
+func TestSimulationDeterminismAndScenarios(t *testing.T) {
 	for _, kind := range []string{"cold_start", "rolling_restart", "rolling_deploy", "fleet_start", "mass_drop", "ddb_outage"} {
-		for _, variant := range []string{"reservoir", "as-deployed", "option-a", "pgxpool"} {
-			t.Run(kind+"/"+variant, func(t *testing.T) {
-				cfg := testConfig(variant)
-				cfg.Duration = 5 * time.Second
-				cfg.Scenario = ScenarioConfig{Kind: kind, EventAt: 2 * time.Second, DropAt: 2 * time.Second, DropFraction: .5, RollEvery: time.Second, StartWindow: time.Second}
-				cfg.Limiter = "tokenBucket"
-				cfg.Services[0].Replicas = 2
-				cfg.Services[0].Workload = WorkloadConfig{Enabled: true, MaxInUse: 2, ArrivalBurst: 2, SpawnEvery: 100 * time.Millisecond, HoldTime: 10 * time.Millisecond, MaxWait: time.Second}
-				a, err := newComparison(cfg, "")
-				require.NoError(t, err)
-				a.sim.Run()
-				b, err := newComparison(cfg, "")
-				require.NoError(t, err)
-				b.sim.Run()
-				require.Equal(t, a.summary(), b.summary())
-				require.Equal(t, a.stats.samples, b.stats.samples)
-				require.NoError(t, a.assertions())
-			})
-		}
+		t.Run(kind, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.Duration = 5 * time.Second
+			cfg.Scenario = ScenarioConfig{Kind: kind, EventAt: 2 * time.Second, DropAt: 2 * time.Second, DropFraction: .5, RollEvery: time.Second, StartWindow: time.Second}
+			cfg.Limiter = "tokenBucket"
+			cfg.Services[0].Replicas = 2
+			cfg.Services[0].Workload = WorkloadConfig{Enabled: true, MaxInUse: 2, ArrivalBurst: 2, SpawnEvery: 100 * time.Millisecond, HoldTime: 10 * time.Millisecond, MaxWait: time.Second}
+			a, err := newSimulation(cfg)
+			require.NoError(t, err)
+			a.sim.Run()
+			b, err := newSimulation(cfg)
+			require.NoError(t, err)
+			b.sim.Run()
+			require.Equal(t, a.summary(), b.summary())
+			require.Equal(t, a.stats.samples, b.stats.samples)
+			require.NoError(t, a.assertions())
+		})
 	}
 }
 
-func TestComparisonAssertionsAndCSV(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+func TestSimulationAssertionsAndCSV(t *testing.T) {
+	r, p := testPool(t)
 	r.cfg.AssertZeroDSQLRejections = true
 	r.stats.rejections["53400"] = 1
 	require.ErrorContains(t, r.assertions(), "DSQL rejections")
@@ -334,7 +258,7 @@ func TestComparisonAssertionsAndCSV(t *testing.T) {
 }
 
 func TestHealthFailureSkipsEvictionAndCancelsBatch(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	p.cfg.PGX.MinConns = 0
 	req := p.request(time.Millisecond, time.Second, nil)
 	advance(r, 3*time.Millisecond)
@@ -350,7 +274,7 @@ func TestHealthFailureSkipsEvictionAndCancelsBatch(t *testing.T) {
 }
 
 func TestPGXIdleTimeoutAndHealthStack(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	a := p.request(time.Millisecond, time.Second, nil)
 	b := p.request(time.Millisecond, time.Second, nil)
 	advance(r, 3*time.Millisecond)
@@ -361,7 +285,7 @@ func TestPGXIdleTimeoutAndHealthStack(t *testing.T) {
 	require.Equal(t, before, a.conn.lastUsed, "ReleaseUnused does not reset idle time")
 	p.cfg.PGX.MaxConnIdleTime = 0
 	advance(r, 2*time.Second)
-	require.Len(t, p.idle, 2, "zero explicitly disables idle timeout in this proposal")
+	require.Len(t, p.idle, 2, "zero disables idle timeout")
 	p.cfg.PGX.MaxConnIdleTime = time.Second
 	p.health()
 	require.Empty(t, p.idle)
@@ -369,7 +293,7 @@ func TestPGXIdleTimeoutAndHealthStack(t *testing.T) {
 }
 
 func TestOnDemandSuccessfulWaitAndSharedGlobalBucket(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	r.limiter.mode = "tokenBucket"
 	r.limiter.bucket.tokens = 0
 	r.cfg.LimiterLatency = LatencyRange{5 * time.Millisecond, 5 * time.Millisecond}
@@ -386,40 +310,11 @@ func TestOnDemandSuccessfulWaitAndSharedGlobalBucket(t *testing.T) {
 	require.Equal(t, 26*time.Millisecond, second.main.stats.wait.maximum)
 }
 
-func TestSQLGuardOnReuseAndWaitingRelease(t *testing.T) {
-	r, p := testPool(t, "option-a")
-	p.start()
-	advance(r, 3*time.Millisecond)
-	a := p.request(time.Millisecond, time.Second, nil)
-	advance(r, 2*time.Millisecond)
-	a.conn.expires = r.sim.Now().Add(time.Millisecond)
-	b := p.request(100*time.Millisecond, time.Second, nil)
-	require.False(t, a.conn.alive)
-	require.NotSame(t, a.conn, b.conn)
-	c := p.request(100*time.Millisecond, time.Second, nil)
-	waiting := p.request(time.Millisecond, time.Second, nil)
-	require.False(t, waiting.acquired)
-	advance(r, 101*time.Millisecond)
-	require.True(t, waiting.acquired)
-	require.True(t, c.done)
-	require.Zero(t, r.stats.failures["timeout"])
-}
-
-func TestComparisonConfigAndServiceModels(t *testing.T) {
-	cfg := testConfig("pgxpool")
-	cfg.Services[0].Model = "option-a"
-	cfg.Services = append(cfg.Services, ServiceConfig{Name: "second", TargetReady: 1})
-	r, err := newComparison(cfg, "")
-	require.NoError(t, err)
-	advance(r, time.Millisecond)
-	require.Equal(t, "reservoir-sql", r.instances[0].main.model)
-	require.True(t, r.instances[0].main.cfg.EnforceLifetimeInUse)
-	require.Equal(t, "pgxpool", r.instances[1].main.model)
+func TestSimulationConfigValidation(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		change func(*Config)
 	}{
-		{"model", func(c *Config) { c.Model = "typo" }},
 		{"limiter", func(c *Config) { c.Limiter = "typo" }},
 		{"negative sample", func(c *Config) { c.SampleEvery = -time.Second }},
 		{"replicas", func(c *Config) { c.Services[0].Replicas = -1 }},
@@ -428,9 +323,9 @@ func TestComparisonConfigAndServiceModels(t *testing.T) {
 		{"workload", func(c *Config) { c.Services[0].Workload.Enabled = true }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			c := testConfig("pgxpool")
+			c := testConfig()
 			test.change(c)
-			_, err := newComparison(c, "")
+			_, err := newSimulation(c)
 			require.Error(t, err)
 		})
 	}
@@ -439,22 +334,21 @@ func TestComparisonConfigAndServiceModels(t *testing.T) {
 func TestNamedScenarioConfigs(t *testing.T) {
 	files, err := filepath.Glob("scenarios/*.yaml")
 	require.NoError(t, err)
+	require.NotEmpty(t, files)
 	for _, file := range files {
 		t.Run(filepath.Base(file), func(t *testing.T) {
 			cfg, err := LoadConfig(file)
 			require.NoError(t, err)
-			if usesComparison(cfg) {
-				require.GreaterOrEqual(t, cfg.Duration, 3*time.Hour)
-				for _, s := range cfg.Services {
-					require.Less(t, s.PGX.MaxConnLifetime+s.PGX.MaxConnLifetimeJitter+s.GuardWindow+5*time.Minute, dsqlMaxAge)
-				}
+			require.GreaterOrEqual(t, cfg.Duration, 3*time.Hour)
+			for _, s := range cfg.Services {
+				require.LessOrEqual(t, s.PGX.MaxConnLifetime+s.PGX.MaxConnLifetimeJitter+s.PGX.HealthCheckPeriod+5*time.Minute, dsqlMaxAge)
 			}
 		})
 	}
 }
 
 func TestCloseCancelsWaitingConstructor(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	r.limiter.mode = "tokenBucket"
 	r.limiter.bucket.tokens = 0
 	req := p.request(time.Second, time.Second, nil)
@@ -467,33 +361,8 @@ func TestCloseCancelsWaitingConstructor(t *testing.T) {
 	require.Zero(t, p.constructing)
 }
 
-func TestLegacyScenarioAssertions(t *testing.T) {
-	for _, name := range []string{"local", "ecs-150wps", "ecs-400wps", "mass-drop", "workload-test"} {
-		t.Run(name, func(t *testing.T) {
-			cfg, err := LoadConfig("scenarios/" + name + ".yaml")
-			require.NoError(t, err)
-			require.False(t, usesComparison(cfg))
-			sim := NewSim(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), cfg.Duration)
-			sim.quiet = true
-			limiter := NewPerSecondLimiter(cfg.LimiterPerSec)
-			metrics := NewMetrics()
-			services := make(map[string]*Service)
-			for _, scfg := range cfg.Services {
-				svc := NewService(scfg, cfg.Endpoint, limiter, metrics, sim)
-				svc.Refiller.rng = seeded(cfg.Seed, scfg.Name)
-				services[scfg.Name] = svc
-				svc.Start(sim.Now().Add(scfg.StartDelay))
-			}
-			require.NoError(t, ApplyScenario(cfg, sim, services))
-			scheduleSampling(sim, cfg, services, metrics)
-			sim.Run()
-			require.NoError(t, checkAssertions(cfg, metrics))
-		})
-	}
-}
-
 func TestPGXHealthServesWaitersBeforeBatchCompletes(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	p.cfg.PGX.MinConns = 2
 	p.instance.cfg.InflightLimit = 1
 	p.start()

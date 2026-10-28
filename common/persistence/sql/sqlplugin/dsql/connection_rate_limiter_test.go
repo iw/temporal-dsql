@@ -9,7 +9,6 @@ import (
 )
 
 func TestConnectionRateLimiterDefaults(t *testing.T) {
-	clearSettingsEnv(t)
 
 	limiter := newConnectionRateLimiter(testSettings(t, nil))
 	require.NotNil(t, limiter)
@@ -23,12 +22,8 @@ func TestConnectionRateLimiterDefaults(t *testing.T) {
 	}
 }
 
-func TestConnectionRateLimiterEnv(t *testing.T) {
-	clearSettingsEnv(t)
-	t.Setenv(ConnectionRateLimitEnvVar, "5")
-	t.Setenv(ConnectionBurstLimitEnvVar, "10")
-
-	limiter := newConnectionRateLimiter(testSettings(t, nil))
+func TestConnectionRateLimiterAttributes(t *testing.T) {
+	limiter := newConnectionRateLimiter(testSettings(t, map[string]string{"connection_rate_limit": "5", "connection_burst_limit": "10"}))
 	require.NotNil(t, limiter)
 
 	require.InDelta(t, 5, float64(limiter.limiter.Limit()), 0.001)
@@ -44,11 +39,7 @@ func TestConnectionRateLimiterEnv(t *testing.T) {
 }
 
 func TestConnectionRateLimiter_Wait(t *testing.T) {
-	clearSettingsEnv(t)
-	t.Setenv(ConnectionRateLimitEnvVar, "100")
-	t.Setenv(ConnectionBurstLimitEnvVar, "5")
-
-	limiter := newConnectionRateLimiter(testSettings(t, nil))
+	limiter := newConnectionRateLimiter(testSettings(t, map[string]string{"connection_rate_limit": "100", "connection_burst_limit": "5"}))
 
 	// Exhaust burst
 	for i := 0; i < 5; i++ {
@@ -64,11 +55,7 @@ func TestConnectionRateLimiter_Wait(t *testing.T) {
 }
 
 func TestConnectionRateLimiter_WaitTimeout(t *testing.T) {
-	clearSettingsEnv(t)
-	t.Setenv(ConnectionRateLimitEnvVar, "1")
-	t.Setenv(ConnectionBurstLimitEnvVar, "1")
-
-	limiter := newConnectionRateLimiter(testSettings(t, nil))
+	limiter := newConnectionRateLimiter(testSettings(t, map[string]string{"connection_rate_limit": "1", "connection_burst_limit": "1"}))
 
 	// Exhaust burst
 	require.True(t, limiter.Allow())

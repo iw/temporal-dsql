@@ -1,16 +1,16 @@
 # DSQL Implementation Details
 
-This document covers the technical implementation of Aurora DSQL support in Temporal, including schema changes, OCC handling, and the major contributions to achieve DSQL compatibility.
+This document covers the technical implementation of Aurora DSQL support in Temporal, including the schema, transaction retries and connection management.
 
 ## Table of Contents
 
 - [Code Structure](#code-structure)
-- [Schema Changes](#schema-changes)
-  - [BYTEA to UUID in Composite Primary Keys](#bytea-to-uuid-in-composite-primary-keys)
-  - [BIGSERIAL Removal](#bigserial-removal)
-  - [Other Schema Changes](#other-schema-changes)
-- [FOR UPDATE and Locking Changes](#for-update-and-locking-changes)
-  - [FOR UPDATE on Single Table Only](#for-update-on-single-table-only)
+- [Schema Layout](#schema-layout)
+  - [UUID Identifiers](#uuid-identifiers)
+  - [Buffered Event IDs](#buffered-event-ids)
+  - [Schema Constraints](#schema-constraints)
+- [Locking](#locking)
+  - [Single-Table Locking](#single-table-locking)
   - [FOR SHARE Not Supported](#for-share-not-supported)
 - [Optimistic Concurrency Control (OCC)](#optimistic-concurrency-control-occ)
   - [Retry Logic](#retry-logic-retrygo)
@@ -44,7 +44,6 @@ common/persistence/sql/sqlplugin/dsql/
 ├── token_cache.go                 # IAM token caching
 ├── connection_pool.go             # pgxpool config, hooks, connector ownership
 ├── connection_rate_limiter.go     # Local (per-instance) rate limiting
-├── distributed_rate_limiter.go    # DynamoDB-backed distributed rate limiting
 ├── token_bucket_limiter.go        # GCRA reservations for distributed burst/rate control
 ├── rate_limiter_fallback.go       # Local fallback on DynamoDB errors
 ├── uuid.go                        # UUID string conversion utilities
@@ -68,45 +67,24 @@ common/persistence/sql/sqlplugin/dsql/
 │   ├── interface.go               # Driver interface abstraction
 │   └── pgx.go                     # pgx driver backend
 └── session/
-    └── session.go                 # Connection session management
+    └── session.go                 # DSN construction
 
-tools/poolsim/                     # Historical pool simulation (see below)
+tools/poolsim/                     # pgxpool and DSQL simulation
 
 schema/dsql/temporal/
-└── schema.sql                     # DSQL-compatible schema
+├── schema.sql                     # Full baseline
+└── versioned/v1.2/
+    ├── manifest.json              # Applies the full baseline at 1.2
+    └── schema.sql                 # Same schema for the update path
 ```
 
-## Schema Changes
+## Schema Layout
 
-### BYTEA to UUID in Composite Primary Keys
+### UUID Identifiers
 
-DSQL has limitations with BYTEA columns in composite primary keys. All identifier columns were changed from `BYTEA` to `UUID`:
-
-```sql
--- PostgreSQL (original)
-CREATE TABLE executions(
-  namespace_id BYTEA NOT NULL,
-  run_id BYTEA NOT NULL,
-  ...
-  PRIMARY KEY (shard_id, namespace_id, workflow_id, run_id)
-);
-
--- DSQL (modified)
-CREATE TABLE executions(
-  namespace_id UUID NOT NULL,
-  run_id UUID NOT NULL,
-  ...
-  PRIMARY KEY (shard_id, namespace_id, workflow_id, run_id)
-);
-```
-
-**Tables affected:**
-- `executions`, `current_executions`, `buffered_events`
-- `tasks`, `task_queues`, `tasks_v2`, `task_queues_v2`
-- `activity_info_maps`, `timer_info_maps`, `child_execution_info_maps`
-- `request_cancel_info_maps`, `signal_info_maps`, `signals_requested_sets`
-- `history_node`, `history_tree`, `cluster_membership`
-- `namespaces`, `nexus_endpoints`, `build_id_to_task_queue`
+Identifier columns in composite primary keys use `UUID`, which DSQL can index.
+The plugin converts Go UUID values to strings for SQL parameters and converts
+query results back to Temporal's identifier types.
 
 **Application-level handling** (`uuid.go`):
 
@@ -140,40 +118,29 @@ decision, rebuilding the table and copying rows in batches of fewer than 3,000;
 it cannot be done by widening the column in place. These limits remain tracked in
 [#47](https://github.com/iw/temporal-dsql/issues/47).
 
-### BIGSERIAL Removal
+### Buffered Event IDs
 
-The `buffered_events.id` column was changed from `BIGSERIAL` to `BIGINT`, and the plugin allocates the IDs itself:
+`buffered_events.id` is a `BIGINT` allocated by the plugin.
 
-```sql
--- PostgreSQL
-id BIGSERIAL NOT NULL
+**Per-run IDs** (`InsertIntoBufferedEvents` in `execution.go`): the ID only orders a run's buffered events, so the plugin numbers them per run. Inside the caller's transaction, it reads `COALESCE(MAX(id), 0)` for the run and numbers the new rows from there. The same transaction updates the run's executions row, so two transactions appending to the same run conflict at commit and one of them is retried. The composite primary key includes the run identifiers and event ID; IDs are not globally unique.
 
--- DSQL
-id BIGINT NOT NULL
-```
+### Schema Constraints
 
-**Per-run IDs** (`InsertIntoBufferedEvents` in `execution.go`): the ID only orders a run's buffered events, so the plugin numbers them per run. Inside the caller's transaction, it reads `COALESCE(MAX(id), 0)` for the run and numbers the new rows from there. The same transaction updates the run's executions row, so two transactions appending to the same run conflict at commit and one of them is retried. Schema 1.2 dropped the global unique index on `buffered_events(id)`.
-
-### Other Schema Changes
-
-| Change | Reason |
+| Schema choice | Reason |
 |--------|--------|
 | `CHECK` constraints omitted | Supported by DSQL; this schema relies on application validation |
-| Complex `DEFAULT` removed | Limited DEFAULT expression support |
-| `UNIQUE` → separate indexes | Better DSQL compatibility |
+| Simple `DEFAULT` expressions | Limited DEFAULT expression support |
+| Separate unique indexes | Better DSQL compatibility |
 | `CREATE INDEX ASYNC` | Non-blocking index creation |
 
-## FOR UPDATE and Locking Changes
+## Locking
 
-The plugin retains single-table locking queries from earlier DSQL compatibility work. Core owns the transaction boundaries.
+Core owns transaction boundaries. The plugin uses single-table locking queries.
 
-### FOR UPDATE on Single Table Only
+### Single-Table Locking
 
-DSQL has supported `FOR UPDATE` on joins since August 2026. The plugin still splits the current-execution join into single-table queries.
-
-**Problem:** `LockCurrentExecutionsJoinExecutions` used a JOIN with FOR UPDATE.
-
-**Solution:** Split into two queries:
+`LockCurrentExecutionsJoinExecutions` locks `current_executions` and then reads
+`executions.last_write_version` in the same transaction:
 
 ```go
 // execution.go - LockCurrentExecutionsJoinExecutions
@@ -191,7 +158,7 @@ func (pdb *db) LockCurrentExecutionsJoinExecutions(ctx context.Context, filter .
 
 ### FOR SHARE Not Supported
 
-DSQL doesn't support `FOR SHARE`. `ReadLockExecutions` delegates to `WriteLockExecutions`, and `ReadLockShards` uses `FOR KEY SHARE`, which DSQL has supported since August 2026.
+DSQL doesn't support `FOR SHARE`. `ReadLockExecutions` delegates to `WriteLockExecutions`, and `ReadLockShards` uses `FOR KEY SHARE`.
 
 **ReadLockExecutions** (`execution.go`):
 
@@ -269,17 +236,16 @@ Connections use `DbConnectAdmin` for `admin` and `DbConnect` for other roles. Pa
 
 DSQL has cluster-wide connection limits (100 new connections/sec, 1000 burst, 10000 max). Rate limiting only applies to NEW connection establishment (TCP/TLS handshake + IAM authentication), not to queries.
 
-The plugin supports three rate limiting modes, selected via `connectAttributes.rate_limiter`. All new connections wait on the selected limiter in `BeforeConnect`.
+The plugin supports two rate limiting modes, selected via `connectAttributes.rate_limiter`. All new connections wait on the selected limiter in `BeforeConnect`.
 
 | Mode | When Used | Key Config |
 |------|-----------|------------|
 | Token Bucket (recommended) | `rate_limiter: "dynamodb_token_bucket"` | DynamoDB-backed, supports burst capacity (1000) |
-| Per-Second Counter | `rate_limiter: "dynamodb_counter"` | DynamoDB-backed, no burst support |
 | Local | `rate_limiter: "local"` (default) | Per-instance `rate.Limiter`, requires manual budget partitioning |
 
-Both DynamoDB modes require `rate_limiter_table`. Token bucket tuning uses `token_bucket_rate`, `token_bucket_capacity` and `token_bucket_max_wait`; counter tuning uses `counter_limit` and `counter_max_wait`. Local pacing and outage fallback use `connection_rate_limit` and `connection_burst_limit`. All keys belong in the datastore's `connectAttributes` map. The first pool's limiter settings remain shared process-wide; later differences warn once without replacing it. The DynamoDB client uses the resolved region.
+Token bucket mode requires `rate_limiter_table`. Token bucket tuning uses `token_bucket_rate`, `token_bucket_capacity` and `token_bucket_max_wait`. Local pacing and outage fallback use `connection_rate_limit` and `connection_burst_limit`. All keys belong in the datastore's `connectAttributes` map. The first pool's limiter settings remain shared process-wide; later differences warn once without replacing it. The DynamoDB client uses the resolved region.
 
-Legacy environment variables still work but are deprecated and will be removed in a future release, except the standard `AWS_REGION` fallback. See [mapping, precedence and validation](deployment.md#datastore-settings-and-legacy-fallbacks). Invalid settings fail `CreateDB`; valid unused mode settings warn. The resolver is the only reader of active plugin environment settings and logs one deprecation warning per process.
+Settings come from datastore attributes or defaults; the resolver reads no environment variables. See [settings and validation](deployment.md#datastore-settings). Invalid settings fail `CreateDB`; valid unused mode settings warn.
 
 Token bucket mode stores `tat_us` (the next theoretical arrival time in Unix microseconds) and `ttl_epoch` in one `dsql_connect_gcra#<endpoint>` item, using the existing table's string `pk`. With emission interval `T = 1 second / rate`, burst tolerance `tau = (capacity - 1) * T`, and horizon `tau + maxWait`:
 
@@ -289,13 +255,13 @@ Token bucket mode stores `tat_us` (the next theoretical arrival time in Unix mic
 
 Non-divisor rates round the interval up to a microsecond to avoid exceeding the configured rate; rates above one million/sec and overflowing horizons are rejected. Each successful update increases TAT, including same-microsecond writes. Clock skew shifts admission times with a one-time allowance bounded by the clock spread times the rate. Canceled reservations remain spent; reclaiming them could admit twice. A crash therefore wastes only outstanding reservations until their times pass. Busy callers perform one atomic write and sleep locally; initialization and idle races require extra conditional writes. The table remains a single hot key and DynamoDB throttling is still possible at high load.
 
-`rate_limiter_fallback.go` wraps either distributed mode. Only failures originating from DynamoDB calls can open the 30-second local fallback window; condition failures and context cancellation are excluded. Limiter policy errors, including the horizon limit, propagate unchanged. Calls during the window use `ConnectionRateLimiter`; after expiry DynamoDB is tried again. Logging is limited to once a minute and `dsql_rate_limiter_fallbacks_total` counts calls routed locally. Startup fallback on client creation failure is unchanged. During a DynamoDB outage, each process applies its own rate and burst; DSQL rejects fleet-wide excess with 53400 (not attempted). Lower the local burst to reduce that excess.
+`rate_limiter_fallback.go` wraps the token bucket. Only failures originating from DynamoDB calls can open the 30-second local fallback window; condition failures and context cancellation are excluded. Limiter policy errors, including the horizon limit, propagate unchanged. Calls during the window use `ConnectionRateLimiter`; after expiry DynamoDB is tried again. Logging is limited to once a minute and `dsql_rate_limiter_fallbacks_total` counts calls routed locally. Startup fallback on client creation failure is unchanged. During a DynamoDB outage, each process applies its own rate and burst; DSQL rejects fleet-wide excess with 53400 (not attempted). Lower the local burst to reduce that excess.
 
-The old bucket item is never read and expires through TTL. Mixed-version rollout or rollback uses two independent items and can temporarily double the configured fleet rate and burst; DSQL rejects excess with 53400. See [deployment](deployment.md#5-distributed-coordination-multi-service) for settings and table permissions.
+See [deployment](deployment.md#5-distributed-coordination-multi-service) for settings and table permissions.
 
 ## Connection Pool
 
-`CreateDB` preserves the `cfg.Connect` test hook. Otherwise it resolves settings before creating the handle, removes plugin attributes from a copy of the config, builds a DSN with `session.BuildDSN`, parses a pgxpool config, creates a pool and pings once with a 30-second timeout. Default database names are still tried in order. A failed ping closes the new pool. There is no startup sleep or wait for the background fill.
+`CreateDB` rejects visibility databases with instructions to configure a separate store. It supports the `cfg.Connect` test hook for persistence databases. Otherwise it resolves settings before creating the handle, removes plugin attributes from a copy of the config, builds a DSN with `session.BuildDSN`, parses a pgxpool config, creates a pool and pings once with a 30-second timeout. Default database names are tried in order. A failed ping closes the new pool. There is no startup sleep or wait for the background fill.
 
 Service pools use `MinConns == MaxConns == maxConns` (default 100). Ephemeral pools use max 5/min 0. Lifetime is capped at 50 minutes, with four minutes of jitter and one-minute health checks; shorter configured lifetimes apply. No acquire/release hooks are installed. `maxIdleConns` is ignored. The sum of `maxConns` across every Temporal process, including deploy overlap, must fit the cluster connection limit, 10,000 by default, with headroom for ephemeral pools and administration.
 
@@ -303,15 +269,13 @@ The `sql.DB` uses a closing wrapper around `stdlib.GetPoolConnector`, zero idle 
 
 `DatabaseHandle` receives an always-false refresh predicate. `maybeConvertError` performs its own mapping without calling the upstream `ConvertError`: limiter failures and 53300/53400 become overload; socket errors, `pgconn.ConnectError`, class 08 and IAM access denied become unavailable; 40001/0A000 remain raw; 54000 becomes a size-limit error. Other errors pass through. pgxpool replaces broken connections without rebuilding the pool.
 
-The connection lease was removed (#33). Enabling its retired flag still refuses startup until pools are sized for the fleet limit and the variable is unset. Its DynamoDB table can be deleted once no old deployment uses it. For removed settings, rollout and rollback by previous image (no schema change), see [migration notes](connection-pool.md#migration-from-the-old-layer).
-
 ## Pool Metrics Collection
 
 A collector samples `pool.Stat()` every 15 seconds, reporting current gauges and deltas of cumulative counters. It belongs to the connector and is joined on close, including failed startup. See [metrics](metrics.md) for names and precise semantics.
 
 ## Pool Simulator
 
-`tools/poolsim` deliberately models the historical reservoir, refiller and guard window. It is unchanged by the pgxpool migration; its results do not validate the current implementation. See [the simulator README](../../tools/poolsim/README.md) for scenarios and commands.
+`tools/poolsim` models pgxpool lifecycle behavior, a DSQL cluster, connection limiters and phased workloads. Scenarios exercise fleet startup, pool sizing, demand spikes, mass drops, rolling deployments and limiter outages. See [the simulator README](../../tools/poolsim/README.md) for commands and model limitations.
 
 ## Testing
 
@@ -324,11 +288,10 @@ go test -v ./common/persistence/sql/sqlplugin/dsql/...
 
 # Integration tests (requires DSQL cluster)
 export DSQL_TEST_ENDPOINT="your-cluster.dsql.us-east-1.on.aws"
-export AWS_REGION="us-east-1"
 go test ./common/persistence/sql/sqlplugin/dsql/... -tags integration
 ```
 
-The GCRA unit tests use atomic in-memory conditional updates and injected clocks/sleeps. `TestGCRAClockSkew` simulates 40 hosts at offsets from -50 ms to +50 ms over 10 seconds and compares the old algorithm. The bound is 100/sec × 10 seconds + 1000 burst + 10 connections for the full 100 ms clock spread.
+The GCRA unit tests use atomic in-memory conditional updates and injected clocks/sleeps. `TestGCRAClockSkew` simulates 40 hosts at offsets from -50 ms to +50 ms over 10 seconds. The bound is 100/sec × 10 seconds + 1000 burst + 10 connections for the full 100 ms clock spread.
 
 The DynamoDB live test needs a table with a `pk` string key and TTL on `ttl_epoch`, plus normal AWS credentials/region configuration. It writes an isolated random test key and deletes it afterward; it does not open DSQL connections:
 

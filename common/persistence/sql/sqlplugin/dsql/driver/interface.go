@@ -2,8 +2,6 @@ package driver
 
 import (
 	"context"
-
-	"github.com/jmoiron/sqlx"
 )
 
 const (
@@ -12,7 +10,6 @@ const (
 )
 
 type Driver interface {
-	CreateConnection(dsn string) (*sqlx.DB, error)
 	IsDupEntryError(error) bool
 	IsDupDatabaseError(error) bool
 }

@@ -22,7 +22,7 @@ func (f updateItemFunc) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemI
 	return f(ctx, in)
 }
 
-// The fake executes the actual expressions atomically, including old images on
+// The fake executes the actual expressions atomically, including pre-update item values on
 // both success and condition failure. It has no read operation.
 type gcraFake struct {
 	mu      sync.Mutex
@@ -95,7 +95,6 @@ func gcraTestLimiter(t *testing.T, client dynamoDBUpdater) *TokenBucketLimiter {
 }
 
 func TestTokenBucketConfiguration(t *testing.T) {
-	clearSettingsEnv(t)
 	attrs := map[string]string{
 		"region": "us-east-1", "cluster_endpoint": " TEST-ENDPOINT:5432 ",
 		"rate_limiter": "dynamodb_token_bucket", "rate_limiter_table": "test-table",
@@ -105,8 +104,8 @@ func TestTokenBucketConfiguration(t *testing.T) {
 	require.Equal(t, int64(1000), l.Capacity)
 	require.Equal(t, 30*time.Second, l.MaxWait)
 	require.Equal(t, "test-endpoint", l.endpoint)
-	t.Setenv(TokenBucketRateEnvVar, "50")
-	t.Setenv(TokenBucketCapacityEnvVar, "500")
+	attrs["token_bucket_rate"] = "50"
+	attrs["token_bucket_capacity"] = "500"
 	for _, tc := range []struct {
 		value string
 		want  time.Duration
@@ -115,7 +114,7 @@ func TestTokenBucketConfiguration(t *testing.T) {
 		{"500ms", 500 * time.Millisecond},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
-			t.Setenv(TokenBucketMaxWaitEnvVar, tc.value)
+			attrs["token_bucket_max_wait"] = tc.value
 			l := newTokenBucketLimiter(nil, testSettings(t, attrs))
 			require.Equal(t, int64(50), l.Rate)
 			require.Equal(t, int64(500), l.Capacity)
@@ -202,7 +201,7 @@ func TestGCRAIdleRaceAndFailureImage(t *testing.T) {
 	require.True(t, raced)
 	require.Len(t, fake.history, 2)
 	require.Equal(t, int64(10_000), fake.history[1]-fake.history[0])
-	// An idle clock jump also advances, rather than overwrites, the old TAT.
+	// An idle clock jump also advances, rather than overwrites, the stored TAT.
 	l.now = func() time.Time { return time.Unix(1010, 0) }
 	require.NoError(t, l.Wait(t.Context()))
 	require.Greater(t, fake.history[2], fake.history[1])
@@ -314,24 +313,4 @@ func TestGCRAClockSkew(t *testing.T) {
 		require.Greater(t, fake.history[i], fake.history[i-1])
 	}
 
-	// Replay the old algorithm with the same 40 offsets and 10ms demand ticks.
-	// Serialize each read/write pair, giving the old CAS its best case (no
-	// same-millisecond double spends). This schedule admits 2,307 connections.
-	// Backward last_refill_ms still repeatedly
-	// credits the 90ms between the last fast host and the next slow host.
-	tokens, last := int64(1000*1000), base.Add(-50*time.Millisecond).UnixMilli()
-	oldAdmissions := 0
-	for step := 0; step <= steps; step++ {
-		for host := range hosts {
-			offset := -50*time.Millisecond + time.Duration(host)*100*time.Millisecond/(hosts-1)
-			now := base.Add(time.Duration(step)*tick + offset).UnixMilli()
-			refilled := min(int64(1000*1000), tokens+max(int64(0), now-last)*100)
-			if refilled >= 1000 {
-				tokens, last = refilled-1000, now
-				oldAdmissions++
-			}
-		}
-	}
-	require.Greater(t, oldAdmissions, bound)
-	t.Logf("40 hosts, +/-50ms, %s: old=%d new=%d bound=%d", period, oldAdmissions, admissions, bound)
 }

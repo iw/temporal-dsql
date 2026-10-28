@@ -25,7 +25,7 @@ import (
 	"go.temporal.io/server/common/resolver"
 )
 
-// Run with DSQL_TEST_ENDPOINT and AWS_REGION set, using the default AWS credential
+// Run with DSQL_TEST_ENDPOINT set, using the default AWS credential
 // chain and a cluster with the Temporal schema installed:
 //
 // go test -tags integration,disable_grpc_modules,test_dep ./common/persistence/sql/sqlplugin/dsql -run '^TestDSQL(ExecutionMaps|Queues)Integration$' -count=1 -timeout=5m -v
@@ -110,10 +110,6 @@ func newBehaviorIntegrationDB(t *testing.T) (sqlplugin.DB, config.SQL) {
 	if endpoint == "" {
 		t.Skip("set DSQL_TEST_ENDPOINT to run against a live DSQL cluster")
 	}
-	region := os.Getenv("AWS_REGION")
-	require.NotEmpty(t, region, "AWS_REGION must be set")
-	t.Setenv("REGION", region)
-	t.Setenv("CLUSTER_ENDPOINT", endpoint)
 	cfg := config.SQL{
 		PluginName: dsql.PluginName, DatabaseName: "postgres",
 		ConnectAddr: net.JoinHostPort(endpoint, "5432"), ConnectProtocol: "tcp",

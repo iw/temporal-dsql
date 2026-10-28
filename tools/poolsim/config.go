@@ -13,7 +13,7 @@ import (
 
 // Config is the simulation configuration.
 type Config struct {
-	ComparisonConfig `yaml:",inline"`
+	SimulationConfig `yaml:",inline"`
 	Seed             int64 `json:"seed" yaml:"seed"`
 
 	Endpoint string `json:"endpoint" yaml:"endpoint"`
@@ -28,22 +28,15 @@ type Config struct {
 	AssertConvergeWithin    time.Duration `json:"assertConvergeWithin" yaml:"assertConvergeWithin"`
 	AssertStableFor         time.Duration `json:"assertStableFor" yaml:"assertStableFor"`
 	AssertMaxClosurePerSec  int           `json:"assertMaxClosurePerSec" yaml:"assertMaxClosurePerSec"`
-	AssertZeroEmptyEvents   bool          `json:"assertZeroEmptyEvents" yaml:"assertZeroEmptyEvents"`
 
 	Services []ServiceConfig `json:"services" yaml:"services"`
 	Scenario ScenarioConfig  `json:"scenario" yaml:"scenario"`
 }
 
-// ServiceConfig configures a single service's reservoir behavior.
+// ServiceConfig configures a service's pools and workload.
 type ServiceConfig struct {
 	PoolConfig `yaml:",inline"`
 	Name       string `json:"name" yaml:"name"`
-
-	// Reservoir configuration (matches reservoir_config.go)
-	TargetReady  int           `json:"targetReady" yaml:"targetReady"`   // Target reservoir size
-	GuardWindow  time.Duration `json:"guardWindow" yaml:"guardWindow"`   // Discard if remaining < this
-	BaseLifetime time.Duration `json:"baseLifetime" yaml:"baseLifetime"` // Base connection lifetime
-	Jitter       time.Duration `json:"jitter" yaml:"jitter"`             // Lifetime jitter
 
 	// Startup delay (staggered service startup)
 	StartDelay time.Duration `json:"startDelay" yaml:"startDelay"`
@@ -135,26 +128,6 @@ func applyDefaults(cfg *Config) {
 	for i := range cfg.Services {
 		s := &cfg.Services[i]
 
-		// Default: reservoir target = 50 (typical pool size)
-		if s.TargetReady == 0 {
-			s.TargetReady = 50
-		}
-
-		// Default: guard window = 45 seconds
-		if s.GuardWindow == 0 {
-			s.GuardWindow = 45 * time.Second
-		}
-
-		// Default: base lifetime = 11 minutes
-		if s.BaseLifetime == 0 {
-			s.BaseLifetime = 11 * time.Minute
-		}
-
-		// Default: jitter = 2 minutes
-		if s.Jitter == 0 {
-			s.Jitter = 2 * time.Minute
-		}
-
 		// Workload defaults
 		if s.Workload.SpawnEvery == 0 {
 			s.Workload.SpawnEvery = 200 * time.Millisecond
@@ -169,6 +142,7 @@ func applyDefaults(cfg *Config) {
 			s.Workload.HoldTime = 10 * time.Millisecond
 		}
 	}
+	simulationDefaults(cfg)
 }
 
 func validate(cfg *Config) error {
@@ -180,21 +154,10 @@ func validate(cfg *Config) error {
 	}
 
 	for _, s := range cfg.Services {
-		if len(s.Workload.Phases) > 0 && !usesComparison(cfg) {
-			return fmt.Errorf("config: service %s workload phases require the comparison engine; legacy ReservoirWorkload does not support phases", s.Name)
-		}
 		if s.Name == "" {
 			return fmt.Errorf("config: each service needs a name")
 		}
-		if s.TargetReady <= 0 {
-			return fmt.Errorf("config: service %s requires targetReady > 0", s.Name)
-		}
-		if s.BaseLifetime <= 0 {
-			return fmt.Errorf("config: service %s requires baseLifetime > 0", s.Name)
-		}
-		if s.GuardWindow >= s.BaseLifetime {
-			return fmt.Errorf("config: service %s guardWindow must be < baseLifetime", s.Name)
-		}
+
 	}
 
 	switch cfg.Scenario.Kind {
@@ -215,64 +178,19 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("config: unknown scenario.kind %q", cfg.Scenario.Kind)
 	}
 
-	if usesComparison(cfg) {
-		return validateComparison(cfg)
-	}
-	return nil
+	return validateSimulation(cfg)
 }
 
-// DefaultConfig returns a default configuration for local testing.
-// Models 4 Temporal services with reservoir mode.
+// DefaultConfig models four Temporal services with a full warm pool.
 func DefaultConfig() *Config {
-	cfg := &Config{
-		Seed:                    42,
-		Endpoint:                "cluster.dsql.eu-west-1.on.aws",
-		Duration:                20 * time.Minute,
-		SampleEvery:             1 * time.Second,
-		LimiterPerSec:           100,
-		AssertMaxConnectsPerSec: 100,
-		AssertConvergeWithin:    60 * time.Second,
-		AssertStableFor:         5 * time.Second,
-		AssertMaxClosurePerSec:  100,
-		AssertZeroEmptyEvents:   true,
-		Scenario: ScenarioConfig{
-			Kind: "cold_start",
-		},
-		Services: []ServiceConfig{
-			{
-				Name:         "history",
-				TargetReady:  50,
-				GuardWindow:  45 * time.Second,
-				BaseLifetime: 11 * time.Minute,
-				Jitter:       2 * time.Minute,
-				StartDelay:   0,
-			},
-			{
-				Name:         "matching",
-				TargetReady:  50,
-				GuardWindow:  45 * time.Second,
-				BaseLifetime: 11 * time.Minute,
-				Jitter:       2 * time.Minute,
-				StartDelay:   100 * time.Millisecond,
-			},
-			{
-				Name:         "frontend",
-				TargetReady:  50,
-				GuardWindow:  45 * time.Second,
-				BaseLifetime: 11 * time.Minute,
-				Jitter:       2 * time.Minute,
-				StartDelay:   200 * time.Millisecond,
-			},
-			{
-				Name:         "worker",
-				TargetReady:  50,
-				GuardWindow:  45 * time.Second,
-				BaseLifetime: 11 * time.Minute,
-				Jitter:       2 * time.Minute,
-				StartDelay:   300 * time.Millisecond,
-			},
-		},
+	cfg := &Config{Scenario: ScenarioConfig{Kind: "cold_start"}}
+	for j, name := range []string{"history", "matching", "frontend", "worker"} {
+		cfg.Services = append(cfg.Services, ServiceConfig{
+			Name: name, StartDelay: time.Duration(j) * 100 * time.Millisecond,
+			PoolConfig: PoolConfig{PGX: PGXConfig{MaxConns: 100, MinConns: 100, MaxConnLifetimeJitter: 4 * time.Minute}},
+		})
 	}
+	cfg.AssertMaxConnectsPerSec = -1
 	applyDefaults(cfg)
 	return cfg
 }

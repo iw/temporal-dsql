@@ -15,12 +15,6 @@ const (
 	// DefaultConnectionBurstLimit is the default burst capacity per instance.
 	// DSQL cluster burst is 1000, so we default to 100 per instance.
 	DefaultConnectionBurstLimit = 100
-
-	// ConnectionRateLimitEnvVar overrides the default rate limit.
-	ConnectionRateLimitEnvVar = "DSQL_CONNECTION_RATE_LIMIT"
-
-	// ConnectionBurstLimitEnvVar overrides the default burst limit.
-	ConnectionBurstLimitEnvVar = "DSQL_CONNECTION_BURST_LIMIT"
 )
 
 // ConnectionRateLimiter limits the rate of new connection establishment

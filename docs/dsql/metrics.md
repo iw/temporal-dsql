@@ -40,17 +40,11 @@ Service pools retain their full configured size. Ephemeral startup pools have ma
 
 Use limiter logs and connection errors alongside the fallback counter. The eight-slot process-wide semaphore bounds limiter/token calls, not handshakes.
 
-Both distributed limiters fall back to local pacing for 30 seconds after DynamoDB API, throttling or network failures. A warning is logged at most once a minute. During an outage, each process applies `connectAttributes.connection_rate_limit` and `connectAttributes.connection_burst_limit` from the first pool; DSQL rejects fleet excess with 53400 (not attempted). Lower the local burst to reduce excess. Horizon rejection, condition failures and cancellation do not increment the fallback counter. Legacy environment variables still work but are deprecated and will be removed in a future release; see the [migration table](deployment.md#datastore-settings-and-legacy-fallbacks). Configuration errors fail startup, and a later pool with different limiter settings warns once without changing the shared limiter. Alert on sustained fallback activity:
+The token bucket falls back to local pacing for 30 seconds after DynamoDB API, throttling or network failures. A warning is logged at most once a minute. During an outage, each process applies `connectAttributes.connection_rate_limit` and `connectAttributes.connection_burst_limit` from the first pool; DSQL rejects fleet excess with 53400 (not attempted). Lower the local burst to reduce excess. Horizon rejection, condition failures and cancellation do not increment the fallback counter. Configuration errors fail startup, and a later pool with different limiter settings warns once without changing the shared limiter. Alert on sustained fallback activity:
 
 ```promql
 rate(dsql_rate_limiter_fallbacks_total[5m]) > 0
 ```
-
-## Migration notes
-
-Removed metrics: `dsql_reservoir_*`, `dsql_refiller_inflight`, `dsql_db_closed_*`, the old pool keeper metrics (`dsql_pool_keeper_*`), and `dsql_pool_wait_duration`. pgx v5.7.2 exposes cumulative acquire duration, which includes successful immediate acquires as well as waits; it is not a faithful replacement for the old wait-duration timer. Update dashboards and alerts instead of reusing that name.
-
-The slot-block connection lease and its gauges (`dsql_slot_blocks_owned`, `dsql_slot_blocks_slots_used`) were removed (#33). Remove these gauges from dashboards. The retired enable flag still refuses startup: size every pool's `maxConns`, including deploy overlap, to fit the cluster limit, then unset the flag. The lease's DynamoDB table can be deleted once no old deployment uses it.
 
 ## Monitoring and alerts
 
@@ -100,4 +94,4 @@ Investigate sustained acquisition cancellation, waits with a saturated pool, or 
     summary: "DSQL transaction retry budget exhausted"
 ```
 
-Metrics use Temporal's configured backend and inherited service tags. Review [connection pool](connection-pool.md) for rollout, rollback and expiry limitations.
+Metrics use Temporal's configured backend and inherited service tags. Review [connection pool](connection-pool.md) for sizing and expiry limitations.

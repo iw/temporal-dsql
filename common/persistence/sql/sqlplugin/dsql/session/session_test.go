@@ -3,7 +3,6 @@ package session
 import (
 	"net/url"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
@@ -132,7 +131,7 @@ func TestBuildDSN(t *testing.T) {
 		},
 	}
 	mockResolver := &mockServiceResolver{addr: "localhost:5432"}
-	result, err := buildDSN(cfg, mockResolver)
+	result, err := BuildDSN(cfg, mockResolver)
 	require.NoError(t, err)
 	u, err := url.Parse(result)
 	require.NoError(t, err)
@@ -152,7 +151,7 @@ func TestBuildDSN_PasswordEscaping(t *testing.T) {
 		DatabaseName: "testdb",
 	}
 	mockResolver := &mockServiceResolver{addr: "localhost:5432"}
-	result, err := buildDSN(cfg, mockResolver)
+	result, err := BuildDSN(cfg, mockResolver)
 	require.NoError(t, err)
 	parsed, err := url.Parse(result)
 	require.NoError(t, err)
@@ -220,7 +219,7 @@ func TestBuildDSN_PropagatesErrorFromBuildDSNAttr(t *testing.T) {
 		},
 	}
 	mockResolver := &mockServiceResolver{addr: "localhost:5432"}
-	_, err := buildDSN(cfg, mockResolver)
+	_, err := BuildDSN(cfg, mockResolver)
 	require.ErrorContains(t, err, "TLS keyFile is set but TLS certFile is not set")
 }
 
@@ -230,13 +229,4 @@ type mockServiceResolver struct {
 
 func (m *mockServiceResolver) Resolve(addr string) []string {
 	return []string{m.addr}
-}
-
-// Tests for legacy direct-session pool defaults
-
-func TestDSQLPoolDefaults(t *testing.T) {
-	require.Equal(t, 10*time.Minute, DefaultMaxConnLifetime, "MaxConnLifetime should be 10m (aligned to token TTL)")
-	require.Equal(t, time.Duration(0), DefaultMaxConnIdleTime, "MaxConnIdleTime should be 0 (disabled to prevent pool decay)")
-	require.Equal(t, 100, DefaultMaxConns, "DefaultMaxConns should be 100 (for high-throughput workloads)")
-	require.Equal(t, 100, DefaultMaxIdleConns, "DefaultMaxIdleConns should be 100 (MUST equal MaxConns to prevent pool decay)")
 }

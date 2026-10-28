@@ -2,15 +2,9 @@ package driver
 
 import (
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib" // register pgx driver for sqlx
-	"github.com/jmoiron/sqlx"
 )
 
 type PGXDriver struct{}
-
-func (p *PGXDriver) CreateConnection(dsn string) (*sqlx.DB, error) {
-	return sqlx.Connect("pgx", dsn)
-}
 
 func (p *PGXDriver) IsDupEntryError(err error) bool {
 	pgxErr, ok := err.(*pgconn.PgError)
