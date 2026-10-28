@@ -81,8 +81,7 @@
 - **pgxpool** behind `database/sql` — service pools keep `MinConns == MaxConns` (configured `maxConns`, default 100); ephemeral pools use max 5/min 0. A closing connector owns pool and metrics shutdown. Connection failures do not rebuild pools.
 - Lifetime is capped at 50 minutes, with 4 minutes of jitter and 1-minute health checks. `maxIdleConns` is ignored. There are no acquire/release hooks. See the expiry and shutdown limitations in `docs/dsql/connection-pool.md`.
 - A process-wide semaphore of 8 bounds limiter/token calls before each handshake. Background fill uses the same rate limiter as on-demand connections.
-- **Token Bucket Rate Limiter** (opt-in) — DynamoDB-backed, uses DSQL's burst capacity (1000) with 100/sec sustained (overshoots under clock skew: [#40](https://github.com/iw/temporal-dsql/issues/40)). Local and distributed counter modes remain available.
-- **Slot Block Manager / connection lease** — retained but unsupported with pgxpool until [#33](https://github.com/iw/temporal-dsql/issues/33). Enabling the lease refuses to connect at startup.
+- **Token Bucket Rate Limiter** (opt-in) — DynamoDB-backed GCRA reservations, with burst capacity 1000 and 100/sec sustained. Reservations only move forward under clock skew. Both distributed modes fall back to local pacing for 30 seconds on DynamoDB errors; local and distributed counter modes remain available.
 
 #### Observability
 - DSQL-specific metrics (latency, and transaction conflicts, retries and exhaustion)
@@ -116,23 +115,13 @@
 
 **Service pool sizing:** set `maxConns` per pool and `maxConnLifetime: 50m` (or shorter). Every service pool opens its full size in the background and keeps it. The sum across all pools in all Temporal processes must fit the cluster limit (10,000 by default), allowing for rolling deployments and ephemeral pools. Remove `maxIdleConns`; it is ignored. Removed environment settings and rollout/rollback by previous image (no schema change) are documented in `docs/dsql/connection-pool.md`.
 
-**Distributed Rate Limiting with Token Bucket** (opt-in; see [#40](https://github.com/iw/temporal-dsql/issues/40) before enabling):
+**Distributed Rate Limiting with Token Bucket** (opt-in; see `docs/dsql/connection-pool.md` for rollout and outage behavior):
 ```bash
 export DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=true
 export DSQL_DISTRIBUTED_RATE_LIMITER_TABLE=temporal-dsql-rate-limiter
 export DSQL_TOKEN_BUCKET_ENABLED=true
 export DSQL_TOKEN_BUCKET_RATE=100       # Tokens per second (DSQL sustained rate)
 export DSQL_TOKEN_BUCKET_CAPACITY=1000  # Bucket capacity (DSQL burst capacity)
-```
-
-**Distributed Connection Limiting with Slot Blocks — unsupported until [#33](https://github.com/iw/temporal-dsql/issues/33).** The historical settings below are retained for reference; enabling the lease refuses startup with pgxpool:
-```bash
-export DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true
-export DSQL_DISTRIBUTED_CONN_LEASE_TABLE=temporal-dsql-conn-lease
-export DSQL_SLOT_BLOCK_SIZE=100   # Slots per block
-export DSQL_SLOT_BLOCK_COUNT=100  # Total blocks (100 × 100 = 10k slots)
-export DSQL_SLOT_BLOCK_TTL=3m     # TTL for crash recovery
-export DSQL_SLOT_BLOCK_RENEW_INTERVAL=1m
 ```
 
 ### Validation Results

@@ -171,7 +171,7 @@ The old reservoir, pool warmup and pool keeper settings are ignored with one war
 
 ## 5. Distributed Coordination (Multi-Service)
 
-DynamoDB-backed rate limiting can coordinate multiple Temporal processes. It remains opt-in; review [#40](https://github.com/iw/temporal-dsql/issues/40) for known token-bucket clock-skew and failure behavior before enabling it.
+DynamoDB-backed rate limiting can coordinate multiple Temporal processes. It remains opt-in; token bucket mode uses GCRA reservations with monotonic shared state to address [#40](https://github.com/iw/temporal-dsql/issues/40).
 
 ### Token Bucket Rate Limiting
 
@@ -185,9 +185,14 @@ DSQL_DISTRIBUTED_RATE_LIMITER_TABLE=temporal-dsql-rate-limiter
 DSQL_TOKEN_BUCKET_ENABLED=true
 DSQL_TOKEN_BUCKET_RATE=100       # Sustained rate (matches DSQL limit)
 DSQL_TOKEN_BUCKET_CAPACITY=1000  # Burst capacity (matches DSQL burst)
+DSQL_TOKEN_BUCKET_MAX_WAIT=30s   # Maximum reservation wait
 ```
 
 Without token bucket mode, the distributed rate limiter falls back to a simple per-second counter (no burst support). The ECS terraform module currently uses the per-second counter with `DSQL_DISTRIBUTED_RATE_LIMITER_LIMIT=100`.
+
+Both distributed modes use the local `ConnectionRateLimiter` for 30 seconds after DynamoDB API, throttling or network errors, then retry DynamoDB. The local controls are `DSQL_CONNECTION_RATE_LIMIT` (default 10/sec) and `DSQL_CONNECTION_BURST_LIMIT` (default 100). During an outage, every process paces itself locally, so the fleet may exceed DSQL's limits; DSQL rejects the excess with 53400 (not attempted). Lower the local burst if less excess is desired. Condition failures, the GCRA horizon timeout and cancellation do not cause fallback. Warnings are limited to once a minute; monitor `dsql_rate_limiter_fallbacks_total`. Startup fallback on client initialization failure is retained.
+
+GCRA uses `dsql_connect_gcra#<endpoint>`, leaving old `dsql_connect_bucket#<endpoint>` items for TTL cleanup. During mixed-version rollout or rollback, the separate items permit up to twice the configured rate and burst. Monitor 53400 errors and keep the mixed-version interval short. No table migration is needed.
 
 **DynamoDB table setup:**
 
@@ -207,22 +212,21 @@ aws dynamodb update-time-to-live \
 
 **IAM permissions required:**
 
+New hosts need only `UpdateItem`. Retain the old permissions until all old hosts have drained during rollout. The optional live test also needs `DeleteItem` to clean up its test item.
+
 ```json
 {
   "Effect": "Allow",
   "Action": [
-    "dynamodb:GetItem",
-    "dynamodb:PutItem",
-    "dynamodb:UpdateItem",
-    "dynamodb:DeleteItem"
+    "dynamodb:UpdateItem"
   ],
   "Resource": "arn:aws:dynamodb:REGION:ACCOUNT:table/temporal-dsql-rate-limiter"
 }
 ```
 
-### Slot Block Connection Limiting
+### Removed connection lease
 
-Unsupported with pgxpool until [#33](https://github.com/iw/temporal-dsql/issues/33). `DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true` refuses to connect at startup and names #33. The slot-block and lease code remains unwired. Resolve reliance on the old global cap before upgrading; use a capacity budget covering every pool and replica.
+The slot-block connection lease was removed ([#33](https://github.com/iw/temporal-dsql/issues/33)). `DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true` still refuses startup. The sum of `maxConns` across every Temporal process, including deploy overlap, must fit the cluster's connection limit. Leave headroom for ephemeral pools and administration, then unset the enable variable. The other retired settings are [ignored with a warning](connection-pool.md#migration-from-the-old-layer). The lease's DynamoDB table can be deleted once no old deployment uses it; retain the rate-limiter table.
 
 ## 6. Complete Production Configuration
 

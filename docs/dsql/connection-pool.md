@@ -26,7 +26,9 @@ Every physical connection runs `BeforeConnect`, including startup fill and healt
 
 The slot is released when the hook returns, before the handshake. It bounds concurrent limiter calls, including DynamoDB requests, across all pools in the process. The endpoint, `CLUSTER_ENDPOINT`, and `REGION`/`AWS_REGION` settings are unchanged. TLS defaults to `verify-full`, regardless of TLS boolean settings. Hosts need a CA bundle trusting Amazon's certificate authorities; standard bundles and usual base images provide it. An explicit `connectAttributes.sslmode` is honored, with one warning unless it is `verify-full`.
 
-Local rate limiting remains the default (`DSQL_CONNECTION_RATE_LIMIT`, default 10/sec; `DSQL_CONNECTION_BURST_LIMIT`, default 100). With `DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED`, the existing DynamoDB counter or token bucket paces connections across processes. Initialization and fallback behavior are unchanged. The token bucket's clock-skew and failure behavior remain tracked in [#40](https://github.com/iw/temporal-dsql/issues/40).
+Local rate limiting remains the default (`DSQL_CONNECTION_RATE_LIMIT`, default 10/sec; `DSQL_CONNECTION_BURST_LIMIT`, default 100). With `DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED`, the DynamoDB counter or token bucket paces connections across processes. Token bucket mode (`DSQL_TOKEN_BUCKET_ENABLED=true`) uses GCRA reservations: 100/sec sustained, capacity 1000, and a maximum reservation wait of 30 seconds by default. Waiters sleep until their reserved time rather than polling DynamoDB. The shared theoretical arrival time only increases, so clock skew adds a bounded one-time allowance instead of a sustained excess rate.
+
+Both distributed modes fall back to the process's local limiter for 30 seconds after a DynamoDB API, throttling or network error, then try DynamoDB again. Condition failures, reservation horizon errors and context cancellation do not trigger fallback. A warning is emitted at most once a minute, and `dsql_rate_limiter_fallbacks_total` counts calls routed to the local limiter. Startup still falls back locally if the DynamoDB client cannot be created. During a DynamoDB outage, each process paces itself at the local rate; DSQL rejects fleet-wide excess with SQLSTATE 53400, classified as not attempted. Operators who want less excess can lower the local burst.
 
 The cache keeps one reusable token per endpoint, region, user and requested duration. Expiry comes from the signed `X-Amz-Date` plus `X-Amz-Expires`, including any shortening by credentials. Cache hits require 10% of the signed lifetime remaining, with a five-second minimum. Background checks refresh at 80% of the signed lifetime. Malformed or expired tokens are never served. A fresh token already inside the margin can still be used until its signed expiry, with a warning at most once a minute. Credential caching refreshes four to five minutes early using jitter.
 
@@ -65,8 +67,14 @@ These variables are ignored. If any are set, startup emits one warning listing t
 - `DSQL_POOL_KEEPER_MAX_CONNS_PER_TICK`
 - `DSQL_STAGGERED_STARTUP`
 - `DSQL_STAGGERED_STARTUP_MAX_DELAY`
+- `DSQL_DISTRIBUTED_CONN_LEASE_TABLE`
+- `DSQL_DISTRIBUTED_CONN_LIMIT`
+- `DSQL_SLOT_BLOCK_SIZE`
+- `DSQL_SLOT_BLOCK_COUNT`
+- `DSQL_SLOT_BLOCK_TTL`
+- `DSQL_SLOT_BLOCK_RENEW_INTERVAL`
 
-The slot-block and distributed connection-lease implementations remain in the tree, unwired. `DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true` refuses to connect at startup with an error naming [#33](https://github.com/iw/temporal-dsql/issues/33). A deployment relying on that global cap must resolve its capacity plan before upgrading.
+The slot-block connection lease was removed ([#33](https://github.com/iw/temporal-dsql/issues/33)). `DSQL_DISTRIBUTED_CONN_LEASE_ENABLED=true` still refuses startup: size the pools so the sum of `maxConns` across every Temporal process, including old and new replicas overlapping during deploys, fits the cluster's connection limit, then unset the variable. Allow headroom for ephemeral pools and administration. The lease's DynamoDB table can be deleted once no old deployment uses it; keep the separate rate-limiter table.
 
 ## Rollout and rollback
 
@@ -74,7 +82,9 @@ The slot-block and distributed connection-lease implementations remain in the tr
 
 Ensure every host has a CA bundle trusting Amazon's certificate authorities for the new `verify-full` default, and that `connectAddr` names the cluster's endpoint host rather than an IP address or alias. Remove configured passwords and unnecessary `sslmode: require` overrides. Schema setup and upgrades continue to use `temporal-dsql-tool --user admin`.
 
-Budget all pool sizes, including old and new replicas during rollout. Remove ignored variables, set `maxConnLifetime` to 50 minutes or less, and remove `maxIdleConns`. Keep rate-limiter configuration. Resolve any reliance on connection leasing before disabling it.
+Budget all pool sizes, including old and new replicas during rollout. Remove ignored variables, set `maxConnLifetime` to 50 minutes or less, and remove `maxIdleConns`. Keep rate-limiter configuration. Apply the fleet sizing rule above before unsetting the removed lease flag.
+
+Token bucket reservations use the new `dsql_connect_gcra#<endpoint>` item in the existing table (`pk` string key, TTL on `ttl_epoch`). The plugin never reads the old `dsql_connect_bucket#<endpoint>` item; its TTL removes it. During a mixed-version rollout or rollback, old and new hosts use separate items and the fleet can admit up to twice the configured rate and burst. DSQL rejects excess connections with 53400, which the plugin treats as not attempted. Keep mixed-version overlap short and monitor connection throttling.
 
 Roll one process at a time. Watch `dsql_pool_open`, `dsql_pool_constructing`, `dsql_pool_wait_total`, canceled acquires, and connection errors. A successful startup ping does not mean the background fill is complete. Check `open - constructing` against the expected size before advancing the rollout. See [metrics](metrics.md).
 

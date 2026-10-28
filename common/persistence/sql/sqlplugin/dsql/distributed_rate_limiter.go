@@ -51,7 +51,7 @@ const (
 // pgxpool BeforeConnect hook to rate-limit all connection attempts, including
 // pool growth initiated by database/sql internally.
 type DistributedRateLimiter struct {
-	ddb       *dynamodb.Client
+	ddb       dynamoDBUpdater
 	tableName string
 	endpoint  string
 
@@ -194,7 +194,7 @@ func (l *DistributedRateLimiter) tryAcquireOnce(ctx context.Context, sec int64, 
 		if isConditionalFail(err) {
 			return false, err
 		}
-		return false, err
+		return false, &dynamoDBLimiterError{err: err}
 	}
 
 	return true, nil

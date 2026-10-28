@@ -50,10 +50,8 @@ common/persistence/sql/sqlplugin/dsql/
 ├── connection_pool.go             # pgxpool config, hooks, connector ownership
 ├── connection_rate_limiter.go     # Local (per-instance) rate limiting
 ├── distributed_rate_limiter.go    # DynamoDB-backed distributed rate limiting
-├── token_bucket_limiter.go        # Token bucket rate limiter (recommended for production)
-├── slot_block_manager.go          # Block-based connection leasing (unwired, #33)
-├── conn_lease_config.go           # Connection lease configuration
-├── distributed_conn_lease.go      # Global connection leasing (unwired, #33)
+├── token_bucket_limiter.go        # GCRA reservations for distributed burst/rate control
+├── rate_limiter_fallback.go       # Local fallback on DynamoDB errors
 ├── uuid.go                        # UUID string conversion utilities
 ├── typeconv.go                    # DateTime conversion
 ├── types.go                       # Shared type definitions
@@ -406,19 +404,29 @@ The plugin supports three rate limiting modes, selected via environment variable
 | Per-Second Counter | `DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=true` + `DSQL_TOKEN_BUCKET_ENABLED=false` | DynamoDB-backed, no burst support |
 | Local | `DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=false` (default) | Per-instance `rate.Limiter`, requires manual budget partitioning |
 
-See [deployment](deployment.md#5-distributed-coordination-multi-service) for the unchanged limiter settings and known #40 limitations.
+Token bucket mode stores `tat_us` (the next theoretical arrival time in Unix microseconds) and `ttl_epoch` in one `dsql_connect_gcra#<endpoint>` item, using the existing table's string `pk`. With emission interval `T = 1 second / rate`, burst tolerance `tau = (capacity - 1) * T`, and horizon `tau + maxWait`:
+
+1. A busy `UpdateItem` atomically adds `T` when `tat_us BETWEEN t AND t + horizon`, returning `UPDATED_OLD` and `ALL_OLD` on condition failure. The caller sleeps until `max(t, old tat_us - tau)`, respecting cancellation.
+2. A missing or older TAT uses an idle conditional update to `t + T`. If another host wins, retry the busy update. At most four busy/idle attempts are made.
+3. A TAT beyond the horizon rejects the reservation. `BeforeConnect` wraps that failure as connection throttling.
+
+Non-divisor rates round the interval up to a microsecond to avoid exceeding the configured rate; rates above one million/sec and overflowing horizons are rejected. Each successful update increases TAT, including same-microsecond writes. Clock skew shifts admission times with a one-time allowance bounded by the clock spread times the rate. Canceled reservations remain spent; reclaiming them could admit twice. A crash therefore wastes only outstanding reservations until their times pass. Busy callers perform one atomic write and sleep locally; initialization and idle races require extra conditional writes. The table remains a single hot key and DynamoDB throttling is still possible at high load.
+
+`rate_limiter_fallback.go` wraps either distributed mode. Only failures originating from DynamoDB calls can open the 30-second local fallback window; condition failures and context cancellation are excluded. Limiter policy errors, including the horizon limit, propagate unchanged. Calls during the window use `ConnectionRateLimiter`; after expiry DynamoDB is tried again. Logging is limited to once a minute and `dsql_rate_limiter_fallbacks_total` counts calls routed locally. Startup fallback on client creation failure is unchanged. During a DynamoDB outage, each process applies its own rate and burst; DSQL rejects fleet-wide excess with 53400 (not attempted). Lower the local burst to reduce that excess.
+
+The old bucket item is never read and expires through TTL. Mixed-version rollout or rollback uses two independent items and can temporarily double the configured fleet rate and burst; DSQL rejects excess with 53400. See [deployment](deployment.md#5-distributed-coordination-multi-service) for settings and table permissions.
 
 ## Connection Pool
 
 `CreateDB` preserves the `cfg.Connect` test hook. Otherwise it builds a DSN with `session.BuildDSN`, parses a pgxpool config, creates a pool and pings once with a 30-second timeout. Default database names are still tried in order. A failed ping closes the new pool. There is no startup sleep or wait for the background fill.
 
-Service pools use `MinConns == MaxConns == maxConns` (default 100). Ephemeral pools use max 5/min 0. Lifetime is capped at 50 minutes, with four minutes of jitter and one-minute health checks; shorter configured lifetimes apply. No acquire/release hooks are installed. `maxIdleConns` is ignored. The sum of service pool sizes across every process must fit the cluster connection limit, 10,000 by default.
+Service pools use `MinConns == MaxConns == maxConns` (default 100). Ephemeral pools use max 5/min 0. Lifetime is capped at 50 minutes, with four minutes of jitter and one-minute health checks; shorter configured lifetimes apply. No acquire/release hooks are installed. `maxIdleConns` is ignored. The sum of `maxConns` across every Temporal process, including deploy overlap, must fit the cluster connection limit, 10,000 by default, with headroom for ephemeral pools and administration.
 
 The `sql.DB` uses a closing wrapper around `stdlib.GetPoolConnector`, zero idle connections and unlimited open connections. It retains pgx driver fast paths and sqlx's snake-case mapper. The connector cancels hook waits, joins metrics collection, and closes pgxpool when the handle closes. Stock pgxpool internal health-check notifications can finish asynchronously. See [connection pool](connection-pool.md) for lifecycle and expiry limitations.
 
 `DatabaseHandle` receives an always-false refresh predicate. `maybeConvertError` performs its own mapping without calling the upstream `ConvertError`: limiter failures and 53300/53400 become overload; socket errors, `pgconn.ConnectError`, class 08 and IAM access denied become unavailable; 40001/0A000 remain raw; 54000 becomes a size-limit error. Other errors pass through. pgxpool replaces broken connections without rebuilding the pool.
 
-Connection leasing is unwired, and enabling it refuses to connect with an error naming #33. The old implementation remains for a separate decision. For removed settings, rollout and rollback by previous image (no schema change), see [migration notes](connection-pool.md#migration-from-the-old-layer).
+The connection lease was removed (#33). Enabling its retired flag still refuses startup until pools are sized for the fleet limit and the variable is unset. Its DynamoDB table can be deleted once no old deployment uses it. For removed settings, rollout and rollback by previous image (no schema change), see [migration notes](connection-pool.md#migration-from-the-old-layer).
 
 ## Pool Metrics Collection
 
@@ -442,3 +450,13 @@ export DSQL_TEST_ENDPOINT="your-cluster.dsql.us-east-1.on.aws"
 export AWS_REGION="us-east-1"
 go test ./common/persistence/sql/sqlplugin/dsql/... -tags integration
 ```
+
+The GCRA unit tests use atomic in-memory conditional updates and injected clocks/sleeps. `TestGCRAClockSkew` simulates 40 hosts at offsets from -50 ms to +50 ms over 10 seconds and compares the old algorithm. The bound is 100/sec × 10 seconds + 1000 burst + 10 connections for the full 100 ms clock spread.
+
+The DynamoDB live test needs a table with a `pk` string key and TTL on `ttl_epoch`, plus normal AWS credentials/region configuration. It writes an isolated random test key and deletes it afterward; it does not open DSQL connections:
+
+```bash
+DSQL_TEST_DDB_TABLE=<table-name> AWS_REGION=<region> go test -tags integration,disable_grpc_modules,test_dep ./common/persistence/sql/sqlplugin/dsql -run '^TestGCRADynamoDBIntegration$' -count=1 -v
+```
+
+It skips when `DSQL_TEST_DDB_TABLE` is unset.
