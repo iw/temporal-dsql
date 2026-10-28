@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	_ "go.temporal.io/server/common/persistence/sql/sqlplugin/dsql" // needed to load dsql plugin alias
+	_ "go.temporal.io/server/common/persistence/sql/sqlplugin/dsql" // needed to load dsql plugin
 	"go.temporal.io/server/tools/dsql"
 )
 

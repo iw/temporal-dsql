@@ -20,6 +20,7 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 | [Connection Pool](connection-pool.md) | Pool sizing, lifetime, rollout and rollback |
 | [Implementation Details](implementation.md) | Code structure, schema changes, transaction retries, shard ownership checks and batched deletion |
 | [Metrics Reference](metrics.md) | Emitted metrics and alerting recommendations |
+| [Upstream Changes](upstream-changes.md) | Changes outside fork-owned packages and their path upstream |
 
 ## Quick Reference
 

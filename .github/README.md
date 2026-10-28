@@ -16,7 +16,7 @@ This is a community distribution of [Temporal](https://github.com/temporalio/tem
 
 DSQL holds the persistence store only. Visibility needs a separate store, such as OpenSearch, Elasticsearch, PostgreSQL, MySQL or SQLite.
 
-The fork also changes some upstream code to work within DSQL's limits, such as transaction retries and the history and queue range deletes.
+The fork also changes some upstream code to work within DSQL's limits, such as transaction retries and the history and queue range deletes. See [upstream changes](../docs/dsql/upstream-changes.md) for what remains and its path forward.
 
 ## Compatibility
 

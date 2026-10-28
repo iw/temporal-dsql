@@ -88,10 +88,8 @@ func (task *SetupTask) Run() error {
 	if !config.DisableVersioning {
 		currVer, err := task.db.ReadSchemaVersion()
 		if err != nil {
-			task.logger.Info("Error reading schema version, defaulting to 0.0", tag.Error(err))
 			currVer = "0.0"
 		}
-		task.logger.Info("Current schema version", tag.NewStringTag("version", currVer))
 
 		currVerParsed, err := semver.ParseTolerant(currVer)
 		if err != nil {
@@ -110,22 +108,18 @@ func (task *SetupTask) Run() error {
 		}
 
 		if currVerParsed.GT(initialVersionParsed) {
-			task.logger.Info(fmt.Sprintf("Current database schema version %v is greater than initial schema version %v. Skip version upgrade", currVer, config.InitialVersion))
+			task.logger.Debug(fmt.Sprintf("Current database schema version %v is greater than initial schema version %v. Skip version upgrade", currVer, config.InitialVersion))
 		} else {
-			task.logger.Info(fmt.Sprintf("Setting initial schema version to %v", config.InitialVersion))
+			task.logger.Debug(fmt.Sprintf("Setting initial schema version to %v", config.InitialVersion))
 			err := task.db.UpdateSchemaVersion(config.InitialVersion, config.InitialVersion)
 			if err != nil {
-				task.logger.Error("Failed to update schema version", tag.Error(err))
 				return err
 			}
-			task.logger.Info("Schema version updated successfully")
-			task.logger.Info("Updating schema update log")
+			task.logger.Debug("Updating schema update log")
 			err = task.db.WriteSchemaUpdateLog("0", config.InitialVersion, "", "initial version")
 			if err != nil {
-				task.logger.Error("Failed to write schema update log", tag.Error(err))
 				return err
 			}
-			task.logger.Info("Schema update log written successfully")
 		}
 	}
 

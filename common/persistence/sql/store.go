@@ -25,22 +25,6 @@ func RegisterPlugin(pluginName string, plugin sqlplugin.Plugin) {
 	supportedPlugins[pluginName] = plugin
 }
 
-// RegisterPluginAlias registers an alias for an already-registered plugin.
-// Panics if the alias already exists or the target plugin is not registered.
-func RegisterPluginAlias(alias string, target string) {
-	if supportedPlugins == nil {
-		supportedPlugins = make(map[string]sqlplugin.Plugin)
-	}
-	if _, ok := supportedPlugins[alias]; ok {
-		panic("plugin " + alias + " already registered")
-	}
-	targetPlugin, ok := supportedPlugins[target]
-	if !ok {
-		panic("plugin " + target + " not registered")
-	}
-	supportedPlugins[alias] = targetPlugin
-}
-
 // NewSQLDB creates a returns a reference to a logical connection to the
 // underlying SQL database. The returned object is tied to a single
 // SQL database and the object can be used to perform CRUD operations on

@@ -31,6 +31,13 @@ const (
 	backgroundRefreshInterval = 10 * time.Second
 )
 
+var (
+	dsqlTokenCacheHits       = metrics.NewCounterDef("dsql_token_cache_hits")
+	dsqlTokenCacheMisses     = metrics.NewCounterDef("dsql_token_cache_misses")
+	dsqlTokenRefreshes       = metrics.NewCounterDef("dsql_token_refreshes")
+	dsqlTokenRefreshFailures = metrics.NewCounterDef("dsql_token_refresh_failures")
+)
+
 type poolKey struct {
 	host          string
 	region        string
@@ -306,25 +313,25 @@ func (tc *TokenCache) Size() int {
 // Metrics helpers
 func (tc *TokenCache) recordCacheHit() {
 	if tc.metricsHandler != nil {
-		metrics.DSQLTokenCacheHits.With(tc.metricsHandler).Record(1)
+		dsqlTokenCacheHits.With(tc.metricsHandler).Record(1)
 	}
 }
 
 func (tc *TokenCache) recordCacheMiss() {
 	if tc.metricsHandler != nil {
-		metrics.DSQLTokenCacheMisses.With(tc.metricsHandler).Record(1)
+		dsqlTokenCacheMisses.With(tc.metricsHandler).Record(1)
 	}
 }
 
 func (tc *TokenCache) recordTokenRefresh() {
 	if tc.metricsHandler != nil {
-		metrics.DSQLTokenRefreshes.With(tc.metricsHandler).Record(1)
+		dsqlTokenRefreshes.With(tc.metricsHandler).Record(1)
 	}
 }
 
 func (tc *TokenCache) recordTokenRefreshFailure() {
 	if tc.metricsHandler != nil {
-		metrics.DSQLTokenRefreshFailures.With(tc.metricsHandler).Record(1)
+		dsqlTokenRefreshFailures.With(tc.metricsHandler).Record(1)
 	}
 }
 
