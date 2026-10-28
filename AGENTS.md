@@ -100,7 +100,8 @@
 #### Tooling
 - `tools/poolsim/` - Discrete event simulator for pgxpool, DSQL limits and workload scenarios
 - `tools/dsql/` - DSQL schema management tool
-- `.dagger/modules/ci/` - Dagger CI module: `dagger call ci build|lint|test|live`
+- `.dagger/modules/ci/` - Dagger CI module: `dagger call ci build|lint|test`
+- `.dagger/live/` - Rust program for the DSQL live tests on throwaway AWS resources, run locally with the `temporal-dsql-ci` profile
 
 ### Known Constraints
 

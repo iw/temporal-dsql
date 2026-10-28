@@ -1,5 +1,5 @@
 {
-  "descriptor_digest": "sha256:b4c130e7dc736f0e56cbbbf1d620ec188633cb9ccce0b3cf00e11c8ae0a539fe",
+  "descriptor_digest": "sha256:3a30ce3b3b89e04b8ae235646de1c6c1aadf9f1c6ecb771a9353c26e07c5e0dc",
   "format_version": 1,
   "types": {
     "Ci": {
@@ -20,7 +20,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 62,
+                "line": 57,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -45,7 +45,7 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 58,
+            "line": 53,
             "path": "src/lib.rs"
           },
           "wire_name": "build"
@@ -62,7 +62,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 76,
+                "line": 71,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -87,152 +87,10 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 70,
+            "line": 65,
             "path": "src/lib.rs"
           },
           "wire_name": "lint"
-        },
-        {
-          "arguments": [
-            {
-              "default": "eu-west-1",
-              "default_address": null,
-              "default_path": null,
-              "deprecation": null,
-              "documentation": "Region for the throwaway resources.",
-              "ignore": [],
-              "optional": true,
-              "source": {
-                "column": 9,
-                "line": 168,
-                "path": "src/lib.rs"
-              },
-              "ty": {
-                "kind": "named",
-                "name": "String",
-                "nullable": false
-              },
-              "wire_name": "region"
-            },
-            {
-              "default": null,
-              "default_address": null,
-              "default_path": null,
-              "deprecation": null,
-              "documentation": "ARN of the role to assume with the web identity token; a secret, so logs don't show the account.",
-              "ignore": [],
-              "optional": true,
-              "source": {
-                "column": 9,
-                "line": 172,
-                "path": "src/lib.rs"
-              },
-              "ty": {
-                "kind": "named",
-                "name": "Secret",
-                "nullable": true
-              },
-              "wire_name": "roleArn"
-            },
-            {
-              "default": null,
-              "default_address": null,
-              "default_path": null,
-              "deprecation": null,
-              "documentation": "Web identity token for the role, such as a Buildkite OIDC token.",
-              "ignore": [],
-              "optional": true,
-              "source": {
-                "column": 9,
-                "line": 174,
-                "path": "src/lib.rs"
-              },
-              "ty": {
-                "kind": "named",
-                "name": "Secret",
-                "nullable": true
-              },
-              "wire_name": "webIdentityToken"
-            },
-            {
-              "default": null,
-              "default_address": null,
-              "default_path": null,
-              "deprecation": null,
-              "documentation": "Access key ID, when no role is given.",
-              "ignore": [],
-              "optional": true,
-              "source": {
-                "column": 66,
-                "line": 175,
-                "path": "src/lib.rs"
-              },
-              "ty": {
-                "kind": "named",
-                "name": "Secret",
-                "nullable": true
-              },
-              "wire_name": "awsAccessKeyId"
-            },
-            {
-              "default": null,
-              "default_address": null,
-              "default_path": null,
-              "deprecation": null,
-              "documentation": "Secret access key, when no role is given.",
-              "ignore": [],
-              "optional": true,
-              "source": {
-                "column": 70,
-                "line": 176,
-                "path": "src/lib.rs"
-              },
-              "ty": {
-                "kind": "named",
-                "name": "Secret",
-                "nullable": true
-              },
-              "wire_name": "awsSecretAccessKey"
-            },
-            {
-              "default": null,
-              "default_address": null,
-              "default_path": null,
-              "deprecation": null,
-              "documentation": "Session token, for a temporary access key.",
-              "ignore": [],
-              "optional": true,
-              "source": {
-                "column": 71,
-                "line": 179,
-                "path": "src/lib.rs"
-              },
-              "ty": {
-                "kind": "named",
-                "name": "Secret",
-                "nullable": true
-              },
-              "wire_name": "awsSessionToken"
-            }
-          ],
-          "cache": {
-            "kind": "never"
-          },
-          "constructor": false,
-          "deprecation": null,
-          "documentation": "Runs the DSQL plugin's live tests on a throwaway Aurora DSQL cluster and DynamoDB\ntable, and deletes both however the run ends. Pass a role and a web identity token,\nas CI does, or an access key.",
-          "return_type": {
-            "kind": "named",
-            "name": "String",
-            "nullable": false
-          },
-          "role": "ordinary",
-          "source": {
-            "column": 18,
-            "line": 164,
-            "path": "src/lib.rs"
-          },
-          "wire_name": "live"
         },
         {
           "arguments": [
@@ -246,7 +104,7 @@
               "optional": true,
               "source": {
                 "column": 81,
-                "line": 125,
+                "line": 120,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -270,7 +128,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 129,
+                "line": 124,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -295,7 +153,7 @@
           "role": "ordinary",
           "source": {
             "column": 18,
-            "line": 122,
+            "line": 117,
             "path": "src/lib.rs"
           },
           "wire_name": "test"
@@ -305,7 +163,7 @@
       "kind": "object",
       "source": {
         "column": 12,
-        "line": 33,
+        "line": 28,
         "path": "src/lib.rs"
       },
       "wire_name": "Ci"
@@ -349,7 +207,7 @@
               "optional": true,
               "source": {
                 "column": 9,
-                "line": 51,
+                "line": 46,
                 "path": "src/lib.rs"
               },
               "ty": {
@@ -374,7 +232,7 @@
           "role": "ordinary",
           "source": {
             "column": 12,
-            "line": 41,
+            "line": 36,
             "path": "src/lib.rs"
           },
           "wire_name": "ci"
@@ -384,7 +242,7 @@
       "kind": "object",
       "source": {
         "column": 12,
-        "line": 41,
+        "line": 36,
         "path": "src/lib.rs"
       },
       "wire_name": "Query"

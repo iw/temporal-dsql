@@ -1,7 +1,8 @@
 # Runs the ci module (docs/dsql/ci.md) on Namespace's Buildkite agents. Each step starts
 # the pinned engine and keeps its state on a Namespace cache volume, so the build cache
 # outlives the job, and stops the engine before the job ends so the volume is saved after
-# a clean shutdown. `$$` defers expansion to the job's shell.
+# a clean shutdown. `$$` defers expansion to the job's shell. Builds leave AWS out: the
+# live tests run on a developer's machine.
 
 agents:
   nsc-shape: "8x32"
@@ -62,27 +63,3 @@ steps:
     notify:
       - github_commit_status:
           context: "buildkite/test"
-
-  # Creates a throwaway DSQL cluster and DynamoDB table, runs the live tests, and deletes
-  # both. The job's OIDC token assumes the role that TEMPORAL_DSQL_CI_ROLE_ARN names, which
-  # the job's environment gets from Namespace Vault or the pipeline's settings.
-  - label: ":aws: live"
-    key: live
-    # Live runs share the account's DSQL quotas.
-    concurrency: 2
-    concurrency_group: "temporal-dsql/live"
-    command: |
-      : "$${TEMPORAL_DSQL_CI_ROLE_ARN:?set the CI role's ARN in the job's environment}"
-      eval "$$(.dagger/engine.sh)"
-      trap '.dagger/engine.sh stop' EXIT
-      TEMPORAL_DSQL_CI_TOKEN="$$(buildkite-agent oidc request-token --audience sts.amazonaws.com --lifetime 1800)"
-      export TEMPORAL_DSQL_CI_TOKEN
-      dagger call ci live --role-arn env://TEMPORAL_DSQL_CI_ROLE_ARN \
-        --web-identity-token env://TEMPORAL_DSQL_CI_TOKEN
-    agents:
-      nsc-cache-tag: "temporal-dsql-live"
-      nsc-cache-size: "50gb"
-    timeout_in_minutes: 45
-    notify:
-      - github_commit_status:
-          context: "buildkite/live"
