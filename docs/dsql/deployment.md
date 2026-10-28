@@ -77,9 +77,10 @@ After schema setup, connect as `admin` and run these statements individually to 
 ```sql
 CREATE ROLE temporal WITH LOGIN;
 AWS IAM GRANT temporal TO 'arn:aws:iam::<account-id>:role/<temporal-role>';
-GRANT USAGE ON SCHEMA public TO temporal;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO temporal;
 ```
+
+No schema grant is needed: every role already has `USAGE` on `public`, and DSQL rejects `GRANT ... ON SCHEMA public` because `public` is a system schema.
 
 Configure `sql.user: temporal`. Each Temporal host's IAM identity needs `dsql:DbConnect` on the cluster ARN instead of `dsql:DbConnectAdmin`. Schema setup and upgrades still run as `admin` (`temporal-dsql-tool --user admin`) with the administrative IAM permission. Tables created later need the table grant again after setup or an upgrade.
 
