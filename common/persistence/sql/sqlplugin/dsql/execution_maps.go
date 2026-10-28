@@ -143,34 +143,32 @@ func (pdb *db) ReplaceIntoActivityInfoMaps(
 	ctx context.Context,
 	rows []sqlplugin.ActivityInfoMapsRow,
 ) (sql.Result, error) {
-	// For DSQL, we need to convert UUID fields to strings
-	// Since NamedExecContext uses struct field binding, we need to handle this differently
-	for _, row := range rows {
-		namespaceIDStr := row.NamespaceID.String()
-		workflowIDStr := row.WorkflowID
-		runIDStr := row.RunID.String()
-		
-		_, err := pdb.ExecContext(ctx,
-			`INSERT INTO activity_info_maps
-(shard_id, namespace_id, workflow_id, run_id, schedule_id, data, data_encoding)
-VALUES
-($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (shard_id, namespace_id, workflow_id, run_id, schedule_id) DO UPDATE
-	SET (shard_id, namespace_id, workflow_id, run_id, schedule_id, data, data_encoding)
-  	  = (excluded.shard_id, excluded.namespace_id, excluded.workflow_id, excluded.run_id, excluded.schedule_id, excluded.data, excluded.data_encoding)`,
-			row.ShardID,
-			namespaceIDStr,
-			workflowIDStr,
-			runIDStr,
-			row.ScheduleID,
-			row.Data,
-			row.DataEncoding,
-		)
-		if err != nil {
-			return nil, err
-		}
+	if len(rows) == 0 {
+		return nil, nil
 	}
-	return nil, nil // Return dummy result since we can't return actual result from multiple inserts
+
+	type insertRow struct {
+		ShardID      int32  `db:"shard_id"`
+		NamespaceID  string `db:"namespace_id"`
+		WorkflowID   string `db:"workflow_id"`
+		RunID        string `db:"run_id"`
+		ScheduleID   int64  `db:"schedule_id"`
+		Data         []byte `db:"data"`
+		DataEncoding string `db:"data_encoding"`
+	}
+	insertRows := make([]insertRow, 0, len(rows))
+	for _, row := range rows {
+		insertRows = append(insertRows, insertRow{
+			ShardID:      row.ShardID,
+			NamespaceID:  row.NamespaceID.String(),
+			WorkflowID:   row.WorkflowID,
+			RunID:        row.RunID.String(),
+			ScheduleID:   row.ScheduleID,
+			Data:         row.Data,
+			DataEncoding: row.DataEncoding,
+		})
+	}
+	return pdb.NamedExecContext(ctx, setKeyInActivityInfoMapQry, insertRows)
 }
 
 // SelectAllFromActivityInfoMaps reads all rows from activity_info_maps table
@@ -252,33 +250,32 @@ func (pdb *db) ReplaceIntoTimerInfoMaps(
 	ctx context.Context,
 	rows []sqlplugin.TimerInfoMapsRow,
 ) (sql.Result, error) {
-	// For DSQL, we need to convert UUID fields to strings
-	for _, row := range rows {
-		namespaceIDStr := row.NamespaceID.String()
-		workflowIDStr := row.WorkflowID
-		runIDStr := row.RunID.String()
-		
-		_, err := pdb.ExecContext(ctx,
-			`INSERT INTO timer_info_maps
-(shard_id, namespace_id, workflow_id, run_id, timer_id, data, data_encoding)
-VALUES
-($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (shard_id, namespace_id, workflow_id, run_id, timer_id) DO UPDATE
-	SET (shard_id, namespace_id, workflow_id, run_id, timer_id, data, data_encoding)
-  	  = (excluded.shard_id, excluded.namespace_id, excluded.workflow_id, excluded.run_id, excluded.timer_id, excluded.data, excluded.data_encoding)`,
-			row.ShardID,
-			namespaceIDStr,
-			workflowIDStr,
-			runIDStr,
-			row.TimerID,
-			row.Data,
-			row.DataEncoding,
-		)
-		if err != nil {
-			return nil, err
-		}
+	if len(rows) == 0 {
+		return nil, nil
 	}
-	return nil, nil
+
+	type insertRow struct {
+		ShardID      int32  `db:"shard_id"`
+		NamespaceID  string `db:"namespace_id"`
+		WorkflowID   string `db:"workflow_id"`
+		RunID        string `db:"run_id"`
+		TimerID      string `db:"timer_id"`
+		Data         []byte `db:"data"`
+		DataEncoding string `db:"data_encoding"`
+	}
+	insertRows := make([]insertRow, 0, len(rows))
+	for _, row := range rows {
+		insertRows = append(insertRows, insertRow{
+			ShardID:      row.ShardID,
+			NamespaceID:  row.NamespaceID.String(),
+			WorkflowID:   row.WorkflowID,
+			RunID:        row.RunID.String(),
+			TimerID:      row.TimerID,
+			Data:         row.Data,
+			DataEncoding: row.DataEncoding,
+		})
+	}
+	return pdb.NamedExecContext(ctx, setKeyInTimerInfoMapSQLQuery, insertRows)
 }
 
 // SelectAllFromTimerInfoMaps reads all rows from timer_info_maps table
@@ -361,33 +358,32 @@ func (pdb *db) ReplaceIntoChildExecutionInfoMaps(
 	ctx context.Context,
 	rows []sqlplugin.ChildExecutionInfoMapsRow,
 ) (sql.Result, error) {
-	// For DSQL, we need to convert UUID fields to strings
-	for _, row := range rows {
-		namespaceIDStr := row.NamespaceID.String()
-		workflowIDStr := row.WorkflowID
-		runIDStr := row.RunID.String()
-		
-		_, err := pdb.ExecContext(ctx,
-			`INSERT INTO child_execution_info_maps
-(shard_id, namespace_id, workflow_id, run_id, initiated_id, data, data_encoding)
-VALUES
-($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (shard_id, namespace_id, workflow_id, run_id, initiated_id) DO UPDATE
-	SET (shard_id, namespace_id, workflow_id, run_id, initiated_id, data, data_encoding)
-  	  = (excluded.shard_id, excluded.namespace_id, excluded.workflow_id, excluded.run_id, excluded.initiated_id, excluded.data, excluded.data_encoding)`,
-			row.ShardID,
-			namespaceIDStr,
-			workflowIDStr,
-			runIDStr,
-			row.InitiatedID,
-			row.Data,
-			row.DataEncoding,
-		)
-		if err != nil {
-			return nil, err
-		}
+	if len(rows) == 0 {
+		return nil, nil
 	}
-	return nil, nil
+
+	type insertRow struct {
+		ShardID      int32  `db:"shard_id"`
+		NamespaceID  string `db:"namespace_id"`
+		WorkflowID   string `db:"workflow_id"`
+		RunID        string `db:"run_id"`
+		InitiatedID  int64  `db:"initiated_id"`
+		Data         []byte `db:"data"`
+		DataEncoding string `db:"data_encoding"`
+	}
+	insertRows := make([]insertRow, 0, len(rows))
+	for _, row := range rows {
+		insertRows = append(insertRows, insertRow{
+			ShardID:      row.ShardID,
+			NamespaceID:  row.NamespaceID.String(),
+			WorkflowID:   row.WorkflowID,
+			RunID:        row.RunID.String(),
+			InitiatedID:  row.InitiatedID,
+			Data:         row.Data,
+			DataEncoding: row.DataEncoding,
+		})
+	}
+	return pdb.NamedExecContext(ctx, setKeyInChildExecutionInfoMapQry, insertRows)
 }
 
 // SelectAllFromChildExecutionInfoMaps reads all rows from child_execution_info_maps table
@@ -470,33 +466,32 @@ func (pdb *db) ReplaceIntoRequestCancelInfoMaps(
 	ctx context.Context,
 	rows []sqlplugin.RequestCancelInfoMapsRow,
 ) (sql.Result, error) {
-	// For DSQL, we need to convert UUID fields to strings
-	for _, row := range rows {
-		namespaceIDStr := row.NamespaceID.String()
-		workflowIDStr := row.WorkflowID
-		runIDStr := row.RunID.String()
-		
-		_, err := pdb.ExecContext(ctx,
-			`INSERT INTO request_cancel_info_maps
-(shard_id, namespace_id, workflow_id, run_id, initiated_id, data, data_encoding)
-VALUES
-($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (shard_id, namespace_id, workflow_id, run_id, initiated_id) DO UPDATE
-	SET (shard_id, namespace_id, workflow_id, run_id, initiated_id, data, data_encoding)
-  	  = (excluded.shard_id, excluded.namespace_id, excluded.workflow_id, excluded.run_id, excluded.initiated_id, excluded.data, excluded.data_encoding)`,
-			row.ShardID,
-			namespaceIDStr,
-			workflowIDStr,
-			runIDStr,
-			row.InitiatedID,
-			row.Data,
-			row.DataEncoding,
-		)
-		if err != nil {
-			return nil, err
-		}
+	if len(rows) == 0 {
+		return nil, nil
 	}
-	return nil, nil
+
+	type insertRow struct {
+		ShardID      int32  `db:"shard_id"`
+		NamespaceID  string `db:"namespace_id"`
+		WorkflowID   string `db:"workflow_id"`
+		RunID        string `db:"run_id"`
+		InitiatedID  int64  `db:"initiated_id"`
+		Data         []byte `db:"data"`
+		DataEncoding string `db:"data_encoding"`
+	}
+	insertRows := make([]insertRow, 0, len(rows))
+	for _, row := range rows {
+		insertRows = append(insertRows, insertRow{
+			ShardID:      row.ShardID,
+			NamespaceID:  row.NamespaceID.String(),
+			WorkflowID:   row.WorkflowID,
+			RunID:        row.RunID.String(),
+			InitiatedID:  row.InitiatedID,
+			Data:         row.Data,
+			DataEncoding: row.DataEncoding,
+		})
+	}
+	return pdb.NamedExecContext(ctx, setKeyInRequestCancelInfoMapQry, insertRows)
 }
 
 // SelectAllFromRequestCancelInfoMaps reads all rows from request_cancel_info_maps table
@@ -579,33 +574,32 @@ func (pdb *db) ReplaceIntoSignalInfoMaps(
 	ctx context.Context,
 	rows []sqlplugin.SignalInfoMapsRow,
 ) (sql.Result, error) {
-	// For DSQL, we need to convert UUID fields to strings
-	for _, row := range rows {
-		namespaceIDStr := row.NamespaceID.String()
-		workflowIDStr := row.WorkflowID
-		runIDStr := row.RunID.String()
-		
-		_, err := pdb.ExecContext(ctx,
-			`INSERT INTO signal_info_maps
-(shard_id, namespace_id, workflow_id, run_id, initiated_id, data, data_encoding)
-VALUES
-($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (shard_id, namespace_id, workflow_id, run_id, initiated_id) DO UPDATE
-	SET (shard_id, namespace_id, workflow_id, run_id, initiated_id, data, data_encoding)
-  	  = (excluded.shard_id, excluded.namespace_id, excluded.workflow_id, excluded.run_id, excluded.initiated_id, excluded.data, excluded.data_encoding)`,
-			row.ShardID,
-			namespaceIDStr,
-			workflowIDStr,
-			runIDStr,
-			row.InitiatedID,
-			row.Data,
-			row.DataEncoding,
-		)
-		if err != nil {
-			return nil, err
-		}
+	if len(rows) == 0 {
+		return nil, nil
 	}
-	return nil, nil
+
+	type insertRow struct {
+		ShardID      int32  `db:"shard_id"`
+		NamespaceID  string `db:"namespace_id"`
+		WorkflowID   string `db:"workflow_id"`
+		RunID        string `db:"run_id"`
+		InitiatedID  int64  `db:"initiated_id"`
+		Data         []byte `db:"data"`
+		DataEncoding string `db:"data_encoding"`
+	}
+	insertRows := make([]insertRow, 0, len(rows))
+	for _, row := range rows {
+		insertRows = append(insertRows, insertRow{
+			ShardID:      row.ShardID,
+			NamespaceID:  row.NamespaceID.String(),
+			WorkflowID:   row.WorkflowID,
+			RunID:        row.RunID.String(),
+			InitiatedID:  row.InitiatedID,
+			Data:         row.Data,
+			DataEncoding: row.DataEncoding,
+		})
+	}
+	return pdb.NamedExecContext(ctx, setKeyInSignalInfoMapQry, insertRows)
 }
 
 // SelectAllFromSignalInfoMaps reads all rows from signal_info_maps table
@@ -674,28 +668,28 @@ func (pdb *db) ReplaceIntoSignalsRequestedSets(
 	ctx context.Context,
 	rows []sqlplugin.SignalsRequestedSetsRow,
 ) (sql.Result, error) {
-	// For DSQL, we need to convert UUID fields to strings
-	for _, row := range rows {
-		namespaceIDStr := row.NamespaceID.String()
-		workflowIDStr := row.WorkflowID
-		runIDStr := row.RunID.String()
-		
-		_, err := pdb.ExecContext(ctx,
-			`INSERT INTO signals_requested_sets
-(shard_id, namespace_id, workflow_id, run_id, signal_id) VALUES
-($1, $2, $3, $4, $5)
-ON CONFLICT (shard_id, namespace_id, workflow_id, run_id, signal_id) DO NOTHING`,
-			row.ShardID,
-			namespaceIDStr,
-			workflowIDStr,
-			runIDStr,
-			row.SignalID,
-		)
-		if err != nil {
-			return nil, err
-		}
+	if len(rows) == 0 {
+		return nil, nil
 	}
-	return nil, nil
+
+	type insertRow struct {
+		ShardID     int32  `db:"shard_id"`
+		NamespaceID string `db:"namespace_id"`
+		WorkflowID  string `db:"workflow_id"`
+		RunID       string `db:"run_id"`
+		SignalID    string `db:"signal_id"`
+	}
+	insertRows := make([]insertRow, 0, len(rows))
+	for _, row := range rows {
+		insertRows = append(insertRows, insertRow{
+			ShardID:     row.ShardID,
+			NamespaceID: row.NamespaceID.String(),
+			WorkflowID:  row.WorkflowID,
+			RunID:       row.RunID.String(),
+			SignalID:    row.SignalID,
+		})
+	}
+	return pdb.NamedExecContext(ctx, createSignalsRequestedSetQuery, insertRows)
 }
 
 // SelectAllFromSignalsRequestedSets reads all rows from signals_requested_sets table
@@ -806,36 +800,36 @@ func (pdb *db) ReplaceIntoChasmNodeMaps(
 	ctx context.Context,
 	rows []sqlplugin.ChasmNodeMapsRow,
 ) (sql.Result, error) {
-	// For DSQL, we need to convert UUID fields to strings
-	for _, row := range rows {
-		namespaceIDStr := row.NamespaceID.String()
-		workflowIDStr := row.WorkflowID
-		runIDStr := row.RunID.String()
-		chasmPathStr := row.ChasmPath // ChasmPath is already a string
-		
-		_, err := pdb.ExecContext(ctx,
-			`INSERT INTO chasm_node_maps
-(shard_id, namespace_id, workflow_id, run_id, chasm_path, metadata, metadata_encoding, data, data_encoding)
-VALUES
-($1, $2, $3, $4, $5, $6, $7, $8, $9)
-ON CONFLICT (shard_id, namespace_id, workflow_id, run_id, chasm_path) DO UPDATE
-	SET (shard_id, namespace_id, workflow_id, run_id, chasm_path, metadata, metadata_encoding, data, data_encoding)
-  	  = (excluded.shard_id, excluded.namespace_id, excluded.workflow_id, excluded.run_id, excluded.chasm_path, excluded.metadata, excluded.metadata_encoding, excluded.data, excluded.data_encoding)`,
-			row.ShardID,
-			namespaceIDStr,
-			workflowIDStr,
-			runIDStr,
-			chasmPathStr,
-			row.Metadata,
-			row.MetadataEncoding,
-			row.Data,
-			row.DataEncoding,
-		)
-		if err != nil {
-			return nil, err
-		}
+	if len(rows) == 0 {
+		return nil, nil
 	}
-	return nil, nil
+
+	type insertRow struct {
+		ShardID          int32  `db:"shard_id"`
+		NamespaceID      string `db:"namespace_id"`
+		WorkflowID       string `db:"workflow_id"`
+		RunID            string `db:"run_id"`
+		ChasmPath        string `db:"chasm_path"`
+		Metadata         []byte `db:"metadata"`
+		MetadataEncoding string `db:"metadata_encoding"`
+		Data             []byte `db:"data"`
+		DataEncoding     string `db:"data_encoding"`
+	}
+	insertRows := make([]insertRow, 0, len(rows))
+	for _, row := range rows {
+		insertRows = append(insertRows, insertRow{
+			ShardID:          row.ShardID,
+			NamespaceID:      row.NamespaceID.String(),
+			WorkflowID:       row.WorkflowID,
+			RunID:            row.RunID.String(),
+			ChasmPath:        row.ChasmPath,
+			Metadata:         row.Metadata,
+			MetadataEncoding: row.MetadataEncoding,
+			Data:             row.Data,
+			DataEncoding:     row.DataEncoding,
+		})
+	}
+	return pdb.NamedExecContext(ctx, setKeyInChasmNodeMapSQLQuery, insertRows)
 }
 
 func (pdb *db) DeleteFromChasmNodeMaps(ctx context.Context, filter sqlplugin.ChasmNodeMapsFilter) (sql.Result, error) {

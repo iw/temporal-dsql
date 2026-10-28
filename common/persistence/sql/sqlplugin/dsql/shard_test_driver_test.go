@@ -66,6 +66,9 @@ type shardTestDriver struct {
 	historyTrees        []sqlplugin.HistoryTreeRow
 	taskQueues          map[string][]sqlplugin.TaskQueuesRow
 	clusterMembers      []sqlplugin.ClusterMembershipRow
+	queueMessages       []sqlplugin.QueueMessageRow
+	queueV2Messages     []sqlplugin.QueueV2MessageRow
+	queueV2Metadata     []sqlplugin.QueueV2MetadataRow
 }
 
 type bufferedEventsTestRun struct {
@@ -166,6 +169,9 @@ func (c *shardTestConn) QueryContext(_ context.Context, query string, args []dri
 	case "SELECT notification_version FROM namespace_metadata WHERE partition_id=$1 FOR UPDATE":
 		return &shardTestRows{column: "notification_version", value: c.db.versions["namespace_metadata"]}, nil
 	default:
+		if rows, ok := c.db.queryQueueRows(query, args); ok {
+			return rows, nil
+		}
 		return c.db.queryUUIDRows(query, args)
 	}
 }
@@ -275,7 +281,11 @@ func (c *shardTestConn) ExecContext(_ context.Context, query string, args []driv
 		!strings.HasPrefix(query, "DELETE FROM ") &&
 		!strings.HasPrefix(query, "INSERT INTO history_node ") &&
 		!strings.HasPrefix(query, "INSERT INTO history_tree ") &&
-		!strings.HasPrefix(query, "INSERT INTO buffered_events(") {
+		!strings.HasPrefix(query, "INSERT INTO buffered_events(") &&
+		(!strings.HasPrefix(query, "INSERT INTO ") || mapTestInsertWidth(query) == 0) &&
+		!strings.HasPrefix(query, "INSERT INTO queue ") &&
+		!strings.HasPrefix(query, "INSERT INTO queue_messages ") &&
+		!strings.HasPrefix(query, "INSERT INTO queues ") {
 		return nil, fmt.Errorf("unexpected exec: %s", query)
 	}
 	c.db.mu.Lock()
@@ -285,6 +295,14 @@ func (c *shardTestConn) ExecContext(_ context.Context, query string, args []driv
 		c.db.execErrors = c.db.execErrors[1:]
 		if err != nil {
 			return nil, err
+		}
+	}
+	if strings.HasPrefix(query, "INSERT INTO ") {
+		if width := mapTestInsertWidth(query); width > 0 {
+			return driver.RowsAffected(len(args) / width), nil
+		}
+		if result, ok := c.db.insertQueueRows(query, args); ok {
+			return result, nil
 		}
 	}
 	if strings.HasPrefix(query, "DELETE FROM ") {
