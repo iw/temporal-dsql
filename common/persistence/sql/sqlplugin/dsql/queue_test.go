@@ -3,6 +3,7 @@ package dsql_test
 import (
 	"database/sql"
 	"database/sql/driver"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -176,4 +177,48 @@ func (d *shardTestDriver) insertQueueRows(query string, args []driver.NamedValue
 		return nil, false
 	}
 	return driver.RowsAffected(1), true
+}
+
+func TestQueueRangeDeleteBatches(t *testing.T) {
+	for _, rows := range []int64{0, 1000, 2500, 3500} {
+		for _, v2 := range []bool{false, true} {
+			t.Run(fmt.Sprintf("v2=%t/rows=%d", v2, rows), func(t *testing.T) {
+				db, fake := newUUIDTestDB(t)
+				table := "queue"
+				query := "DELETE FROM queue WHERE (queue_type, message_id) IN ( SELECT queue_type, message_id FROM queue WHERE queue_type = $1 AND message_id > $2 AND message_id <= $3 ORDER BY queue_type, message_id LIMIT $4)"
+				args := []driver.Value{int64(-7), int64(10), int64(4000), int64(1000)}
+				if v2 {
+					table = "queue_messages"
+					query = "DELETE FROM queue_messages WHERE (queue_type, queue_name, queue_partition, message_id) IN ( SELECT queue_type, queue_name, queue_partition, message_id FROM queue_messages WHERE queue_type = $1 AND queue_name = $2 AND queue_partition = $3 AND message_id >= $4 AND message_id <= $5 ORDER BY queue_type, queue_name, queue_partition, message_id LIMIT $6)"
+					args = []driver.Value{int64(2), "target", int64(1), int64(10), int64(4000), int64(1000)}
+				}
+				fake.tables = map[string]*quotaTestTable{table: {rows: rows, rowBytes: 10}}
+				var result sql.Result
+				var err error
+				if v2 {
+					result, err = db.RangeDeleteFromQueueV2Messages(t.Context(), sqlplugin.QueueV2MessagesFilter{
+						QueueType: 2, QueueName: "target", Partition: 1, MinMessageID: 10, MaxMessageID: 4000,
+					})
+				} else {
+					result, err = db.RangeDeleteFromMessages(t.Context(), sqlplugin.QueueMessagesRangeFilter{
+						QueueType: -7, MinMessageID: 10, MaxMessageID: 4000,
+					})
+				}
+				require.NoError(t, err)
+				total, err := result.RowsAffected()
+				require.NoError(t, err)
+				require.Equal(t, rows, total)
+				statements, commits, rollbacks := fake.snapshot()
+				require.Len(t, statements, int(rows/1000)+1)
+				for i, statement := range statements {
+					require.Equal(t, query, statement)
+					require.Equal(t, args, fake.statementArgs(i))
+				}
+				require.Zero(t, fake.beginCount())
+				require.Zero(t, commits)
+				require.Zero(t, rollbacks)
+				require.Zero(t, fake.tables[table].rows)
+			})
+		}
+	}
 }

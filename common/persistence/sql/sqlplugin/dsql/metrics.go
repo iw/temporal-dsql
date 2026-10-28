@@ -11,11 +11,8 @@ import (
 )
 
 // DSQLMetrics defines the interface for DSQL-specific metrics.
-// This interface is used by RetryManager to record metrics during retry operations.
+// The transaction retry policy uses it to record conflicts, retries and exhaustion.
 type DSQLMetrics interface {
-	// ObserveTxLatency records the total latency of a transaction operation
-	ObserveTxLatency(op string, latency time.Duration)
-
 	// IncTxErrorClass increments the counter for a specific error class
 	IncTxErrorClass(op string, errorClass string)
 
@@ -45,7 +42,6 @@ type DSQLMetrics interface {
 // dsqlMetricsImpl implements the DSQLMetrics interface using Temporal's metrics system
 type dsqlMetricsImpl struct {
 	handler      metrics.Handler
-	txLatency    metrics.TimerIface
 	txErrorClass metrics.CounterIface
 	txExhausted  metrics.CounterIface
 	txConflict   metrics.CounterIface
@@ -62,11 +58,6 @@ type dsqlMetricsImpl struct {
 	poolNewConns         metrics.CounterIface
 	poolLifetimeDestroys metrics.CounterIface
 	poolCanceledAcquires metrics.CounterIface
-
-	// Rate limiter metrics - for token bucket rate limiter
-	rateLimiterAcquires        metrics.CounterIface
-	rateLimiterAcquireFailures metrics.CounterIface
-	rateLimiterWaitTime        metrics.TimerIface
 
 	// Legacy metrics for backward compatibility
 	retryCounter              metrics.CounterIface
@@ -94,7 +85,6 @@ func NewDSQLMetrics(metricsHandler metrics.Handler) DSQLMetrics {
 
 	return &dsqlMetricsImpl{
 		handler:      metricsHandler,
-		txLatency:    metricsHandler.Timer("dsql_tx_latency"),
 		txErrorClass: metricsHandler.Counter("dsql_tx_error_class_total"),
 		txExhausted:  metricsHandler.Counter("dsql_tx_exhausted_total"),
 		txConflict:   metricsHandler.Counter("dsql_tx_conflict_total"),
@@ -111,11 +101,6 @@ func NewDSQLMetrics(metricsHandler metrics.Handler) DSQLMetrics {
 		poolNewConns:         metricsHandler.Counter("dsql_pool_new_connections_total"),
 		poolLifetimeDestroys: metricsHandler.Counter("dsql_pool_lifetime_destroys_total"),
 		poolCanceledAcquires: metricsHandler.Counter("dsql_pool_canceled_acquires_total"),
-
-		// Rate limiter metrics - for token bucket rate limiter
-		rateLimiterAcquires:        metricsHandler.Counter("dsql_rate_limiter_acquires_total"),
-		rateLimiterAcquireFailures: metricsHandler.Counter("dsql_rate_limiter_acquire_failures_total"),
-		rateLimiterWaitTime:        metricsHandler.Timer("dsql_rate_limiter_wait_time"),
 
 		// Legacy metrics for backward compatibility
 		retryCounter:              metricsHandler.Counter("dsql_tx_retries_total"),
@@ -137,11 +122,6 @@ func (m *dsqlMetricsImpl) GetHandler() metrics.Handler {
 // GetHandler returns nil for no-op implementation
 func (n *noOpDSQLMetrics) GetHandler() metrics.Handler {
 	return nil
-}
-
-// ObserveTxLatency records the total latency of a transaction operation
-func (m *dsqlMetricsImpl) ObserveTxLatency(op string, latency time.Duration) {
-	m.txLatency.Record(latency, metrics.StringTag("operation", op))
 }
 
 // IncTxErrorClass increments the counter for a specific error class
@@ -293,7 +273,6 @@ func (m *dsqlMetricsImpl) RecordUnsupportedFeature(operation, feature string) {
 // noOpDSQLMetrics is a no-op implementation of DSQLMetrics for when metrics are disabled
 type noOpDSQLMetrics struct{}
 
-func (n *noOpDSQLMetrics) ObserveTxLatency(op string, latency time.Duration)             {}
 func (n *noOpDSQLMetrics) IncTxErrorClass(op string, errorClass string)                  {}
 func (n *noOpDSQLMetrics) IncTxExhausted(op string)                                      {}
 func (n *noOpDSQLMetrics) IncTxConflict(op string)                                       {}

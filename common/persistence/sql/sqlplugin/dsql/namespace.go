@@ -159,27 +159,9 @@ func (pdb *db) DeleteFromNamespace(
 }
 
 // LockNamespaceMetadata acquires a write lock on a single row in namespace_metadata table.
-// DSQL Override: Wraps FOR UPDATE operation in retry logic for SQLSTATE 40001 handling.
 func (pdb *db) LockNamespaceMetadata(
 	ctx context.Context,
 ) (*sqlplugin.NamespaceMetadataRow, error) {
-	// Use retry manager if available (for non-transaction contexts)
-	if pdb.tx == nil && pdb.retryManager != nil {
-		result, err := pdb.retryManager.RunTx(ctx, "LockNamespaceMetadata", func(tx *sql.Tx) (any, error) {
-			var row sqlplugin.NamespaceMetadataRow
-			err := tx.QueryRowContext(ctx, lockNamespaceMetadataQuery, partitionID).Scan(&row.NotificationVersion)
-			if err != nil {
-				return nil, err
-			}
-			return &row, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		return result.(*sqlplugin.NamespaceMetadataRow), nil
-	}
-
-	// Direct execution for transaction contexts (retry handled at higher level)
 	var row sqlplugin.NamespaceMetadataRow
 	err := pdb.GetContext(ctx,
 		&row.NotificationVersion,
@@ -216,17 +198,4 @@ func (pdb *db) UpdateNamespaceMetadata(
 		row.NotificationVersion,
 		partitionID,
 	)
-}
-
-// dummyResult implements sql.Result for interface compatibility
-type dummyResult struct {
-	rowsAffected int64
-}
-
-func (r *dummyResult) LastInsertId() (int64, error) {
-	return 0, nil
-}
-
-func (r *dummyResult) RowsAffected() (int64, error) {
-	return r.rowsAffected, nil
 }

@@ -6,26 +6,13 @@ The DSQL plugin emits metrics for monitoring database operations, connection poo
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `dsql_tx_latency` | Timer | `operation` | Total latency of transaction operations |
-| `dsql_tx_error_class_total` | Counter | `operation`, `error_class` | Errors by classification |
+| `dsql_tx_error_class_total` | Counter | `operation`, `error_class` | Classification recorded when the transaction policy schedules a retry |
 | `dsql_tx_exhausted_total` | Counter | `operation` | Retry budget exhausted |
 | `dsql_tx_conflict_total` | Counter | `operation` | Serialization conflicts (SQLSTATE 40001) |
 | `dsql_tx_retry_total` | Counter | `operation`, `attempt` | Retry attempts |
 | `dsql_tx_backoff` | Timer | `operation` | Backoff delay durations |
 
-### Error Classes
-
-The `error_class` label can have these values:
-
-| Value | Description |
-|-------|-------------|
-| `retryable` | Serialization conflict, will be retried |
-| `condition_failed` | CAS condition not met |
-| `permanent` | Non-retryable error |
-| `unsupported_feature` | DSQL unsupported feature |
-| `connection_limit` | Connection limit exceeded |
-| `transaction_timeout` | Transaction timed out |
-| `unknown` | Unclassified error |
+The policy retries only SQLSTATE 40001, so `error_class` is always `retryable`. The conflict and retry counters count scheduled retries. When the retry budget runs out, the exhaustion counter increments instead.
 
 ## Connection Pool Metrics
 
@@ -49,16 +36,9 @@ Service pools retain their full configured size. Ephemeral startup pools have ma
 
 ## Rate Limiter Metrics
 
-Existing rate-limiter metric names are retained:
+`dsql_rate_limiter_fallbacks_total` counts calls routed to the local limiter after a DynamoDB failure, including calls during the 30-second cooldown.
 
-| Metric | Type | Meaning |
-|---|---|---|
-| `dsql_rate_limiter_acquires_total` | Counter | Limiter acquisitions |
-| `dsql_rate_limiter_acquire_failures_total` | Counter | Limiter acquisition failures |
-| `dsql_rate_limiter_wait_time` | Timer | Limiter wait time |
-| `dsql_rate_limiter_fallbacks_total` | Counter | Calls routed to the local limiter after a DynamoDB failure, including calls during the 30-second cooldown |
-
-The first three metrics retain their existing recording behavior. The fallback counter is recorded by the wrapper around either distributed mode. Use limiter logs and connection errors alongside them. The eight-slot process-wide semaphore bounds limiter/token calls, not handshakes.
+Use limiter logs and connection errors alongside the fallback counter. The eight-slot process-wide semaphore bounds limiter/token calls, not handshakes.
 
 Both distributed limiters fall back to local pacing for 30 seconds after DynamoDB API, throttling or network failures. A warning is logged at most once a minute. During an outage, each process applies `DSQL_CONNECTION_RATE_LIMIT` and `DSQL_CONNECTION_BURST_LIMIT`; DSQL rejects fleet excess with 53400 (not attempted). Lower the local burst to reduce excess. Horizon rejection, condition failures and cancellation do not increment the fallback counter. Alert on sustained fallback activity:
 
@@ -92,12 +72,6 @@ rate(dsql_tx_conflict_total[5m])
 rate(dsql_tx_retry_total[5m])
 rate(dsql_tx_exhausted_total[5m])
 
-# Conflict ratio, and retries per conflict.
-rate(dsql_tx_conflict_total[5m]) / rate(dsql_tx_latency_count[5m])
-rate(dsql_tx_retry_total[5m]) / rate(dsql_tx_conflict_total[5m])
-
-# Transaction latency (timer units depend on the metrics exporter).
-histogram_quantile(0.99, rate(dsql_tx_latency_bucket[5m]))
 ```
 
 Investigate sustained acquisition cancellation, waits with a saturated pool, or an established-connection deficit after startup. A high construction-attempt rate without growth can indicate throttling, IAM failures or network failures. Check logs and the cluster-wide connection budget before increasing pool size. A full pool with rising waits suggests workload pressure; additional replicas also consume their full pool allocation.

@@ -55,7 +55,7 @@
 
 ## Implementation Status
 
-> **Known issues (review of 2026-10-16):** 32 open defects are tracked as GitHub issues #22–#53 ([label `dsql-review-2026-10`](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+is%3Aopen+label%3Adsql-review-2026-10)). Affected items below link to their issue; check it before relying on the item.
+> **Known issues (review of 2026-10-16):** The critical and high findings are fixed. Remaining findings are tracked in the [open review issues](https://github.com/iw/temporal-dsql/issues?q=is%3Aissue+is%3Aopen+label%3Adsql-review-2026-10). The plugin remains experimental and is not recommended for production.
 
 ### ✅ Implemented
 
@@ -69,13 +69,14 @@
 #### Persistence Layer
 - First-class DSQL plugin (`common/persistence/sql/sqlplugin/dsql/`)
 - Optimistic concurrency control; transactions that fail with SQLSTATE 40001 are retried through the opt-in `sqlplugin.TxRetryPolicy` hook
-- Shard updates are fenced by the range check in `lockShard`, as upstream; the CAS helpers in `cas_updates.go` are unused ([#49](https://github.com/iw/temporal-dsql/issues/49))
+- Shard updates are fenced by the range check in `lockShard`, as upstream
 - FOR UPDATE on single tables only (DSQL lifted this limit in August 2026)
 - Shard read lock uses FOR KEY SHARE, so a range renewal fails the commit of an in-flight write that read the old range
 
 #### IAM Authentication
 - pgxpool BeforeConnect hook obtains IAM tokens from the existing cache
-- Token cache with expiry management (can serve expired tokens around credential rotation: [#32](https://github.com/iw/temporal-dsql/issues/32))
+- Token cache reads each token's expiry from the signed token and refreshes it before it expires
+- Connections use the configured `user` role (default `admin`); passwords are ignored and TLS defaults to `verify-full`
 
 #### Connection Management
 - **pgxpool** behind `database/sql` — service pools keep `MinConns == MaxConns` (configured `maxConns`, default 100); ephemeral pools use max 5/min 0. A closing connector owns pool and metrics shutdown. Connection failures do not rebuild pools.
@@ -84,7 +85,7 @@
 - **Token Bucket Rate Limiter** (opt-in) — DynamoDB-backed GCRA reservations, with burst capacity 1000 and 100/sec sustained. Reservations only move forward under clock skew. Both distributed modes fall back to local pacing for 30 seconds on DynamoDB errors; local and distributed counter modes remain available.
 
 #### Observability
-- DSQL-specific metrics (latency, and transaction conflicts, retries and exhaustion)
+- DSQL-specific transaction conflict, retry, backoff and exhaustion metrics
 - pgxpool gauges and counters (constructing, waits, new connections, lifetime destroys, canceled acquires)
 - Connection pool metrics (open, idle, in-use)
 
@@ -126,7 +127,7 @@ export DSQL_TOKEN_BUCKET_CAPACITY=1000  # Bucket capacity (DSQL burst capacity)
 
 ### Validation Results
 
-These come from benchmark runs against a live DSQL cluster, before the 2026-10-16 review.
+These come from benchmark runs against a live DSQL cluster, before the 2026-10-16 review. The reservoir measured in those runs has since been replaced by pgxpool.
 
 - **400 WPS benchmark**: Validated with 100% workflow completion
 - **Checkout latency**: Sub-millisecond (p99 < 1ms)

@@ -3,7 +3,6 @@ package dsql
 import (
 	"context"
 	"database/sql"
-	"fmt"
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
@@ -35,8 +34,6 @@ const (
 	// (default range ID: initialRangeID == 1)
 	createTaskQueueQry = `INSERT ` + taskQueueCreatePart
 
-	// NOTE: updateTaskQueueQry is intentionally unfenced (matches upstream Postgres plugin semantics).
-	// On DSQL, callers should prefer UpdateTaskQueuesWithFencing / UpdateTaskQueuesAutoFenced for correctness.
 	updateTaskQueueQry = `UPDATE task_queues_v2 SET
 	range_id = :range_id,
 	data = :data,
@@ -86,18 +83,6 @@ func (pdb *db) InsertIntoTaskQueues(
 }
 
 // UpdateTaskQueues updates a row in task_queues[_v2] table.
-//
-// DSQL Note: This function is called within a transaction after lockTaskQueue has already:
-// 1. Read the current range_id with FOR UPDATE
-// 2. Validated that range_id matches the expected PrevRangeID
-//
-// Under DSQL's OCC model:
-// - The FOR UPDATE in lockTaskQueue marks the row in the transaction's read set
-// - If another transaction modifies the row before we commit, DSQL returns SQLSTATE 40001
-// - The txExecute retry loop handles 40001 by retrying the entire transaction
-//
-// Therefore, we can use a simple unfenced UPDATE (matching PostgreSQL behavior) because
-// the transaction-level OCC provides the necessary consistency guarantees.
 func (pdb *db) UpdateTaskQueues(
 	ctx context.Context,
 	row *sqlplugin.TaskQueuesRow,
@@ -117,55 +102,6 @@ func (pdb *db) UpdateTaskQueues(
 		sqlplugin.SwitchTaskQueuesTable(updateTaskQueueQry, v),
 		args,
 	)
-}
-
-// UpdateTaskQueuesAutoFenced performs a conditional update without relying on any inferred
-// expected range_id (e.g. "newRangeID-1").
-//
-// It reads the current range_id and attempts to update only if the row is unchanged.
-// Updates are allowed when:
-// - row.RangeID == currentRangeID (metadata-only update, e.g., ack level, backlog count)
-// - row.RangeID > currentRangeID (range_id increment for ownership changes)
-// Updates are rejected when:
-// - row.RangeID < currentRangeID (stale update from old owner)
-func (pdb *db) UpdateTaskQueuesAutoFenced(
-	ctx context.Context,
-	row *sqlplugin.TaskQueuesRow,
-	v sqlplugin.MatchingTaskVersion,
-) (sql.Result, error) {
-	taskQueueID := TaskQueueIDToUUIDString(row.TaskQueueID)
-
-	var currentRangeID int64
-	var err error
-
-	lockQry := sqlplugin.SwitchTaskQueuesTable(lockTaskQueueQry, v)
-
-	// We intentionally use lockTaskQueueQry (FOR UPDATE). In DSQL this does not block, but it is
-	// a supported primitive and matches the intention of reading a stable fencing token.
-	if pdb.tx != nil {
-		err = pdb.tx.QueryRowContext(ctx, lockQry, row.RangeHash, taskQueueID).Scan(&currentRangeID)
-	} else {
-		err = pdb.QueryRowContext(ctx, lockQry, row.RangeHash, taskQueueID).Scan(&currentRangeID)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	// Reject stale updates: new range_id must be >= current range_id.
-	// This allows:
-	// - Same range_id (metadata updates like ack level, backlog count)
-	// - Higher range_id (ownership changes)
-	// But rejects:
-	// - Lower range_id (stale updates from old owners)
-	if row.RangeID < currentRangeID {
-		return nil, NewConditionFailedError(
-			ConditionFailedTaskQueue,
-			fmt.Sprintf("task queue %s range_id is stale (current=%d new=%d)", taskQueueID, currentRangeID, row.RangeID),
-		)
-	}
-
-	// Attempt fenced update against the observed current value.
-	return pdb.UpdateTaskQueuesWithFencing(ctx, row, currentRangeID, v)
 }
 
 // SelectFromTaskQueues reads one or more rows from task_queues[_v2] table
@@ -273,8 +209,6 @@ func (pdb *db) DeleteFromTaskQueues(
 }
 
 // LockTaskQueues locks a row in task_queues[_v2] table
-// DSQL Override: Wraps FOR UPDATE operation in retry logic for SQLSTATE 40001 handling
-// Call-site contract: All subsequent updates must use CAS with range_id fencing
 func (pdb *db) LockTaskQueues(
 	ctx context.Context,
 	filter sqlplugin.TaskQueuesFilter,
@@ -282,21 +216,6 @@ func (pdb *db) LockTaskQueues(
 ) (int64, error) {
 	taskQueueID := TaskQueueIDToUUIDString(filter.TaskQueueID)
 
-	// Use retry manager if available (for non-transaction contexts)
-	if pdb.tx == nil && pdb.retryManager != nil {
-		result, err := pdb.retryManager.RunTx(ctx, "LockTaskQueues", func(tx *sql.Tx) (interface{}, error) {
-			var rangeID int64
-			query := sqlplugin.SwitchTaskQueuesTable(lockTaskQueueQry, v)
-			err := tx.QueryRowContext(ctx, query, filter.RangeHash, taskQueueID).Scan(&rangeID)
-			return rangeID, err
-		})
-		if err != nil {
-			return 0, err
-		}
-		return result.(int64), nil
-	}
-
-	// Direct execution for transaction contexts (retry handled at higher level)
 	var rangeID int64
 	err := pdb.GetContext(ctx,
 		&rangeID,
@@ -305,111 +224,4 @@ func (pdb *db) LockTaskQueues(
 		taskQueueID,
 	)
 	return rangeID, err
-}
-
-// UpdateTaskQueuesWithCAS performs a conditional update on task_queues table
-// using range_id as fencing token.
-func (pdb *db) UpdateTaskQueuesWithCAS(
-	ctx context.Context,
-	row *sqlplugin.TaskQueuesRow,
-	expectedRangeID int64,
-	v sqlplugin.MatchingTaskVersion,
-) error {
-	const updateTaskQueueWithCASQry = `UPDATE task_queues_v2 SET
-		range_id = :range_id,
-		data = :data,
-		data_encoding = :data_encoding
-		WHERE
-		range_hash = :range_hash AND
-		task_queue_id = :task_queue_id AND
-		range_id = :expected_range_id`
-
-	taskQueueID := TaskQueueIDToUUIDString(row.TaskQueueID)
-
-	args := map[string]interface{}{
-		"range_hash":        row.RangeHash,
-		"task_queue_id":     taskQueueID,
-		"range_id":          row.RangeID,
-		"data":              row.Data,
-		"data_encoding":     row.DataEncoding,
-		"expected_range_id": expectedRangeID,
-	}
-
-	result, err := pdb.NamedExecContext(ctx,
-		sqlplugin.SwitchTaskQueuesTable(updateTaskQueueWithCASQry, v),
-		args,
-	)
-	if err != nil {
-		return err
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rowsAffected == 0 {
-		return NewConditionFailedError(
-			ConditionFailedTaskQueue,
-			fmt.Sprintf("task_queue %s range_id changed from expected %d (CAS update failed)", taskQueueID, expectedRangeID),
-		)
-	}
-
-	return nil
-}
-
-// UpdateTaskQueuesWithFencing performs a fenced update on task_queues table using range_id as fencing token
-func (pdb *db) UpdateTaskQueuesWithFencing(
-	ctx context.Context,
-	row *sqlplugin.TaskQueuesRow,
-	expectedRangeID int64,
-	v sqlplugin.MatchingTaskVersion,
-) (sql.Result, error) {
-	err := pdb.UpdateTaskQueuesWithCAS(ctx, row, expectedRangeID, v)
-	if err != nil {
-		return nil, err
-	}
-
-	// Return a dummy result since UpdateTaskQueuesWithCAS doesn't return sql.Result
-	// This maintains interface compatibility
-	return &dummyResult{rowsAffected: 1}, nil
-}
-
-// UpdateTaskQueueRangeWithCAS performs a conditional range_id increment on task_queues table.
-func (pdb *db) UpdateTaskQueueRangeWithCAS(
-	ctx context.Context,
-	rangeHash uint32,
-	taskQueueID string,
-	expectedRangeID int64,
-	v sqlplugin.MatchingTaskVersion,
-) (int64, error) {
-	newRangeID := expectedRangeID + 1
-	const updateTaskQueueRangeWithCASQry = `UPDATE task_queues_v2 
-		SET range_id = $1 
-		WHERE range_hash = $2 AND task_queue_id = $3 AND range_id = $4`
-
-	result, err := pdb.ExecContext(ctx,
-		sqlplugin.SwitchTaskQueuesTable(updateTaskQueueRangeWithCASQry, v),
-		newRangeID,
-		rangeHash,
-		taskQueueID,
-		expectedRangeID,
-	)
-	if err != nil {
-		return 0, err
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-
-	if rowsAffected == 0 {
-		return 0, NewConditionFailedError(
-			ConditionFailedTaskQueue,
-			fmt.Sprintf("task_queue %s range_id changed from expected %d (CAS range increment failed)", taskQueueID, expectedRangeID),
-		)
-	}
-
-	return newRangeID, nil
 }

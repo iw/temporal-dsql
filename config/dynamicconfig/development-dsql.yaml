@@ -1,22 +1,8 @@
 # Dynamic configuration for Aurora DSQL development environment
 
-# DSQL-specific settings
-persistence.enableDSQLMode:
-  - value: true
-    constraints: {}
-
-# DSQL optimizations - higher retry counts due to optimistic concurrency control
+# Persistence request rate per history host
 history.persistenceMaxQPS:
   - value: 3000
-    constraints: {}
-
-# DSQL connection settings
-persistence.maxConns:
-  - value: 20
-    constraints: {}
-
-persistence.maxIdleConns:
-  - value: 20
     constraints: {}
 
 # A history batch occupies one column, capped at 1 MiB by DSQL.
@@ -29,7 +15,7 @@ limit.blobSize.error:
   - value: 1000000
     constraints: {}
 
-# Buffered events settings (for ID generation)
+# Maximum buffered queries per workflow
 history.maxBufferedQueryCount:
   - value: 1000
     constraints: {}
@@ -52,22 +38,17 @@ history.timerProcessorUpdateAckInterval:
   - value: 30s
     constraints: {}
 
-# Visibility settings (if using DSQL for visibility)
-visibility.maxPageSize:
+# Visibility uses its separate store
+frontend.visibilityMaxPageSize:
   - value: 1000
     constraints: {}
 
-# Cluster membership settings
-system.membershipMaxJoinDuration:
-  - value: 30s
-    constraints: {}
-
 # Archival settings
-archival.history.enableRead:
+system.enableReadFromHistoryArchival:
   - value: true
     constraints: {}
 
-archival.visibility.enableRead:
+system.enableReadFromVisibilityArchival:
   - value: true
     constraints: {}
 
@@ -76,36 +57,7 @@ system.enableNamespaceNotActiveAutoForwarding:
   - value: true
     constraints: {}
 
-# Worker settings
-worker.enableLogging:
-  - value: true
-    constraints: {}
-
-# Frontend settings
-frontend.enableClientVersionCheck:
-  - value: true
-    constraints: {}
-
-# Matching settings
-matching.enableTaskInfoLogByDomainID:
-  - value: false
-    constraints: {}
-
 # System settings
-system.enableParentClosePolicy:
+history.enableParentClosePolicy:
   - value: true
-    constraints: {}
-
-# DSQL-specific retry and timeout settings
-persistence.defaultActivityRetryPolicy:
-  - value:
-      InitialIntervalInSeconds: 1
-      MaximumIntervalInSeconds: 100
-      BackoffCoefficient: 2.0
-      MaximumAttempts: 0
-    constraints: {}
-
-# DSQL connection health check
-persistence.healthCheckInterval:
-  - value: 30s
     constraints: {}

@@ -14,12 +14,10 @@ This document covers the technical implementation of Aurora DSQL support in Temp
   - [FOR SHARE Not Supported](#for-share-not-supported)
 - [Optimistic Concurrency Control (OCC)](#optimistic-concurrency-control-occ)
   - [Retry Logic](#retry-logic-retrygo)
-  - [Error Classification](#error-classification-errorsgo)
+  - [Error Classification](#error-classification-retrygo-errorsgo)
   - [Transaction Retry Policy](#transaction-retry-policy-tx_retry_policygo)
-- [Compare-And-Swap (CAS) Updates](#compare-and-swap-cas-updates)
-  - [Shard Updates](#shard-updates-shardgo-cas_updatesgo)
-  - [Auto-Fenced Updates](#auto-fenced-updates)
-  - [Generic CAS Helper](#generic-cas-helper)
+- [Shard and Task Queue Ownership](#shard-and-task-queue-ownership)
+- [Batched Range Deletes](#batched-range-deletes)
 - [IAM Authentication](#iam-authentication)
   - [BeforeConnect](#beforeconnect)
   - [Token Cache](#token-cache-tokencachego)
@@ -36,14 +34,11 @@ common/persistence/sql/sqlplugin/dsql/
 ├── plugin.go                      # Plugin registration, IAM auth, token refresh
 ├── db.go                          # Database handle, transaction management
 ├── execution.go                   # Workflow execution operations
-├── execution_store.go             # Execution store wrapper with DSQL retry logic
+├── execution_store.go             # Workflow read transaction wrapper
 ├── execution_maps.go              # Execution map operations (activity, timer, child, signal)
-├── shard.go                       # Shard management with CAS updates
-├── cas_updates.go                 # Compare-And-Swap update patterns
-├── fenced_updates.go              # Fenced update helpers
+├── shard.go                       # Shard locks and updates
 ├── retry.go                       # OCC retry logic with backoff
 ├── tx_retry_policy.go             # Transaction-level retry policy
-├── tx_retry.go                    # Transaction retry helpers
 ├── errors.go                      # Error classification (retryable vs permanent)
 ├── metrics.go                     # DSQL-specific metrics
 ├── token_cache.go                 # IAM token caching
@@ -142,7 +137,8 @@ alone would not make the failure final.
 DSQL has no `ALTER COLUMN ... TYPE` operation and caps the total primary key size
 across all columns at 1 KiB. Widening the path would require a separate design
 decision, rebuilding the table and copying rows in batches of fewer than 3,000;
-it cannot be done by widening the column in place.
+it cannot be done by widening the column in place. These limits remain tracked in
+[#47](https://github.com/iw/temporal-dsql/issues/47).
 
 ### BIGSERIAL Removal
 
@@ -162,18 +158,18 @@ id BIGINT NOT NULL
 
 | Change | Reason |
 |--------|--------|
-| `CHECK` constraints removed | DSQL doesn't support CHECK |
+| `CHECK` constraints omitted | Supported by DSQL; this schema relies on application validation |
 | Complex `DEFAULT` removed | Limited DEFAULT expression support |
 | `UNIQUE` → separate indexes | Better DSQL compatibility |
 | `CREATE INDEX ASYNC` | Non-blocking index creation |
 
 ## FOR UPDATE and Locking Changes
 
-DSQL has significant limitations with locking clauses that required major changes.
+The plugin retains single-table locking queries from earlier DSQL compatibility work. Core owns the transaction boundaries.
 
 ### FOR UPDATE on Single Table Only
 
-DSQL only allows `FOR UPDATE` on a single base table per statement. JOINs with `FOR UPDATE` fail with `SQLSTATE 0A000`.
+DSQL has supported `FOR UPDATE` on joins since August 2026. The plugin still splits the current-execution join into single-table queries.
 
 **Problem:** `LockCurrentExecutionsJoinExecutions` used a JOIN with FOR UPDATE.
 
@@ -201,7 +197,7 @@ DSQL doesn't support `FOR SHARE`. `ReadLockExecutions` delegates to `WriteLockEx
 
 ```go
 // DSQL doesn't support FOR SHARE, delegate to WriteLockExecutions
-// Safe because: method is unused in codebase, WriteLockExecutions provides
+// Safe because: method is unused by core, WriteLockExecutions provides
 // stronger guarantees
 func (pdb *db) ReadLockExecutions(ctx context.Context, filter ...) (int64, int64, error) {
     return pdb.WriteLockExecutions(ctx, filter)
@@ -224,91 +220,11 @@ DSQL uses OCC instead of pessimistic locking. Concurrent transactions that confl
 
 ### Retry Logic (`retry.go`)
 
-```go
-type RetryConfig struct {
-    MaxRetries   int           // Default: 5
-    BaseDelay    time.Duration // Default: 100ms
-    MaxDelay     time.Duration // Default: 5s
-    JitterFactor float64       // Default: 0.25
-}
+`RetryManager` retains configuration, error classification, backoff helpers and metrics. It does not open or replay transactions. The defaults are five retries, a 100 ms base delay, a 5 s maximum delay, and a 0.25 jitter factor.
 
-func (r *RetryManager) RunTx(ctx context.Context, op string, 
-    fn func(*sql.Tx) (interface{}, error)) (interface{}, error) {
-    
-    for attempt := 1; attempt <= maxAttempts; attempt++ {
-        tx, err := r.db.BeginTx(ctx, nil)
-        if err != nil {
-            return nil, err
-        }
-        
-        result, err := fn(tx)
-        if err != nil {
-            tx.Rollback()
-            
-            cls := classifyError(err)
-            r.metrics.IncTxErrorClass(op, cls.String())
-            
-            if cls == ErrorTypeRetryable && attempt < maxAttempts {
-                r.metrics.IncTxConflict(op)
-                r.metrics.IncTxRetry(op, attempt)
-                
-                delay := r.calculateBackoff(attempt - 1)
-                r.metrics.ObserveTxBackoff(op, delay)
-                time.Sleep(delay)
-                continue
-            }
-            return nil, err
-        }
-        
-        if err := tx.Commit(); err != nil {
-            // Handle commit-time conflicts
-            if isRetryable(err) && attempt < maxAttempts {
-                delay := r.calculateBackoff(attempt - 1)
-                time.Sleep(delay)
-                continue
-            }
-            return nil, err
-        }
-        
-        return result, nil
-    }
-    
-    r.metrics.IncTxExhausted(op)
-    return nil, fmt.Errorf("max retries exceeded")
-}
-```
+### Error Classification (`retry.go`, `errors.go`)
 
-### Error Classification (`errors.go`)
-
-```go
-type ErrorType int
-
-const (
-    ErrorTypeUnknown ErrorType = iota
-    ErrorTypeRetryable          // SQLSTATE 40001 - retry
-    ErrorTypeConditionFailed    // CAS failure - don't retry
-    ErrorTypePermanent          // Other errors - don't retry
-    ErrorTypeUnsupportedFeature // SQLSTATE 0A000
-)
-
-func classifyError(err error) ErrorType {
-    var pgErr *pgconn.PgError
-    if errors.As(err, &pgErr) {
-        switch pgErr.SQLState() {
-        case "40001":
-            return ErrorTypeRetryable
-        case "0A000":
-            return ErrorTypeUnsupportedFeature
-        }
-    }
-    
-    if IsConditionFailedError(err) {
-        return ErrorTypeConditionFailed
-    }
-    
-    return ErrorTypePermanent
-}
-```
+The classification helpers also recognize OCC data/schema codes, condition failures, unsupported features and connection limits. The production transaction policy is narrower: it retries a PostgreSQL error with SQLSTATE 40001 and never retries a condition failure. SQLSTATE 54000 is converted to `TransactionSizeLimitError` by the database wrapper. Classification alone does not enable a retry.
 
 ### Transaction Retry Policy (`tx_retry_policy.go`)
 
@@ -327,88 +243,27 @@ type TxRetryPolicy interface {
 var _ sqlplugin.TxRetryPolicy = (*db)(nil)
 ```
 
-## Compare-And-Swap (CAS) Updates
+## Shard and Task Queue Ownership
 
-Traditional locking is replaced with conditional updates using fencing tokens.
+Core calls the shard, task queue and namespace metadata locks inside transactions. Shard ownership is checked by core's `lockShard`: the stored range must match the expected range before the update. `TestUpdateShardFencing` covers the stale-owner failure. Task queue updates likewise follow core's range check. The plugin performs plain updates within those transactions; the locks and DSQL's commit conflict detection protect the checked rows. It does not start nested lock transactions or infer an expected range for a standalone update.
 
-### Shard Updates (`shard.go`, `cas_updates.go`)
+## Batched Range Deletes
 
-```go
-// UpdateShardsWithFencing performs a fenced update using range_id
-func (pdb *db) UpdateShardsWithFencing(ctx context.Context, row *sqlplugin.ShardsRow, 
-    expectedRangeID int64) (sql.Result, error) {
-    
-    const query = `UPDATE shards 
-        SET range_id = $1, data = $2, data_encoding = $3 
-        WHERE shard_id = $4 AND range_id = $5`
+`deleteInBatches` uses primary-key subqueries with a final `LIMIT` parameter and accumulates affected rows until a batch is smaller than the limit. Task and queue deletes start at 1,000 rows; history-node deletes start at 100. A SQLSTATE 54000 halves the batch size until a single-row failure is reported as a size-limit error. Each batch must run in autocommit mode so it has its own transaction quota.
 
-    result, err := pdb.ExecContext(ctx, query,
-        row.RangeID, row.Data, row.DataEncoding, row.ShardID, expectedRangeID)
-    if err != nil {
-        return nil, err
-    }
-
-    rowsAffected, _ := result.RowsAffected()
-    if rowsAffected == 0 {
-        return nil, NewConditionFailedError(ConditionFailedShard,
-            fmt.Sprintf("shard %d range_id changed from expected %d", 
-                row.ShardID, expectedRangeID))
-    }
-
-    return result, nil
-}
-```
-
-### Auto-Fenced Updates
-
-For non-transaction contexts, automatically read current fencing token and apply CAS:
-
-```go
-func (pdb *db) UpdateShardsAutoFenced(ctx context.Context, row *sqlplugin.ShardsRow) (sql.Result, error) {
-    // Read current range_id
-    var currentRangeID int64
-    err := pdb.GetContext(ctx, &currentRangeID, 
-        `SELECT range_id FROM shards WHERE shard_id = $1`, row.ShardID)
-    if err != nil {
-        return nil, err
-    }
-
-    // Fenced update with current range_id as expected value
-    return pdb.UpdateShardsWithFencing(ctx, row, currentRangeID)
-}
-```
-
-### Generic CAS Helper
-
-```go
-func (pdb *db) GenericCASUpdate(ctx context.Context, query string, args []interface{},
-    entityDesc string, fencingToken interface{}) error {
-    
-    result, err := pdb.ExecContext(ctx, query, args...)
-    if err != nil {
-        return err
-    }
-
-    rowsAffected, _ := result.RowsAffected()
-    if rowsAffected == 0 {
-        return NewConditionFailedError(ConditionFailedUnknown,
-            fmt.Sprintf("%s fencing token changed from expected %v", 
-                entityDesc, fencingToken))
-    }
-
-    return nil
-}
-```
+V1 queue deletion preserves an exclusive lower and inclusive upper bound. V2 includes both bounds. Core computes the v2 range before deletion and always retains the last physical message so enqueue IDs remain increasing. After deletion, a transaction re-reads queue metadata and advances the partition minimum only when the computed minimum is higher. Readers skip missing rows if the metadata update fails; retrying completes the update. Overlapping deletes cannot move the minimum backwards. Large deletes perform more statements as the range grows, without growing the per-transaction row count.
 
 ## IAM Authentication
 
 ### BeforeConnect
 
-`connection_pool.go` configures pgxpool's `BeforeConnect` for every physical connection. A process-wide semaphore admits eight hook calls at a time; each waits on the existing rate limiter, obtains an admin IAM token from the cache, and sets `ConnConfig.Password`. Slots are released before the handshake. Limiter failures wrap `errConnectThrottled`; token errors remain unchanged.
+`connection_pool.go` configures pgxpool's `BeforeConnect` for every physical connection. A process-wide semaphore admits eight hook calls at a time; each waits on the existing rate limiter, obtains an IAM token for the configured `user` (default `admin`) from the cache, and sets `ConnConfig.Password`. Slots are released before the handshake. Limiter failures wrap `errConnectThrottled`; token errors remain unchanged.
 
 ### Token Cache (`token_cache.go`)
 
-The existing cache and `GetConfiguredTokenDuration()` are unchanged. The token provider uses `CLUSTER_ENDPOINT` (or the host in `ConnectAddr`) and `REGION` (falling back to `AWS_REGION`). Token expiry behavior remains tracked in #32; user selection and TLS changes remain tracked in #39.
+The token provider uses `CLUSTER_ENDPOINT` (or the host in `ConnectAddr`) and `REGION` (falling back to `AWS_REGION`). Tokens are cached by endpoint, region, user and duration, with expiry taken from the signed token. Expired or malformed tokens are never served, and credentials refresh before expiry. Concurrent refreshes for a key are coalesced without blocking valid cache hits. Token generation is logged at Debug; failures retain their existing logging.
+
+Connections use `DbConnectAdmin` for `admin` and `DbConnect` for other roles. Password settings are ignored with a warning. TLS defaults to `verify-full`, including hostname verification, unless `connectAttributes.sslmode` explicitly overrides it. See [authentication and pacing](connection-pool.md#authentication-and-connection-pacing).
 
 ## Connection Rate Limiting
 
