@@ -261,7 +261,7 @@ V1 queue deletion preserves an exclusive lower and inclusive upper bound. V2 inc
 
 ### Token Cache (`token_cache.go`)
 
-The token provider uses `CLUSTER_ENDPOINT` (or the host in `ConnectAddr`) and `REGION` (falling back to `AWS_REGION`). Tokens are cached by endpoint, region, user and duration, with expiry taken from the signed token. Expired or malformed tokens are never served, and credentials refresh before expiry. Concurrent refreshes for a key are coalesced without blocking valid cache hits. Token generation is logged at Debug; failures retain their existing logging.
+The token provider uses the typed settings resolved once by `settings.go`: `connectAttributes.cluster_endpoint` (defaulting to the host in `connectAddr`), `region` (inferred from a DSQL endpoint unless explicit), and `token_duration`. Tokens are cached by endpoint, region, user and duration, with expiry taken from the signed token. Expired or malformed tokens are never served, and credentials refresh before expiry. Concurrent refreshes for a key are coalesced without blocking valid cache hits. Token generation is logged at Debug; failures retain their existing logging.
 
 Connections use `DbConnectAdmin` for `admin` and `DbConnect` for other roles. Password settings are ignored with a warning. TLS defaults to `verify-full`, including hostname verification, unless `connectAttributes.sslmode` explicitly overrides it. See [authentication and pacing](connection-pool.md#authentication-and-connection-pacing).
 
@@ -269,13 +269,17 @@ Connections use `DbConnectAdmin` for `admin` and `DbConnect` for other roles. Pa
 
 DSQL has cluster-wide connection limits (100 new connections/sec, 1000 burst, 10000 max). Rate limiting only applies to NEW connection establishment (TCP/TLS handshake + IAM authentication), not to queries.
 
-The plugin supports three rate limiting modes, selected via environment variables. All new connections wait on the selected limiter in `BeforeConnect`.
+The plugin supports three rate limiting modes, selected via `connectAttributes.rate_limiter`. All new connections wait on the selected limiter in `BeforeConnect`.
 
 | Mode | When Used | Key Config |
 |------|-----------|------------|
-| Token Bucket (recommended) | `DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=true` + `DSQL_TOKEN_BUCKET_ENABLED=true` | DynamoDB-backed, supports burst capacity (1000) |
-| Per-Second Counter | `DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=true` + `DSQL_TOKEN_BUCKET_ENABLED=false` | DynamoDB-backed, no burst support |
-| Local | `DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=false` (default) | Per-instance `rate.Limiter`, requires manual budget partitioning |
+| Token Bucket (recommended) | `rate_limiter: "dynamodb_token_bucket"` | DynamoDB-backed, supports burst capacity (1000) |
+| Per-Second Counter | `rate_limiter: "dynamodb_counter"` | DynamoDB-backed, no burst support |
+| Local | `rate_limiter: "local"` (default) | Per-instance `rate.Limiter`, requires manual budget partitioning |
+
+Both DynamoDB modes require `rate_limiter_table`. Token bucket tuning uses `token_bucket_rate`, `token_bucket_capacity` and `token_bucket_max_wait`; counter tuning uses `counter_limit` and `counter_max_wait`. Local pacing and outage fallback use `connection_rate_limit` and `connection_burst_limit`. All keys belong in the datastore's `connectAttributes` map. The first pool's limiter settings remain shared process-wide; later differences warn once without replacing it. The DynamoDB client uses the resolved region.
+
+Legacy environment variables still work but are deprecated and will be removed in a future release, except the standard `AWS_REGION` fallback. See [mapping, precedence and validation](deployment.md#datastore-settings-and-legacy-fallbacks). Invalid settings fail `CreateDB`; valid unused mode settings warn. The resolver is the only reader of active plugin environment settings and logs one deprecation warning per process.
 
 Token bucket mode stores `tat_us` (the next theoretical arrival time in Unix microseconds) and `ttl_epoch` in one `dsql_connect_gcra#<endpoint>` item, using the existing table's string `pk`. With emission interval `T = 1 second / rate`, burst tolerance `tau = (capacity - 1) * T`, and horizon `tau + maxWait`:
 
@@ -291,7 +295,7 @@ The old bucket item is never read and expires through TTL. Mixed-version rollout
 
 ## Connection Pool
 
-`CreateDB` preserves the `cfg.Connect` test hook. Otherwise it builds a DSN with `session.BuildDSN`, parses a pgxpool config, creates a pool and pings once with a 30-second timeout. Default database names are still tried in order. A failed ping closes the new pool. There is no startup sleep or wait for the background fill.
+`CreateDB` preserves the `cfg.Connect` test hook. Otherwise it resolves settings before creating the handle, removes plugin attributes from a copy of the config, builds a DSN with `session.BuildDSN`, parses a pgxpool config, creates a pool and pings once with a 30-second timeout. Default database names are still tried in order. A failed ping closes the new pool. There is no startup sleep or wait for the background fill.
 
 Service pools use `MinConns == MaxConns == maxConns` (default 100). Ephemeral pools use max 5/min 0. Lifetime is capped at 50 minutes, with four minutes of jitter and one-minute health checks; shorter configured lifetimes apply. No acquire/release hooks are installed. `maxIdleConns` is ignored. The sum of `maxConns` across every Temporal process, including deploy overlap, must fit the cluster connection limit, 10,000 by default, with headroom for ephemeral pools and administration.
 

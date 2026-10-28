@@ -40,7 +40,7 @@ Service pools retain their full configured size. Ephemeral startup pools have ma
 
 Use limiter logs and connection errors alongside the fallback counter. The eight-slot process-wide semaphore bounds limiter/token calls, not handshakes.
 
-Both distributed limiters fall back to local pacing for 30 seconds after DynamoDB API, throttling or network failures. A warning is logged at most once a minute. During an outage, each process applies `DSQL_CONNECTION_RATE_LIMIT` and `DSQL_CONNECTION_BURST_LIMIT`; DSQL rejects fleet excess with 53400 (not attempted). Lower the local burst to reduce excess. Horizon rejection, condition failures and cancellation do not increment the fallback counter. Alert on sustained fallback activity:
+Both distributed limiters fall back to local pacing for 30 seconds after DynamoDB API, throttling or network failures. A warning is logged at most once a minute. During an outage, each process applies `connectAttributes.connection_rate_limit` and `connectAttributes.connection_burst_limit` from the first pool; DSQL rejects fleet excess with 53400 (not attempted). Lower the local burst to reduce excess. Horizon rejection, condition failures and cancellation do not increment the fallback counter. Legacy environment variables still work but are deprecated and will be removed in a future release; see the [migration table](deployment.md#datastore-settings-and-legacy-fallbacks). Configuration errors fail startup, and a later pool with different limiter settings warns once without changing the shared limiter. Alert on sustained fallback activity:
 
 ```promql
 rate(dsql_rate_limiter_fallbacks_total[5m]) > 0

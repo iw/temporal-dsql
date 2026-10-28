@@ -310,7 +310,7 @@ func TestPoolClose(t *testing.T) {
 func TestPoolLeaseUnsupported(t *testing.T) {
 	t.Setenv(DistributedConnLeaseEnabledEnvVar, "true")
 	p := &plugin{}
-	_, err := p.createDSQLConnection(&config.SQL{}, nil, log.NewNoopLogger(), nil)
+	_, err := p.CreateDB(sqlplugin.DbKindMain, &config.SQL{}, nil, log.NewNoopLogger(), metrics.NoopMetricsHandler)
 	require.EqualError(t, err, "DSQL connection lease was removed (#33). Size the pools so the fleet's total connections, including the overlap during deploys, fits the cluster's connection limit, then unset DSQL_DISTRIBUTED_CONN_LEASE_ENABLED")
 }
 
@@ -388,6 +388,7 @@ func TestPoolMetrics(t *testing.T) {
 }
 
 func TestPoolRoleAndToken(t *testing.T) {
+	clearSettingsEnv(t)
 	for _, user := range []string{"", "admin", "temporal"} {
 		t.Run("user="+user, func(t *testing.T) {
 			core, logs := observer.New(zap.InfoLevel)
@@ -400,8 +401,9 @@ func TestPoolRoleAndToken(t *testing.T) {
 			if user == "" || user == "admin" {
 				expectedUser, action = "admin", "DbConnectAdmin"
 			}
+			resolved := testSettings(t, map[string]string{"cluster_endpoint": "db.example.invalid", "region": "us-east-1"})
 			for range 2 {
-				provider := p.connectionTokenProvider(cfg, cache, "db.example.invalid", "us-east-1", logger)
+				provider := p.tokenProvider(cfg, cache, resolved, logger)
 				pool, err := p.poolConfig(cfg, resolver.NewNoopResolver(), provider, logger)
 				require.NoError(t, err)
 				require.Equal(t, expectedUser, pool.ConnConfig.User)
@@ -410,7 +412,7 @@ func TestPoolRoleAndToken(t *testing.T) {
 				parsed, err := url.Parse("https://" + pool.ConnConfig.Password)
 				require.NoError(t, err)
 				require.Equal(t, action, parsed.Query().Get("Action"))
-				require.NotNil(t, cache.cachedToken(poolKey{"db.example.invalid", "us-east-1", expectedUser, GetConfiguredTokenDuration()}))
+				require.NotNil(t, cache.cachedToken(poolKey{"db.example.invalid", "us-east-1", expectedUser, resolved.TokenDuration}))
 				require.Equal(t, "ignored-password", cfg.Password)
 			}
 			require.Equal(t, 1, logs.FilterMessage("DSQL password is ignored; connections use IAM authentication").Len())

@@ -117,13 +117,17 @@
 **Service pool sizing:** set `maxConns` per pool and `maxConnLifetime: 50m` (or shorter). Every service pool opens its full size in the background and keeps it. The sum across all pools in all Temporal processes must fit the cluster limit (10,000 by default), allowing for rolling deployments and ephemeral pools. Remove `maxIdleConns`; it is ignored. Removed environment settings and rollout/rollback by previous image (no schema change) are documented in `docs/dsql/connection-pool.md`.
 
 **Distributed Rate Limiting with Token Bucket** (opt-in; see `docs/dsql/connection-pool.md` for rollout and outage behavior):
-```bash
-export DSQL_DISTRIBUTED_RATE_LIMITER_ENABLED=true
-export DSQL_DISTRIBUTED_RATE_LIMITER_TABLE=temporal-dsql-rate-limiter
-export DSQL_TOKEN_BUCKET_ENABLED=true
-export DSQL_TOKEN_BUCKET_RATE=100       # Tokens per second (DSQL sustained rate)
-export DSQL_TOKEN_BUCKET_CAPACITY=1000  # Bucket capacity (DSQL burst capacity)
+```yaml
+# Under persistence.datastores.<store>.sql:
+connectAttributes:
+  # region: "us-east-1" # Inferred from the DSQL endpoint when omitted
+  rate_limiter: "dynamodb_token_bucket"
+  rate_limiter_table: "temporal-dsql-rate-limiter"
+  token_bucket_rate: "100"
+  token_bucket_capacity: "1000"
 ```
+
+Legacy environment settings still work but are deprecated and will be removed in a future release; see the [mapping and precedence rules](docs/dsql/deployment.md#datastore-settings-and-legacy-fallbacks). `AWS_REGION` remains a standard fallback without a warning. Invalid settings or a DynamoDB mode without a table fail startup. The process-wide limiter uses the first pool's settings and warns once if a later pool requests different effective settings.
 
 ### Validation Results
 

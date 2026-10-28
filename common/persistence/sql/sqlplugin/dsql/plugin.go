@@ -2,9 +2,7 @@ package dsql
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 
@@ -47,8 +45,10 @@ type plugin struct {
 
 	// Connection rate limiter (lazily initialized)
 	// Can be either local (ConnectionRateLimiter) or distributed (DistributedRateLimiter)
-	rateLimiterOnce sync.Once
-	rateLimiter     driver.RateLimiter
+	rateLimiterOnce        sync.Once
+	rateLimiter            driver.RateLimiter
+	rateLimiterSettings    settings
+	rateLimiterWarningOnce sync.Once
 
 	ignoredSettingsOnce sync.Once
 	lifetimeWarningOnce sync.Once
@@ -78,11 +78,23 @@ func (p *plugin) CreateDB(
 	logger log.Logger,
 	metricsHandler metrics.Handler,
 ) (sqlplugin.GenericDB, error) {
+	var resolved settings
+	if cfg.Connect == nil {
+		p.warnIgnoredSettings(logger)
+		if err := removedConnectionLeaseError(); err != nil {
+			return nil, err
+		}
+		var err error
+		resolved, err = resolveSettings(cfg, logger)
+		if err != nil {
+			return nil, err
+		}
+	}
 	connect := func() (*sqlx.DB, error) {
 		if cfg.Connect != nil {
 			return cfg.Connect(cfg)
 		}
-		return p.createDSQLConnection(cfg, r, logger, metricsHandler)
+		return p.connectWithSettings(cfg, resolved, r, logger, metricsHandler)
 	}
 
 	handle := sqlplugin.NewDatabaseHandle(dbKind, connect, func(error) bool { return false }, logger, metricsHandler, clock.NewRealTimeSource())
@@ -91,22 +103,19 @@ func (p *plugin) CreateDB(
 	return db, nil
 }
 
-// createDSQLConnection retains the default database fallback for callers without a name.
-func (p *plugin) createDSQLConnection(
-	cfg *config.SQL, r resolver.ServiceResolver, logger log.Logger, metricsHandler metrics.Handler,
+// connectWithSettings retains the default database fallback for callers without a name.
+func (p *plugin) connectWithSettings(
+	cfg *config.SQL, resolved settings, r resolver.ServiceResolver, logger log.Logger, metricsHandler metrics.Handler,
 ) (*sqlx.DB, error) {
-	p.warnIgnoredSettings(logger)
-	if err := removedConnectionLeaseError(); err != nil {
-		return nil, err
-	}
 	if cfg.DatabaseName != "" {
-		return p.createDSQLConnectionWithAuth(cfg, r, logger, metricsHandler)
+		return p.createDSQLConnectionWithAuth(cfg, resolved, r, logger, metricsHandler)
 	}
-	defer func() { cfg.DatabaseName = "" }()
+	copyConfig := *cfg
+	cfg = &copyConfig
 	var errs []error
 	for _, databaseName := range defaultDatabaseNames {
 		cfg.DatabaseName = databaseName
-		db, err := p.createDSQLConnectionWithAuth(cfg, r, logger, metricsHandler)
+		db, err := p.createDSQLConnectionWithAuth(cfg, resolved, r, logger, metricsHandler)
 		if err == nil {
 			return db, nil
 		}
@@ -116,80 +125,17 @@ func (p *plugin) createDSQLConnection(
 }
 
 func (p *plugin) createDSQLConnectionWithAuth(
-	cfg *config.SQL, r resolver.ServiceResolver, logger log.Logger, metricsHandler metrics.Handler,
+	cfg *config.SQL, resolved settings, r resolver.ServiceResolver, logger log.Logger, metricsHandler metrics.Handler,
 ) (*sqlx.DB, error) {
-	// Get region from environment variable (following AWS DSQL sample pattern)
-	region := os.Getenv("REGION")
-	if region == "" {
-		// Fallback to AWS_REGION if REGION is not set
-		region = os.Getenv("AWS_REGION")
-		if region == "" {
-			return nil, errors.New("REGION or AWS_REGION environment variable must be set for DSQL IAM authentication")
-		}
-	}
-
-	// Get cluster endpoint from environment variable (following AWS DSQL sample pattern)
-	clusterEndpoint := os.Getenv("CLUSTER_ENDPOINT")
-	if clusterEndpoint == "" {
-		// Extract hostname from ConnectAddr as fallback
-		clusterEndpoint = cfg.ConnectAddr
-		if strings.Contains(clusterEndpoint, ":") {
-			clusterEndpoint = strings.Split(clusterEndpoint, ":")[0]
-		}
-	}
-
-	p.rateLimiterOnce.Do(func() {
-		if IsDistributedRateLimiterEnabled() {
-			// Use distributed rate limiter backed by DynamoDB
-			tableName := GetDistributedRateLimiterTable()
-			if tableName == "" {
-				logger.Error("Distributed rate limiter enabled but DSQL_DISTRIBUTED_RATE_LIMITER_TABLE not set, falling back to local rate limiter")
-				p.rateLimiter = NewConnectionRateLimiter()
-				return
-			}
-
-			// Create DynamoDB client
-			ddbClient, err := p.createDynamoDBClient(context.Background(), region, logger)
-			if err != nil {
-				logger.Error("Failed to create DynamoDB client for distributed rate limiter, falling back to local rate limiter",
-					tag.Error(err))
-				p.rateLimiter = NewConnectionRateLimiter()
-				return
-			}
-
-			// Check if token bucket mode is enabled (recommended)
-			if IsTokenBucketEnabled() {
-				p.rateLimiter = NewTokenBucketLimiter(ddbClient, tableName, clusterEndpoint, logger)
-				logger.Info("DSQL token bucket rate limiter initialized",
-					tag.NewStringTag("table", tableName),
-					tag.NewStringTag("endpoint", clusterEndpoint),
-					tag.NewInt64("rate_per_sec", int64(getEnvInt(TokenBucketRateEnvVar, DefaultTokenBucketRate))),
-					tag.NewInt64("capacity", int64(getEnvInt(TokenBucketCapacityEnvVar, DefaultTokenBucketCapacity))))
-			} else {
-				// Legacy per-second counter mode
-				p.rateLimiter = NewDistributedRateLimiter(ddbClient, tableName, clusterEndpoint)
-				logger.Info("DSQL distributed rate limiter initialized (per-second counter)",
-					tag.NewStringTag("table", tableName),
-					tag.NewStringTag("endpoint", clusterEndpoint),
-					tag.NewInt64("limit_per_second", int64(getEnvInt(DistributedRateLimiterLimitEnvVar, DefaultDistributedRateLimiterLimit))))
-			}
-			p.rateLimiter = newFailOpenRateLimiter(p.rateLimiter, logger, metricsHandler)
-		} else {
-			// Use local rate limiter (per-instance)
-			p.rateLimiter = NewConnectionRateLimiter()
-			logger.Info("DSQL local connection rate limiter initialized",
-				tag.NewInt("rate_limit", getEnvInt(ConnectionRateLimitEnvVar, DefaultConnectionRateLimit)),
-				tag.NewInt("burst_limit", getEnvInt(ConnectionBurstLimitEnvVar, DefaultConnectionBurstLimit)))
-		}
-	})
+	p.initRateLimiter(resolved, logger, metricsHandler)
 
 	// Get or initialize token cache
-	tokenCache, err := p.getOrInitTokenCache(context.Background(), region, logger, metricsHandler)
+	tokenCache, err := p.tokenCacheForSettings(context.Background(), resolved, logger, metricsHandler)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize token cache: %w", err)
 	}
 
-	tokenProvider := p.connectionTokenProvider(cfg, tokenCache, clusterEndpoint, region, logger)
+	tokenProvider := p.tokenProvider(cfg, tokenCache, resolved, logger)
 
 	poolConfig, err := p.poolConfig(cfg, r, tokenProvider, logger)
 	if err != nil {
@@ -215,9 +161,10 @@ func dsqlUser(cfg *config.SQL) string {
 	return cfg.User
 }
 
-func (p *plugin) connectionTokenProvider(cfg *config.SQL, tokenCache *TokenCache, clusterEndpoint, region string, logger log.Logger) driver.TokenProvider {
+func (p *plugin) tokenProvider(cfg *config.SQL, tokenCache *TokenCache, resolved settings, logger log.Logger) driver.TokenProvider {
 	user := dsqlUser(cfg)
-	tokenDuration := GetConfiguredTokenDuration()
+	tokenDuration := resolved.TokenDuration
+	clusterEndpoint, region := resolved.ClusterEndpoint, resolved.Region
 
 	logger.Info("Creating DSQL connection with IAM authentication",
 		tag.NewStringTag("endpoint", clusterEndpoint),
@@ -242,30 +189,22 @@ func (p *plugin) connectionTokenProvider(cfg *config.SQL, tokenCache *TokenCache
 	}
 }
 
-// getOrInitTokenCache returns the token cache, initializing it if necessary.
-// Uses double-checked locking for thread safety.
-func (p *plugin) getOrInitTokenCache(
+// tokenCacheForSettings returns the shared cache, keyed by endpoint, region, user and duration.
+func (p *plugin) tokenCacheForSettings(
 	ctx context.Context,
-	region string,
+	resolved settings,
 	logger log.Logger,
 	metricsHandler metrics.Handler,
 ) (*TokenCache, error) {
-	// Fast path: already initialized
-	if p.tokenCache != nil && p.credentialsInitialized {
-		return p.tokenCache, nil
-	}
-
-	// Slow path: initialize with lock
 	p.tokenCacheMu.Lock()
 	defer p.tokenCacheMu.Unlock()
 
-	// Double-check after acquiring lock
 	if p.tokenCache != nil && p.credentialsInitialized {
 		return p.tokenCache, nil
 	}
 
 	// Resolve credentials once
-	credentialsProvider, err := ResolveCredentialsProvider(ctx, region)
+	credentialsProvider, err := ResolveCredentialsProvider(ctx, resolved.Region)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve AWS credentials: %w", err)
 	}
@@ -275,7 +214,7 @@ func (p *plugin) getOrInitTokenCache(
 	p.credentialsInitialized = true
 
 	logger.Info("DSQL token cache initialized",
-		tag.NewStringTag("region", region))
+		tag.NewStringTag("region", resolved.Region))
 
 	return p.tokenCache, nil
 }
@@ -283,17 +222,53 @@ func (p *plugin) getOrInitTokenCache(
 // createDynamoDBClient creates a DynamoDB client for the distributed rate limiter.
 func (p *plugin) createDynamoDBClient(
 	ctx context.Context,
-	region string,
+	resolved settings,
 	logger log.Logger,
 ) (*dynamodb.Client, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(resolved.Region))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
 	client := dynamodb.NewFromConfig(cfg)
 	logger.Info("Created DynamoDB client for distributed rate limiter",
-		tag.NewStringTag("region", region))
+		tag.NewStringTag("region", resolved.Region))
 
 	return client, nil
+}
+
+func (p *plugin) initRateLimiter(resolved settings, logger log.Logger, handler metrics.Handler) {
+	p.rateLimiterOnce.Do(func() {
+		p.rateLimiterSettings = resolved.effectiveLimiterSettings()
+		p.rateLimiter = newConnectionRateLimiter(resolved)
+		if resolved.Limiter.Mode == localMode {
+			logger.Info("DSQL local connection rate limiter initialized", tag.NewStringTag("settings", resolved.limiterDescription()))
+			return
+		}
+		client, err := p.createDynamoDBClient(context.Background(), resolved, logger)
+		if err != nil {
+			logger.Error("Failed to create DynamoDB client for distributed rate limiter, falling back to local rate limiter", tag.Error(err))
+			return
+		}
+		var distributed driver.RateLimiter
+		if resolved.Limiter.Mode == tokenBucketMode {
+			distributed = newTokenBucketLimiter(client, resolved)
+		} else {
+			distributed = newDistributedRateLimiter(client, resolved)
+		}
+		p.rateLimiter = newFailOpenRateLimiterWithSettings(distributed, resolved, logger, handler)
+		logger.Info("DSQL distributed connection rate limiter initialized", tag.NewStringTag("settings", resolved.limiterDescription()))
+	})
+	if p.rateLimiterSettings != resolved.effectiveLimiterSettings() {
+		p.rateLimiterWarningOnce.Do(func() {
+			active := p.rateLimiterSettings
+			if _, local := p.rateLimiter.(*ConnectionRateLimiter); local {
+				active.Limiter.Mode = localMode
+				active = active.effectiveLimiterSettings()
+			}
+			logger.Warn("DSQL process-wide rate limiter keeps the first pool's settings; later pool settings differ",
+				tag.NewStringTag("settings_in_use", active.limiterDescription()),
+				tag.NewStringTag("requested_settings", resolved.effectiveLimiterSettings().limiterDescription()))
+		})
+	}
 }

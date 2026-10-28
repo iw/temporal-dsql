@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,14 +30,6 @@ const (
 	TokenDurationEnvVar       = "DSQL_TOKEN_DURATION"
 	backgroundRefreshInterval = 10 * time.Second
 )
-
-// GetConfiguredTokenDuration returns the configured duration, or the default.
-func GetConfiguredTokenDuration() time.Duration {
-	if d, err := time.ParseDuration(os.Getenv(TokenDurationEnvVar)); err == nil && d >= MinTokenDuration && d <= DefaultTokenDuration {
-		return d
-	}
-	return DefaultTokenDuration
-}
 
 type poolKey struct {
 	host          string

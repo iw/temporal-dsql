@@ -2,21 +2,20 @@ package dsql
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewConnectionRateLimiter_Defaults(t *testing.T) {
-	// Clear any env vars
-	os.Unsetenv(ConnectionRateLimitEnvVar)
-	os.Unsetenv(ConnectionBurstLimitEnvVar)
+func TestConnectionRateLimiterDefaults(t *testing.T) {
+	clearSettingsEnv(t)
 
-	limiter := NewConnectionRateLimiter()
+	limiter := newConnectionRateLimiter(testSettings(t, nil))
 	require.NotNil(t, limiter)
 	require.NotNil(t, limiter.limiter)
+	require.InDelta(t, DefaultConnectionRateLimit, float64(limiter.limiter.Limit()), 0.001)
+	require.Equal(t, DefaultConnectionBurstLimit, limiter.limiter.Burst())
 
 	// Should allow burst of connections
 	for i := 0; i < DefaultConnectionBurstLimit; i++ {
@@ -24,17 +23,16 @@ func TestNewConnectionRateLimiter_Defaults(t *testing.T) {
 	}
 }
 
-func TestNewConnectionRateLimiter_CustomEnvVars(t *testing.T) {
-	// Set custom values
-	os.Setenv(ConnectionRateLimitEnvVar, "5")
-	os.Setenv(ConnectionBurstLimitEnvVar, "10")
-	defer func() {
-		os.Unsetenv(ConnectionRateLimitEnvVar)
-		os.Unsetenv(ConnectionBurstLimitEnvVar)
-	}()
+func TestConnectionRateLimiterEnv(t *testing.T) {
+	clearSettingsEnv(t)
+	t.Setenv(ConnectionRateLimitEnvVar, "5")
+	t.Setenv(ConnectionBurstLimitEnvVar, "10")
 
-	limiter := NewConnectionRateLimiter()
+	limiter := newConnectionRateLimiter(testSettings(t, nil))
 	require.NotNil(t, limiter)
+
+	require.InDelta(t, 5, float64(limiter.limiter.Limit()), 0.001)
+	require.Equal(t, 10, limiter.limiter.Burst())
 
 	// Should allow burst of 10
 	for i := 0; i < 10; i++ {
@@ -46,14 +44,11 @@ func TestNewConnectionRateLimiter_CustomEnvVars(t *testing.T) {
 }
 
 func TestConnectionRateLimiter_Wait(t *testing.T) {
-	os.Setenv(ConnectionRateLimitEnvVar, "100")
-	os.Setenv(ConnectionBurstLimitEnvVar, "5")
-	defer func() {
-		os.Unsetenv(ConnectionRateLimitEnvVar)
-		os.Unsetenv(ConnectionBurstLimitEnvVar)
-	}()
+	clearSettingsEnv(t)
+	t.Setenv(ConnectionRateLimitEnvVar, "100")
+	t.Setenv(ConnectionBurstLimitEnvVar, "5")
 
-	limiter := NewConnectionRateLimiter()
+	limiter := newConnectionRateLimiter(testSettings(t, nil))
 
 	// Exhaust burst
 	for i := 0; i < 5; i++ {
@@ -61,7 +56,7 @@ func TestConnectionRateLimiter_Wait(t *testing.T) {
 	}
 
 	// Wait should succeed (rate is 100/sec, so should be quick)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
 	err := limiter.Wait(ctx)
@@ -69,80 +64,19 @@ func TestConnectionRateLimiter_Wait(t *testing.T) {
 }
 
 func TestConnectionRateLimiter_WaitTimeout(t *testing.T) {
-	os.Setenv(ConnectionRateLimitEnvVar, "1")
-	os.Setenv(ConnectionBurstLimitEnvVar, "1")
-	defer func() {
-		os.Unsetenv(ConnectionRateLimitEnvVar)
-		os.Unsetenv(ConnectionBurstLimitEnvVar)
-	}()
+	clearSettingsEnv(t)
+	t.Setenv(ConnectionRateLimitEnvVar, "1")
+	t.Setenv(ConnectionBurstLimitEnvVar, "1")
 
-	limiter := NewConnectionRateLimiter()
+	limiter := newConnectionRateLimiter(testSettings(t, nil))
 
 	// Exhaust burst
 	require.True(t, limiter.Allow())
 
 	// Wait with very short timeout should fail
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 1*time.Millisecond)
 	defer cancel()
 
 	err := limiter.Wait(ctx)
 	require.Error(t, err)
-}
-
-func TestGetEnvInt(t *testing.T) {
-	tests := []struct {
-		name       string
-		envValue   string
-		defaultVal int
-		expected   int
-	}{
-		{"empty uses default", "", 42, 42},
-		{"valid int", "100", 42, 100},
-		{"invalid int uses default", "not-a-number", 42, 42},
-		{"negative int", "-5", 42, -5},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			key := "TEST_ENV_INT"
-			if tt.envValue != "" {
-				os.Setenv(key, tt.envValue)
-				defer os.Unsetenv(key)
-			} else {
-				os.Unsetenv(key)
-			}
-
-			result := getEnvInt(key, tt.defaultVal)
-			require.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestGetEnvDuration(t *testing.T) {
-	tests := []struct {
-		name       string
-		envValue   string
-		defaultVal time.Duration
-		expected   time.Duration
-	}{
-		{"empty uses default", "", 5 * time.Second, 5 * time.Second},
-		{"valid duration", "10s", 5 * time.Second, 10 * time.Second},
-		{"milliseconds", "500ms", 5 * time.Second, 500 * time.Millisecond},
-		{"invalid duration uses default", "not-a-duration", 5 * time.Second, 5 * time.Second},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			key := "TEST_ENV_DURATION"
-			if tt.envValue != "" {
-				os.Setenv(key, tt.envValue)
-				defer os.Unsetenv(key)
-			} else {
-				os.Unsetenv(key)
-			}
-
-			result := getEnvDuration(key, tt.defaultVal)
-			require.Equal(t, tt.expected, result)
-		})
-	}
 }
