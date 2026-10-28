@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,22 +60,21 @@ func newPoolStats() *poolStats {
 	return &poolStats{failures: make(map[string]int64), rejections: make(map[string]int64)}
 }
 
-type comparisonStats struct {
+type simulationStats struct {
 	poolStats
 	phaseNames                []string
 	phases                    map[string]*poolStats
 	startDelay                waitHistogram
 	attempts, opens, closures map[int]int
-	rebuilds                  int64
 	samples                   [][]string
 }
 
-func newComparisonStats() *comparisonStats {
-	return &comparisonStats{poolStats: *newPoolStats(), phases: make(map[string]*poolStats), attempts: make(map[int]int), opens: make(map[int]int), closures: make(map[int]int)}
+func newSimulationStats() *simulationStats {
+	return &simulationStats{poolStats: *newPoolStats(), phases: make(map[string]*poolStats), attempts: make(map[int]int), opens: make(map[int]int), closures: make(map[int]int)}
 }
 
 func decimal(n int64) string { return strconv.FormatInt(n, 10) }
-func (r *comparisonRun) sample() {
+func (r *simulationRun) sample() {
 	for _, p := range r.pools {
 		if p.closed && p.physical == 0 {
 			if p.finalSampled {
@@ -92,27 +90,24 @@ func (r *comparisonRun) sample() {
 		}
 		s := p.stats
 		r.stats.samples = append(r.stats.samples, []string{
-			r.sim.Now().Format(time.RFC3339Nano), r.name, p.name, p.model,
-			strconv.Itoa(len(p.ready)), strconv.Itoa(len(p.idle)), strconv.Itoa(inUse), strconv.Itoa(p.constructing), strconv.Itoa(p.physical), strconv.Itoa(s.peak), strconv.Itoa(p.target()), strconv.Itoa(p.limit()),
+			r.sim.Now().Format(time.RFC3339Nano), p.name,
+			strconv.Itoa(len(p.idle)), strconv.Itoa(inUse), strconv.Itoa(p.constructing), strconv.Itoa(p.physical), strconv.Itoa(s.peak), strconv.Itoa(p.target()), strconv.Itoa(p.limit()),
 			strconv.Itoa(r.cluster.open), strconv.Itoa(r.cluster.peak), strconv.Itoa(r.cluster.cfg.MaxConnections),
-			decimal(s.requests), decimal(s.completed), decimal(s.waitedNew), decimal(s.failures["empty"]), decimal(s.failures["timeout"]), decimal(s.failures["dead"]), decimal(s.failures["53400"] + s.failures["53300"]), decimal(s.failures["closed"]),
+			decimal(s.requests), decimal(s.completed), decimal(s.waitedNew), decimal(s.failures["timeout"]), decimal(s.failures["dead"]), decimal(s.failures["53400"] + s.failures["53300"]), decimal(s.failures["closed"]),
 			decimal(s.opens), decimal(s.rejections["53400"]), decimal(s.rejections["53300"]), decimal(s.cutIdle), decimal(s.cutInUse), decimal(s.churnOpens),
 			strconv.FormatInt(int64(s.wait.maximum), 10), strconv.Itoa(p.instance.peakInflight), strconv.FormatFloat(p.instance.adaptive.rate, 'f', 4, 64),
 		})
 		r.observeConvergence(p)
 	}
-	r.sim.After(r.cfg.SampleEvery, "comparison-sample", r.sample)
+	r.sim.After(r.cfg.SampleEvery, "sample", r.sample)
 }
 
-func (r *comparisonRun) observeConvergence(p *modelPool) {
+func (r *simulationRun) observeConvergence(p *modelPool) {
 	state := r.convergence[p.name]
 	if state == nil || p.closed {
 		return
 	}
-	count := len(p.ready)
-	if p.isPGX() || p.model == "reservoir" {
-		count = len(p.owned)
-	}
+	count := len(p.owned)
 	now := r.sim.Now()
 	if state.reached.IsZero() && count >= state.target {
 		state.reached = now
@@ -125,14 +120,10 @@ func (r *comparisonRun) observeConvergence(p *modelPool) {
 	}
 }
 
-func (r *comparisonRun) assertions() error {
+func (r *simulationRun) assertions() error {
 	var failures []error
-	r.legacy.globalConnects = make(map[int64]int, len(r.stats.opens))
-	for sec, n := range r.stats.opens {
-		r.legacy.globalConnects[int64(sec)] = n
-	}
-	if err := AssertConnectRate(r.cfg, r.legacy); err != nil {
-		failures = append(failures, err)
+	if r.cfg.AssertMaxConnectsPerSec > 0 && peakRate(r.stats.opens) > r.cfg.AssertMaxConnectsPerSec {
+		failures = append(failures, fmt.Errorf("connection rate %d exceeds %d", peakRate(r.stats.opens), r.cfg.AssertMaxConnectsPerSec))
 	}
 	if r.cfg.AssertConvergeWithin > 0 {
 		names := make([]string, 0, len(r.convergence))
@@ -147,9 +138,6 @@ func (r *comparisonRun) assertions() error {
 			}
 		}
 	}
-	if r.cfg.AssertZeroEmptyEvents && r.stats.failures["empty"] > 0 {
-		failures = append(failures, fmt.Errorf("empty reservoir requests: %d", r.stats.failures["empty"]))
-	}
 	if r.cfg.AssertZeroDSQLRejections && r.stats.rejections["53400"]+r.stats.rejections["53300"] > 0 {
 		failures = append(failures, fmt.Errorf("DSQL rejections: 53400=%d 53300=%d", r.stats.rejections["53400"], r.stats.rejections["53300"]))
 	}
@@ -162,13 +150,13 @@ func (r *comparisonRun) assertions() error {
 	return errors.Join(failures...)
 }
 
-func (r *comparisonRun) writeCSV(path string) error {
+func (r *simulationRun) writeCSV(path string) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	w := csv.NewWriter(f)
-	header := []string{"time", "variant", "pool", "model", "ready", "idle", "in_use", "constructing", "physical", "peak_physical", "target", "max_open", "cluster_physical", "cluster_peak", "cluster_cap", "requests", "completed", "waited_new", "failed_empty", "failed_timeout", "failed_dead", "failed_connect", "failed_closed", "opens", "rejected_53400", "rejected_53300", "cut_idle", "cut_in_use", "steady_lifetime_opens", "max_acquire_wait_ns", "instance_peak_inflight", "adaptive_rate"}
+	header := []string{"time", "pool", "idle", "in_use", "constructing", "physical", "peak_physical", "target", "max_open", "cluster_physical", "cluster_peak", "cluster_cap", "requests", "completed", "waited_new", "failed_timeout", "failed_dead", "failed_connect", "failed_closed", "opens", "rejected_53400", "rejected_53300", "cut_idle", "cut_in_use", "steady_lifetime_opens", "max_acquire_wait_ns", "instance_peak_inflight", "adaptive_rate"}
 	writeErr := w.Write(header)
 	if writeErr == nil {
 		writeErr = w.WriteAll(r.stats.samples)
@@ -184,7 +172,7 @@ func peakRate(counts map[int]int) int {
 	}
 	return peak
 }
-func (r *comparisonRun) steadyRate() float64 {
+func (r *simulationRun) steadyRate() float64 {
 	total := 0
 	for sec, n := range r.stats.opens {
 		if time.Duration(sec)*time.Second >= r.cfg.SteadyAfter {
@@ -193,7 +181,7 @@ func (r *comparisonRun) steadyRate() float64 {
 	}
 	return float64(total) / (r.cfg.Duration - r.cfg.SteadyAfter).Seconds()
 }
-func (r *comparisonRun) summary() [][2]string {
+func (r *simulationRun) summary() [][2]string {
 	s := r.stats
 	poolPeak, ephemeralPeak, target, maxOpen := 0, 0, 0, 0
 	for _, p := range r.pools {
@@ -217,7 +205,7 @@ func (r *comparisonRun) summary() [][2]string {
 		{"Acquire p99.9 / max", fmt.Sprintf("%s / %s", s.wait.percentile(.999), s.wait.maximum.Round(time.Microsecond))},
 		{"Waited on new connection", decimal(s.waitedNew)},
 		{"Failed total", decimal(failureCount)},
-		{"Failed empty / timeout / dead", fmt.Sprintf("%d / %d / %d", s.failures["empty"], s.failures["timeout"], s.failures["dead"])},
+		{"Failed timeout / dead", fmt.Sprintf("%d / %d", s.failures["timeout"], s.failures["dead"])},
 		{"Failed connect / closed", fmt.Sprintf("%d / %d", s.failures["53400"]+s.failures["53300"], s.failures["closed"])},
 		{"Opens/s peak / steady", fmt.Sprintf("%d / %.2f", peakRate(s.opens), r.steadyRate())},
 		{"Dial attempts/s peak", strconv.Itoa(peakRate(s.attempts))},
@@ -227,7 +215,6 @@ func (r *comparisonRun) summary() [][2]string {
 		{"Peak cluster / cap", fmt.Sprintf("%d / %d", r.cluster.peak, r.cluster.cfg.MaxConnections)},
 		{"60m cuts idle / in use", fmt.Sprintf("%d / %d", s.cutIdle, s.cutInUse)},
 		{"Steady lifetime churn budget", fmt.Sprintf("%.2f%%", float64(s.churnOpens)/(r.cfg.Duration-r.cfg.SteadyAfter).Seconds())},
-		{"Pool rebuilds", decimal(s.rebuilds)},
 		{"Workload start delay p50 / max", fmt.Sprintf("%s / %s", s.startDelay.percentile(.5), s.startDelay.maximum.Round(time.Microsecond))},
 	}
 	for _, name := range s.phaseNames {
@@ -238,7 +225,7 @@ func (r *comparisonRun) summary() [][2]string {
 		}
 		rows = append(rows,
 			[2]string{name + ": requests / failed", fmt.Sprintf("%d / %d", phase.requests, failed)},
-			[2]string{name + ": failed empty / timeout / dead", fmt.Sprintf("%d / %d / %d", phase.failures["empty"], phase.failures["timeout"], phase.failures["dead"])},
+			[2]string{name + ": failed timeout / dead", fmt.Sprintf("%d / %d", phase.failures["timeout"], phase.failures["dead"])},
 			[2]string{name + ": acquire p99 / p99.9 / max", fmt.Sprintf("%s / %s / %s", phase.wait.percentile(.99), phase.wait.percentile(.999), phase.wait.maximum.Round(time.Microsecond))},
 			[2]string{name + ": waited on new connection", decimal(phase.waitedNew)},
 		)
@@ -246,69 +233,27 @@ func (r *comparisonRun) summary() [][2]string {
 	return rows
 }
 
-func comparisonTable(runs []*comparisonRun) string {
+func (r *simulationRun) summaryTable() string {
 	var w strings.Builder
-	fmt.Fprint(&w, "| Metric |")
-	for _, r := range runs {
-		fmt.Fprintf(&w, " %s |", r.name)
-	}
-	fmt.Fprint(&w, "\n|---|")
-	for range runs {
-		fmt.Fprint(&w, "---:|")
-	}
-	fmt.Fprintln(&w)
-	summaries := make([][][2]string, len(runs))
-	for j, r := range runs {
-		summaries[j] = r.summary()
-	}
-	for j, row := range summaries[0] {
-		fmt.Fprintf(&w, "| %s |", row[0])
-		for _, s := range summaries {
-			fmt.Fprintf(&w, " %s |", s[j][1])
-		}
-		fmt.Fprintln(&w)
+	fmt.Fprintln(&w, "| Metric | pgxpool |\n|---|---:|")
+	for _, row := range r.summary() {
+		fmt.Fprintf(&w, "| %s | %s |\n", row[0], row[1])
 	}
 	return w.String()
 }
 
-func runComparisons(cfg *Config, compare, out string) error {
-	variants := []string{""}
-	if compare != "" {
-		variants = strings.Split(compare, ",")
+func runSimulation(cfg *Config, out string) error {
+	r, err := newSimulation(cfg)
+	if err != nil {
+		return err
 	}
-	runs := make([]*comparisonRun, 0, len(variants))
-	var failures []error
-	seen := make(map[string]bool)
-	for _, variant := range variants {
-		variant = strings.TrimSpace(variant)
-		if compare != "" && (variant == "" || seen[variant]) {
-			return fmt.Errorf("empty or duplicate comparison variant %q", variant)
-		}
-		seen[variant] = true
-		r, err := newComparison(cfg, variant)
-		if err != nil {
+	r.sim.Run()
+	if out != "" {
+		if err := r.writeCSV(out); err != nil {
 			return err
 		}
-		r.sim.Run()
-		if err := r.assertions(); err != nil {
-			failures = append(failures, fmt.Errorf("%s: %w", r.name, err))
-		}
-		path := out
-		if path == "" {
-			path = "poolsim.csv"
-		}
-		if compare != "" || out == "" {
-			ext := filepath.Ext(path)
-			path = strings.TrimSuffix(path, ext) + "-" + r.name + ".csv"
-		}
-		if err := r.writeCSV(path); err != nil {
-			return err
-		}
-		fmt.Printf("CSV (%s): %s\n", r.name, path)
-		// Keep summaries, not all per-pool time series, across variants.
-		r.stats.samples = nil
-		runs = append(runs, r)
+		fmt.Printf("CSV: %s\n", out)
 	}
-	fmt.Print(comparisonTable(runs))
-	return errors.Join(failures...)
+	fmt.Print(r.summaryTable())
+	return r.assertions()
 }

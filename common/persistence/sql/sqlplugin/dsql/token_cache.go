@@ -27,7 +27,6 @@ const (
 	MinTokenDuration          = 15 * time.Second
 	RefreshAtLifetimePercent  = 0.8
 	adminUser                 = "admin"
-	TokenDurationEnvVar       = "DSQL_TOKEN_DURATION"
 	backgroundRefreshInterval = 10 * time.Second
 )
 

@@ -14,9 +14,6 @@ type (
 	DataConverter interface {
 		ToDSQLDateTime(t time.Time) time.Time
 		FromDSQLDateTime(t time.Time) time.Time
-		// Legacy aliases for compatibility
-		ToPostgreSQLDateTime(t time.Time) time.Time
-		FromPostgreSQLDateTime(t time.Time) time.Time
 	}
 	converter struct{}
 )
@@ -37,16 +34,6 @@ func (c *converter) FromDSQLDateTime(t time.Time) time.Time {
 		return time.Time{}.UTC()
 	}
 	return t.UTC()
-}
-
-// ToPostgreSQLDateTime is an alias for ToDSQLDateTime for backward compatibility.
-func (c *converter) ToPostgreSQLDateTime(t time.Time) time.Time {
-	return c.ToDSQLDateTime(t)
-}
-
-// FromPostgreSQLDateTime is an alias for FromDSQLDateTime for backward compatibility.
-func (c *converter) FromPostgreSQLDateTime(t time.Time) time.Time {
-	return c.FromDSQLDateTime(t)
 }
 
 func getMinDSQLDateTime() time.Time {

@@ -1,7 +1,7 @@
 CREATE TABLE namespaces(
   partition_id INTEGER NOT NULL,
-  id UUID NOT NULL, -- Changed from BYTEA to UUID for DSQL compatibility
-  name VARCHAR(255) NOT NULL, -- UNIQUE constraint moved to separate index
+  id UUID NOT NULL,
+  name VARCHAR(255) NOT NULL, -- Uniqueness is enforced by idx_namespaces_name
   notification_version BIGINT NOT NULL,
   --
   data BYTEA NOT NULL,
@@ -10,7 +10,7 @@ CREATE TABLE namespaces(
   PRIMARY KEY(partition_id, id)
 );
 
--- Create unique index separately for better DSQL compatibility
+-- DSQL builds indexes asynchronously.
 CREATE UNIQUE INDEX ASYNC idx_namespaces_name ON namespaces(name);
 
 CREATE TABLE namespace_metadata (
@@ -32,9 +32,9 @@ CREATE TABLE shards (
 
 CREATE TABLE executions(
   shard_id INTEGER NOT NULL,
-  namespace_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
-  run_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  run_id UUID NOT NULL,
   --
   next_event_id BIGINT NOT NULL,
   last_write_version BIGINT NOT NULL,
@@ -48,10 +48,10 @@ CREATE TABLE executions(
 
 CREATE TABLE current_executions(
   shard_id INTEGER NOT NULL,
-  namespace_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
   --
-  run_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  run_id UUID NOT NULL,
   create_request_id VARCHAR(255) NOT NULL,
   state INTEGER NOT NULL,
   status INTEGER NOT NULL,
@@ -66,22 +66,19 @@ CREATE TABLE current_executions(
 
 CREATE TABLE buffered_events (
   shard_id INTEGER NOT NULL,
-  namespace_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
-  run_id UUID NOT NULL, -- Changed from BYTEA to UUID
-  id BIGINT NOT NULL, -- Changed from BIGSERIAL to BIGINT
+  run_id UUID NOT NULL,
+  id BIGINT NOT NULL, -- IDs are allocated per run inside the write transaction
   --
   data BYTEA NOT NULL,
   data_encoding VARCHAR(16) NOT NULL,
   PRIMARY KEY (shard_id, namespace_id, workflow_id, run_id, id)
 );
 
--- Create unique index for id field (replaces UNIQUE constraint)
-CREATE UNIQUE INDEX ASYNC idx_buffered_events_id ON buffered_events(id);
-
 CREATE TABLE tasks (
   range_hash BIGINT NOT NULL,
-  task_queue_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  task_queue_id UUID NOT NULL,
   task_id BIGINT NOT NULL,
   --
   data BYTEA NOT NULL,
@@ -92,7 +89,7 @@ CREATE TABLE tasks (
 -- Stores ephemeral task queue information such as ack levels and expiry times
 CREATE TABLE task_queues (
   range_hash BIGINT NOT NULL,
-  task_queue_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  task_queue_id UUID NOT NULL,
   --
   range_id BIGINT NOT NULL,
   data BYTEA NOT NULL,
@@ -104,7 +101,7 @@ CREATE TABLE task_queues (
 -- Used for fairness scheduling. (pass, task_id) are monotonically increasing.
 CREATE TABLE tasks_v2 (
   range_hash BIGINT NOT NULL,
-  task_queue_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  task_queue_id UUID NOT NULL,
   pass BIGINT NOT NULL, -- pass for tasks (see stride scheduling algorithm for fairness)
   task_id BIGINT NOT NULL,
   --
@@ -116,7 +113,7 @@ CREATE TABLE tasks_v2 (
 -- Stores ephemeral task queue information such as ack levels and expiry times
 CREATE TABLE task_queues_v2 (
   range_hash BIGINT NOT NULL,
-  task_queue_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  task_queue_id UUID NOT NULL,
   --
   range_id BIGINT NOT NULL,
   data BYTEA NOT NULL,
@@ -126,7 +123,7 @@ CREATE TABLE task_queues_v2 (
 
 -- Stores task queue information such as user provided versioning data
 CREATE TABLE task_queue_user_data (
-  namespace_id    UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id    UUID NOT NULL,
   task_queue_name VARCHAR(255) NOT NULL,
   data            BYTEA NOT NULL,       -- temporal.server.api.persistence.v1.TaskQueueUserData
   data_encoding   VARCHAR(16) NOT NULL, -- Encoding type used for serialization, in practice this should always be proto3
@@ -136,7 +133,7 @@ CREATE TABLE task_queue_user_data (
 
 -- Stores a mapping between build ids and task queues
 CREATE TABLE build_id_to_task_queue (
-  namespace_id    UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id    UUID NOT NULL,
   build_id        VARCHAR(255) NOT NULL,
   task_queue_name VARCHAR(255) NOT NULL,
   PRIMARY KEY (namespace_id, build_id, task_queue_name)
@@ -213,9 +210,9 @@ CREATE TABLE visibility_tasks(
 CREATE TABLE activity_info_maps (
 -- each row corresponds to one key of one map<string, ActivityInfo>
   shard_id INTEGER NOT NULL,
-  namespace_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
-  run_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  run_id UUID NOT NULL,
   schedule_id BIGINT NOT NULL,
 --
   data BYTEA NOT NULL,
@@ -225,9 +222,9 @@ CREATE TABLE activity_info_maps (
 
 CREATE TABLE timer_info_maps (
   shard_id INTEGER NOT NULL,
-  namespace_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
-  run_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  run_id UUID NOT NULL,
   timer_id VARCHAR(255) NOT NULL,
 --
   data BYTEA NOT NULL,
@@ -237,9 +234,9 @@ CREATE TABLE timer_info_maps (
 
 CREATE TABLE child_execution_info_maps (
   shard_id INTEGER NOT NULL,
-  namespace_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
-  run_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  run_id UUID NOT NULL,
   initiated_id BIGINT NOT NULL,
 --
   data BYTEA NOT NULL,
@@ -249,9 +246,9 @@ CREATE TABLE child_execution_info_maps (
 
 CREATE TABLE request_cancel_info_maps (
   shard_id INTEGER NOT NULL,
-  namespace_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
-  run_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  run_id UUID NOT NULL,
   initiated_id BIGINT NOT NULL,
 --
   data BYTEA NOT NULL,
@@ -261,9 +258,9 @@ CREATE TABLE request_cancel_info_maps (
 
 CREATE TABLE signal_info_maps (
   shard_id INTEGER NOT NULL,
-  namespace_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
-  run_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  run_id UUID NOT NULL,
   initiated_id BIGINT NOT NULL,
 --
   data BYTEA NOT NULL,
@@ -273,9 +270,9 @@ CREATE TABLE signal_info_maps (
 
 CREATE TABLE signals_requested_sets (
   shard_id INTEGER NOT NULL,
-  namespace_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
-  run_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  run_id UUID NOT NULL,
   signal_id VARCHAR(255) NOT NULL,
   --
   PRIMARY KEY (shard_id, namespace_id, workflow_id, run_id, signal_id)
@@ -283,10 +280,10 @@ CREATE TABLE signals_requested_sets (
 
 CREATE TABLE chasm_node_maps (
   shard_id INTEGER NOT NULL,
-  namespace_id UUID NOT NULL, -- Changed from BYTEA to UUID
+  namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
-  run_id UUID NOT NULL, -- Changed from BYTEA to UUID
-  chasm_path VARCHAR(255) NOT NULL, -- Changed from BYTEA to VARCHAR
+  run_id UUID NOT NULL,
+  chasm_path VARCHAR(255) NOT NULL,
 --
   metadata BYTEA NOT NULL,
   metadata_encoding VARCHAR(16),
@@ -298,8 +295,8 @@ CREATE TABLE chasm_node_maps (
 -- history eventsV2: history_node stores history event data
 CREATE TABLE history_node (
   shard_id       INTEGER NOT NULL,
-  tree_id        UUID NOT NULL, -- Changed from BYTEA to UUID
-  branch_id      UUID NOT NULL, -- Changed from BYTEA to UUID
+  tree_id        UUID NOT NULL,
+  branch_id      UUID NOT NULL,
   node_id        BIGINT NOT NULL,
   txn_id         BIGINT NOT NULL,
   --
@@ -312,8 +309,8 @@ CREATE TABLE history_node (
 -- history eventsV2: history_tree stores branch metadata
 CREATE TABLE history_tree (
   shard_id       INTEGER NOT NULL,
-  tree_id        UUID NOT NULL, -- Changed from BYTEA to UUID
-  branch_id      UUID NOT NULL, -- Changed from BYTEA to UUID
+  tree_id        UUID NOT NULL,
+  branch_id      UUID NOT NULL,
   --
   data           BYTEA NOT NULL,
   data_encoding  VARCHAR(16) NOT NULL,
@@ -345,17 +342,17 @@ CREATE TABLE cluster_metadata_info (
   PRIMARY KEY(metadata_partition, cluster_name)
 );
 
--- Modified cluster_membership table - removed complex DEFAULT expressions
+-- Cluster membership uses application-supplied timestamps.
 CREATE TABLE cluster_membership
 (
     membership_partition INTEGER NOT NULL,
-    host_id              UUID NOT NULL, -- Changed from BYTEA to UUID
+    host_id              UUID NOT NULL,
     rpc_address          VARCHAR(128) NOT NULL,
     rpc_port             SMALLINT NOT NULL,
     role                 SMALLINT NOT NULL,
-    session_start        TIMESTAMP, -- Removed DEFAULT, handle in application
-    last_heartbeat       TIMESTAMP, -- Removed DEFAULT, handle in application
-    record_expiry        TIMESTAMP, -- Removed DEFAULT, handle in application
+    session_start        TIMESTAMP,
+    last_heartbeat       TIMESTAMP,
+    record_expiry        TIMESTAMP,
     PRIMARY KEY (membership_partition, host_id)
 );
 
@@ -384,7 +381,7 @@ CREATE TABLE queue_messages (
 
 -- Stores information about Nexus endpoints
 CREATE TABLE nexus_endpoints (
-    id            UUID NOT NULL, -- Changed from BYTEA to UUID
+    id            UUID NOT NULL,
     data          BYTEA NOT NULL,  -- temporal.server.api.persistence.v1.NexusEndpoint
     data_encoding VARCHAR(16) NOT NULL, -- Encoding type used for serialization, in practice this should always be proto3
     version       BIGINT NOT NULL,      -- Version of this row, used for optimistic concurrency
@@ -392,15 +389,35 @@ CREATE TABLE nexus_endpoints (
 );
 
 -- Stores the version of Nexus endpoints table as a whole
--- Removed CHECK constraint - enforce single row constraint in application logic
+-- The application enforces the single-row constraint.
 CREATE TABLE nexus_endpoints_partition_status (
     id      INT NOT NULL PRIMARY KEY DEFAULT 0,
     version BIGINT NOT NULL                -- Version of the nexus_endpoints table
 );
 
--- Create indexes using ASYNC for better DSQL performance
+-- Secondary indexes are built asynchronously.
 CREATE INDEX ASYNC cm_idx_rolehost ON cluster_membership (role, host_id);
 CREATE INDEX ASYNC cm_idx_rolelasthb ON cluster_membership (role, last_heartbeat);
 CREATE INDEX ASYNC cm_idx_rpchost ON cluster_membership (rpc_address, role);
 CREATE INDEX ASYNC cm_idx_lasthb ON cluster_membership (last_heartbeat);
 CREATE INDEX ASYNC cm_idx_recordexpiry ON cluster_membership (record_expiry);
+
+-- CHASM (Component-based Hierarchical Architecture for State Management) support
+-- This table stores current executions for non-workflow archetypes (standalone activities, schedulers)
+CREATE TABLE current_chasm_executions(
+  shard_id INTEGER NOT NULL,
+  namespace_id UUID NOT NULL,           -- DSQL: UUID instead of BYTEA
+  business_id VARCHAR(255) NOT NULL,    -- Maps to WorkflowID for workflows
+  archetype_id BIGINT NOT NULL,
+  --
+  run_id UUID NOT NULL,                 -- DSQL: UUID instead of BYTEA
+  create_request_id VARCHAR(255) NOT NULL,
+  state INTEGER NOT NULL,
+  status INTEGER NOT NULL,
+  start_version BIGINT NOT NULL DEFAULT 0,
+  start_time TIMESTAMP NULL,
+  last_write_version BIGINT NOT NULL,
+  data BYTEA NULL,
+  data_encoding VARCHAR(16) NOT NULL DEFAULT '',
+  PRIMARY KEY (shard_id, namespace_id, business_id, archetype_id)
+);

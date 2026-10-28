@@ -23,8 +23,8 @@ persistence:
         #   token_duration: "15m" # Allowed range: 15s through 15m
         #   connection_rate_limit: "10" # Also used during DynamoDB outages
         #   connection_burst_limit: "100"
-        #   rate_limiter: "dynamodb_token_bucket" # Default: local; also supports dynamodb_counter
-        #   rate_limiter_table: "temporal-dsql-rate-limiter" # Required for either DynamoDB mode
+        #   rate_limiter: "dynamodb_token_bucket" # Default: local
+        #   rate_limiter_table: "temporal-dsql-rate-limiter" # Required for token bucket mode
         #   token_bucket_rate: "100"
         #   token_bucket_capacity: "1000"
         #   token_bucket_max_wait: "30s"

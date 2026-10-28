@@ -59,16 +59,6 @@ type dsqlMetricsImpl struct {
 	poolLifetimeDestroys metrics.CounterIface
 	poolCanceledAcquires metrics.CounterIface
 
-	// Legacy metrics for backward compatibility
-	retryCounter              metrics.CounterIface
-	conflictCounter           metrics.CounterIface
-	conditionFailedCounter    metrics.CounterIface
-	operationDuration         metrics.TimerIface
-	retryAttempts             metrics.HistogramIface
-	activeTransactions        metrics.GaugeIface
-	errorCounter              metrics.CounterIface
-	unsupportedFeatureCounter metrics.CounterIface
-
 	// Pool collector state
 	poolCollectorMu     sync.Mutex
 	poolCollectorCancel context.CancelFunc
@@ -101,16 +91,6 @@ func NewDSQLMetrics(metricsHandler metrics.Handler) DSQLMetrics {
 		poolNewConns:         metricsHandler.Counter("dsql_pool_new_connections_total"),
 		poolLifetimeDestroys: metricsHandler.Counter("dsql_pool_lifetime_destroys_total"),
 		poolCanceledAcquires: metricsHandler.Counter("dsql_pool_canceled_acquires_total"),
-
-		// Legacy metrics for backward compatibility
-		retryCounter:              metricsHandler.Counter("dsql_tx_retries_total"),
-		conflictCounter:           metricsHandler.Counter("dsql_tx_conflicts_total"),
-		conditionFailedCounter:    metricsHandler.Counter("dsql_condition_failed_total"),
-		operationDuration:         metricsHandler.Timer("dsql_operation_duration"),
-		retryAttempts:             metricsHandler.Histogram("dsql_retry_attempts", metrics.Milliseconds),
-		activeTransactions:        metricsHandler.Gauge("dsql_active_transactions"),
-		errorCounter:              metricsHandler.Counter("dsql_errors_total"),
-		unsupportedFeatureCounter: metricsHandler.Counter("dsql_unsupported_feature_total"),
 	}
 }
 
@@ -208,68 +188,6 @@ func (m *dsqlMetricsImpl) recordPoolStats(stats *pgxpool.Stat) {
 	m.lastPoolCounters = values
 }
 
-// Legacy methods for backward compatibility
-
-// RecordRetry records a retry attempt (legacy method)
-func (m *dsqlMetricsImpl) RecordRetry(operation, sqlstate string, attempt int) {
-	m.retryCounter.Record(1,
-		metrics.StringTag("operation", operation),
-		metrics.StringTag("sqlstate", sqlstate),
-		metrics.StringTag("attempt", strconv.Itoa(attempt)),
-	)
-}
-
-// RecordConflict records a DSQL serialization conflict (legacy method)
-func (m *dsqlMetricsImpl) RecordConflict(operation string) {
-	m.conflictCounter.Record(1,
-		metrics.StringTag("operation", operation),
-	)
-}
-
-// RecordConditionFailed records a CAS condition failure (legacy method)
-func (m *dsqlMetricsImpl) RecordConditionFailed(operation string) {
-	m.conditionFailedCounter.Record(1,
-		metrics.StringTag("operation", operation),
-	)
-}
-
-// RecordOperationDuration records the duration of a DSQL operation (legacy method)
-func (m *dsqlMetricsImpl) RecordOperationDuration(operation string, duration time.Duration) {
-	m.operationDuration.Record(duration,
-		metrics.StringTag("operation", operation),
-	)
-}
-
-// RecordRetryAttempts records the number of retry attempts for an operation (legacy method)
-func (m *dsqlMetricsImpl) RecordRetryAttempts(operation string, attempts int) {
-	m.retryAttempts.Record(int64(attempts),
-		metrics.StringTag("operation", operation),
-	)
-}
-
-// RecordActiveTransaction records the current number of active transactions (legacy method)
-func (m *dsqlMetricsImpl) RecordActiveTransaction(operation string, delta float64) {
-	m.activeTransactions.Record(delta,
-		metrics.StringTag("operation", operation),
-	)
-}
-
-// RecordError records a DSQL error by type (legacy method)
-func (m *dsqlMetricsImpl) RecordError(operation string, errorType ErrorType) {
-	m.errorCounter.Record(1,
-		metrics.StringTag("operation", operation),
-		metrics.StringTag("error_type", errorType.String()),
-	)
-}
-
-// RecordUnsupportedFeature records when an unsupported feature is encountered (legacy method)
-func (m *dsqlMetricsImpl) RecordUnsupportedFeature(operation, feature string) {
-	m.unsupportedFeatureCounter.Record(1,
-		metrics.StringTag("operation", operation),
-		metrics.StringTag("feature", feature),
-	)
-}
-
 // noOpDSQLMetrics is a no-op implementation of DSQLMetrics for when metrics are disabled
 type noOpDSQLMetrics struct{}
 
@@ -280,67 +198,3 @@ func (n *noOpDSQLMetrics) IncTxRetry(op string, attempt int)                    
 func (n *noOpDSQLMetrics) ObserveTxBackoff(op string, delay time.Duration)               {}
 func (n *noOpDSQLMetrics) StartPoolCollector(pool *pgxpool.Pool, interval time.Duration) {}
 func (n *noOpDSQLMetrics) StopPoolCollector()                                            {}
-
-// DSQLOperationMetrics provides operation-specific metrics recording (legacy)
-type DSQLOperationMetrics struct {
-	metrics   *dsqlMetricsImpl
-	operation string
-	startTime time.Time
-}
-
-// NewDSQLOperationMetrics creates a new operation-specific metrics recorder (legacy)
-func NewDSQLOperationMetrics(metrics DSQLMetrics, operation string) *DSQLOperationMetrics {
-	impl, ok := metrics.(*dsqlMetricsImpl)
-	if !ok {
-		// If metrics is not the expected type, create a dummy one
-		impl = &dsqlMetricsImpl{}
-	}
-
-	return &DSQLOperationMetrics{
-		metrics:   impl,
-		operation: operation,
-		startTime: time.Now(),
-	}
-}
-
-// RecordStart records the start of an operation (legacy)
-func (m *DSQLOperationMetrics) RecordStart() {
-	m.metrics.RecordActiveTransaction(m.operation, 1)
-}
-
-// RecordEnd records the end of an operation (legacy)
-func (m *DSQLOperationMetrics) RecordEnd() {
-	duration := time.Since(m.startTime)
-	m.metrics.RecordOperationDuration(m.operation, duration)
-	m.metrics.RecordActiveTransaction(m.operation, -1)
-}
-
-// RecordRetry records a retry for this operation (legacy)
-func (m *DSQLOperationMetrics) RecordRetry(sqlstate string, attempt int) {
-	m.metrics.RecordRetry(m.operation, sqlstate, attempt)
-}
-
-// RecordConflict records a conflict for this operation (legacy)
-func (m *DSQLOperationMetrics) RecordConflict() {
-	m.metrics.RecordConflict(m.operation)
-}
-
-// RecordConditionFailed records a condition failure for this operation (legacy)
-func (m *DSQLOperationMetrics) RecordConditionFailed() {
-	m.metrics.RecordConditionFailed(m.operation)
-}
-
-// RecordError records an error for this operation (legacy)
-func (m *DSQLOperationMetrics) RecordError(errorType ErrorType) {
-	m.metrics.RecordError(m.operation, errorType)
-}
-
-// RecordUnsupportedFeature records an unsupported feature for this operation (legacy)
-func (m *DSQLOperationMetrics) RecordUnsupportedFeature(feature string) {
-	m.metrics.RecordUnsupportedFeature(m.operation, feature)
-}
-
-// RecordFinalAttempts records the total number of attempts made (legacy)
-func (m *DSQLOperationMetrics) RecordFinalAttempts(attempts int) {
-	m.metrics.RecordRetryAttempts(m.operation, attempts)
-}

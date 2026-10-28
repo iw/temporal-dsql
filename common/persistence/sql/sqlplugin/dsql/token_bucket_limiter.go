@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,15 +15,11 @@ import (
 )
 
 const (
-	TokenBucketEnabledEnvVar   = "DSQL_TOKEN_BUCKET_ENABLED"
-	TokenBucketRateEnvVar      = "DSQL_TOKEN_BUCKET_RATE"
-	TokenBucketCapacityEnvVar  = "DSQL_TOKEN_BUCKET_CAPACITY"
-	TokenBucketMaxWaitEnvVar   = "DSQL_TOKEN_BUCKET_MAX_WAIT"
 	DefaultTokenBucketRate     = 100
 	DefaultTokenBucketCapacity = 1000
 	DefaultTokenBucketMaxWait  = 30 * time.Second
 
-	// A new key isolates reservations from the old read-modify-write bucket.
+	// Reservations for each endpoint share one theoretical arrival time.
 	tokenBucketPKPrefix = "dsql_connect_gcra#"
 	gcraMaxAttempts     = 4
 )
@@ -176,4 +173,14 @@ func sleepForReservation(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return ctx.Err()
 	}
+}
+
+// normalizeEndpoint normalizes the endpoint string for consistent key generation.
+func normalizeEndpoint(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	// Strip any port if present.
+	if i := strings.IndexByte(s, ':'); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }

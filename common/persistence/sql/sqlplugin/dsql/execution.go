@@ -30,7 +30,6 @@ const (
  WHERE shard_id = $1 AND namespace_id = $2 AND workflow_id = $3 AND run_id = $4`
 
 	writeLockExecutionQuery = lockExecutionQueryBase + ` FOR UPDATE`
-	// NOTE: readLockExecutionQuery removed - read-lock clause is not supported by DSQL
 	// Use ReadLockExecutions method which delegates to WriteLockExecutions for DSQL compatibility
 
 	// current_executions queries (for WorkflowArchetypeID)
@@ -287,27 +286,11 @@ func (pdb *db) DeleteFromExecutions(
 	)
 }
 
-// ReadLockExecutions - DSQL-compatible implementation
-//
-// ANALYSIS RESULT: ReadLockExecutions is not used anywhere in the Temporal codebase.
-// All execution locking is performed through WriteLockExecutions with proper fencing tokens.
-//
-// DECISION: Delegate to WriteLockExecutions since DSQL doesn't support read-lock clause.
-// This maintains interface compatibility while using DSQL-supported locking mechanisms.
-//
-// SAFETY: This is safe because:
-// 1. Method is unused in current codebase (zero call sites found)
-// 2. WriteLockExecutions provides stronger guarantees than read-lock clause
-// 3. All actual execution locking uses WriteLockExecutions with proper fencing
-//
-// Requirements: 6.1, 6.2 - Replace unsupported read-lock clause with DSQL-compatible patterns
+// ReadLockExecutions uses the execution write lock because DSQL does not support FOR SHARE.
 func (pdb *db) ReadLockExecutions(
 	ctx context.Context,
 	filter sqlplugin.ExecutionsFilter,
 ) (int64, int64, error) {
-	// DSQL doesn't support read-lock clause, delegate to WriteLockExecutions
-	// This is safe since the method is unused in the codebase and WriteLockExecutions
-	// provides stronger consistency guarantees than read-lock clause would
 	return pdb.WriteLockExecutions(ctx, filter)
 }
 
@@ -679,7 +662,7 @@ func (pdb *db) InsertIntoHistoryScheduledTasks(
 	rows []sqlplugin.HistoryScheduledTasksRow,
 ) (sql.Result, error) {
 	for i := range rows {
-		rows[i].VisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(rows[i].VisibilityTimestamp)
+		rows[i].VisibilityTimestamp = pdb.converter.ToDSQLDateTime(rows[i].VisibilityTimestamp)
 	}
 	return pdb.NamedExecContext(
 		ctx,
@@ -694,8 +677,8 @@ func (pdb *db) RangeSelectFromHistoryScheduledTasks(
 	filter sqlplugin.HistoryScheduledTasksRangeFilter,
 ) ([]sqlplugin.HistoryScheduledTasksRow, error) {
 	var rows []sqlplugin.HistoryScheduledTasksRow
-	filter.InclusiveMinVisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(filter.InclusiveMinVisibilityTimestamp)
-	filter.ExclusiveMaxVisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(filter.ExclusiveMaxVisibilityTimestamp)
+	filter.InclusiveMinVisibilityTimestamp = pdb.converter.ToDSQLDateTime(filter.InclusiveMinVisibilityTimestamp)
+	filter.ExclusiveMaxVisibilityTimestamp = pdb.converter.ToDSQLDateTime(filter.ExclusiveMaxVisibilityTimestamp)
 	if err := pdb.SelectContext(ctx,
 		&rows,
 		getHistoryScheduledTasksQuery,
@@ -710,7 +693,7 @@ func (pdb *db) RangeSelectFromHistoryScheduledTasks(
 		return nil, err
 	}
 	for i := range rows {
-		rows[i].VisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(rows[i].VisibilityTimestamp)
+		rows[i].VisibilityTimestamp = pdb.converter.ToDSQLDateTime(rows[i].VisibilityTimestamp)
 	}
 	return rows, nil
 }
@@ -720,7 +703,7 @@ func (pdb *db) DeleteFromHistoryScheduledTasks(
 	ctx context.Context,
 	filter sqlplugin.HistoryScheduledTasksFilter,
 ) (sql.Result, error) {
-	filter.VisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(filter.VisibilityTimestamp)
+	filter.VisibilityTimestamp = pdb.converter.ToDSQLDateTime(filter.VisibilityTimestamp)
 	return pdb.ExecContext(ctx,
 		deleteHistoryScheduledTaskQuery,
 		filter.ShardID,
@@ -735,8 +718,8 @@ func (pdb *db) RangeDeleteFromHistoryScheduledTasks(
 	ctx context.Context,
 	filter sqlplugin.HistoryScheduledTasksRangeFilter,
 ) (sql.Result, error) {
-	filter.InclusiveMinVisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(filter.InclusiveMinVisibilityTimestamp)
-	filter.ExclusiveMaxVisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(filter.ExclusiveMaxVisibilityTimestamp)
+	filter.InclusiveMinVisibilityTimestamp = pdb.converter.ToDSQLDateTime(filter.InclusiveMinVisibilityTimestamp)
+	filter.ExclusiveMaxVisibilityTimestamp = pdb.converter.ToDSQLDateTime(filter.ExclusiveMaxVisibilityTimestamp)
 	return pdb.deleteInBatches(ctx, taskDeleteBatchSize,
 		rangeDeleteHistoryScheduledTasksQuery,
 		filter.ShardID,
@@ -808,7 +791,7 @@ func (pdb *db) InsertIntoTimerTasks(
 	rows []sqlplugin.TimerTasksRow,
 ) (sql.Result, error) {
 	for i := range rows {
-		rows[i].VisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(rows[i].VisibilityTimestamp)
+		rows[i].VisibilityTimestamp = pdb.converter.ToDSQLDateTime(rows[i].VisibilityTimestamp)
 	}
 	return pdb.NamedExecContext(ctx,
 		createTimerTasksQuery,
@@ -822,8 +805,8 @@ func (pdb *db) RangeSelectFromTimerTasks(
 	filter sqlplugin.TimerTasksRangeFilter,
 ) ([]sqlplugin.TimerTasksRow, error) {
 	var rows []sqlplugin.TimerTasksRow
-	filter.InclusiveMinVisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(filter.InclusiveMinVisibilityTimestamp)
-	filter.ExclusiveMaxVisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(filter.ExclusiveMaxVisibilityTimestamp)
+	filter.InclusiveMinVisibilityTimestamp = pdb.converter.ToDSQLDateTime(filter.InclusiveMinVisibilityTimestamp)
+	filter.ExclusiveMaxVisibilityTimestamp = pdb.converter.ToDSQLDateTime(filter.ExclusiveMaxVisibilityTimestamp)
 	err := pdb.SelectContext(ctx,
 		&rows,
 		getTimerTasksQuery,
@@ -838,7 +821,7 @@ func (pdb *db) RangeSelectFromTimerTasks(
 		return nil, err
 	}
 	for i := range rows {
-		rows[i].VisibilityTimestamp = pdb.converter.FromPostgreSQLDateTime(rows[i].VisibilityTimestamp)
+		rows[i].VisibilityTimestamp = pdb.converter.FromDSQLDateTime(rows[i].VisibilityTimestamp)
 	}
 	return rows, nil
 }
@@ -848,7 +831,7 @@ func (pdb *db) DeleteFromTimerTasks(
 	ctx context.Context,
 	filter sqlplugin.TimerTasksFilter,
 ) (sql.Result, error) {
-	filter.VisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(filter.VisibilityTimestamp)
+	filter.VisibilityTimestamp = pdb.converter.ToDSQLDateTime(filter.VisibilityTimestamp)
 	return pdb.ExecContext(ctx,
 		deleteTimerTaskQuery,
 		filter.ShardID,
@@ -862,8 +845,8 @@ func (pdb *db) RangeDeleteFromTimerTasks(
 	ctx context.Context,
 	filter sqlplugin.TimerTasksRangeFilter,
 ) (sql.Result, error) {
-	filter.InclusiveMinVisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(filter.InclusiveMinVisibilityTimestamp)
-	filter.ExclusiveMaxVisibilityTimestamp = pdb.converter.ToPostgreSQLDateTime(filter.ExclusiveMaxVisibilityTimestamp)
+	filter.InclusiveMinVisibilityTimestamp = pdb.converter.ToDSQLDateTime(filter.InclusiveMinVisibilityTimestamp)
+	filter.ExclusiveMaxVisibilityTimestamp = pdb.converter.ToDSQLDateTime(filter.ExclusiveMaxVisibilityTimestamp)
 	return pdb.deleteInBatches(ctx, taskDeleteBatchSize,
 		rangeDeleteTimerTaskQuery,
 		filter.ShardID,

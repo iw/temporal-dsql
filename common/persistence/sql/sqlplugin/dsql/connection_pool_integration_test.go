@@ -37,11 +37,9 @@ func testDSQLPoolIntegration(t *testing.T, user string) {
 	if endpoint == "" {
 		t.Skip("set DSQL_TEST_ENDPOINT to run against a live DSQL cluster")
 	}
-	region := os.Getenv("AWS_REGION")
-	require.NotEmpty(t, region, "AWS_REGION must be set")
 	logger := log.NewTestLogger()
 	resolved := testSettings(t, map[string]string{
-		"region": region, "cluster_endpoint": endpoint, "rate_limiter": "local",
+		"cluster_endpoint": endpoint, "rate_limiter": "local",
 	})
 	p := &plugin{driver: &driver.PGXDriver{}, rateLimiter: newConnectionRateLimiter(resolved)}
 	cache, err := p.tokenCacheForSettings(t.Context(), resolved, logger, metrics.NoopMetricsHandler)

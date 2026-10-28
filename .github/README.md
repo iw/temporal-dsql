@@ -12,7 +12,7 @@ This is a community distribution of [Temporal](https://github.com/temporalio/tem
 - A `dsql` SQL persistence plugin for Temporal's default store, in [`common/persistence/sql/sqlplugin/dsql`](../common/persistence/sql/sqlplugin/dsql)
 - A DSQL schema, in [`schema/dsql`](../schema/dsql), and a schema tool, `temporal-dsql-tool`
 - IAM authentication with generated tokens, so no database password is stored
-- pgxpool connection management and optional DynamoDB rate limiting; pools must be sized to fit the cluster's connection limit
+- pgxpool connection management and optional DynamoDB token bucket rate limiting; pools must be sized to fit the cluster's connection limit
 
 DSQL holds the persistence store only. Visibility needs a separate store, such as OpenSearch, Elasticsearch, PostgreSQL, MySQL or SQLite.
 
@@ -43,11 +43,11 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
      setup-schema --schema-name dsql/temporal --version 1.2
    ```
 
-   Start from a new cluster at version 1.2. To upgrade a cluster at 1.0 or 1.1, see the [deployment guide](../docs/dsql/deployment.md#upgrading-from-v11).
+   Create a fresh schema at version 1.2. Both schema setup paths are documented in the [deployment guide](../docs/dsql/deployment.md#1-schema-setup).
 
 3. Copy [`config/development-dsql.yaml`](../config/development-dsql.yaml) and replace its `connectAddr` placeholder with your cluster endpoint. It uses the DSQL database `postgres` and a separate in-memory SQLite visibility store for trying things out only. Keep [`config/dynamicconfig/development-dsql.yaml`](../config/dynamicconfig/development-dsql.yaml) at the configured path, or adjust `dynamicConfigClient.filepath`.
 
-   The plugin connects as `user`, which defaults to `admin`, using IAM tokens. It ignores `password` and defaults to `sslmode=verify-full` for server certificate and hostname verification. It takes the region from the cluster's host name, and credentials from the default AWS credential chain. Other plugin settings, such as rate limiting, go in the datastore's `connectAttributes`. The [deployment guide](../docs/dsql/deployment.md#datastore-settings-and-legacy-fallbacks) lists them, with the environment variables they replace. See [least-privilege role setup](../docs/dsql/deployment.md#least-privilege-role) before choosing another role.
+   The plugin connects as `user`, which defaults to `admin`, using IAM tokens. It ignores `password` and defaults to `sslmode=verify-full` for server certificate and hostname verification. It takes the region from the cluster's host name, and credentials from the default AWS credential chain. Other plugin settings, such as rate limiting, go in the datastore's `connectAttributes`. The [deployment guide](../docs/dsql/deployment.md#datastore-settings) lists the attributes and defaults. See [least-privilege role setup](../docs/dsql/deployment.md#least-privilege-role) before choosing another role.
 
 4. Start the server:
 
@@ -55,14 +55,14 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
    ./temporal-server --config-file <your-config>.yaml --allow-no-auth start
    ```
 
-For production settings, see the [deployment guide](../docs/dsql/deployment.md), which also covers rollback and why there's no data migration.
+See the [deployment guide](../docs/dsql/deployment.md) for configuration and operational guidance.
 
 ## Documentation
 
 - [DSQL documentation index](../docs/dsql/README.md)
 - [Deployment guide](../docs/dsql/deployment.md)
 - [Implementation details](../docs/dsql/implementation.md)
-- [Connection pool design, rollout and rollback](../docs/dsql/connection-pool.md)
+- [Connection pool design and sizing](../docs/dsql/connection-pool.md)
 - [Metrics reference](../docs/dsql/metrics.md)
 
 ## Releases

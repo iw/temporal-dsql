@@ -192,8 +192,6 @@ func (pdb *db) ExpectedVersion() string {
 	switch pdb.dbKind {
 	case sqlplugin.DbKindMain:
 		return dsqlschemaversion.Version
-	case sqlplugin.DbKindVisibility:
-		return dsqlschemaversion.VisibilityVersion
 	default:
 		panic(fmt.Sprintf("unknown db kind %v", pdb.dbKind))
 	}
@@ -205,12 +203,12 @@ func (pdb *db) VerifyVersion() error {
 	return schema.VerifyCompatibleVersion(pdb, pdb.dbName, expectedVersion)
 }
 
-// Commit commits a previously started transaction
+// Commit commits the active transaction
 func (pdb *db) Commit() error {
 	return pdb.tx.Commit()
 }
 
-// Rollback triggers rollback of a previously started transaction
+// Rollback triggers rollback of the active transaction
 func (pdb *db) Rollback() error {
 	return pdb.tx.Rollback()
 }

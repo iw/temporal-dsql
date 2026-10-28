@@ -3,9 +3,9 @@ package dsql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -67,7 +67,7 @@ func NewDSQLSchemaDBFromCLI(c *cli.Context, logger log.Logger) (*DSQLSchemaDB, e
 		endpoint = strings.TrimSpace(c.GlobalString("endpoint"))
 	}
 	if endpoint == "" {
-		return nil, fmt.Errorf("missing endpoint; set --%s or CLUSTER_ENDPOINT", schema.CLIOptEndpoint)
+		return nil, fmt.Errorf("missing endpoint; set --%s", schema.CLIOptEndpoint)
 	}
 
 	port := c.GlobalInt(schema.CLIOptPort)
@@ -85,15 +85,9 @@ func NewDSQLSchemaDBFromCLI(c *cli.Context, logger log.Logger) (*DSQLSchemaDB, e
 		dbName = "postgres"
 	}
 
-	region := strings.TrimSpace(c.GlobalString("region"))
-	if region == "" {
-		region = os.Getenv("REGION")
-	}
-	if region == "" {
-		region = os.Getenv("AWS_REGION")
-	}
-	if region == "" {
-		return nil, fmt.Errorf("AWS region must be provided via --region, REGION, or AWS_REGION")
+	region, err := schemaRegion(endpoint, c.GlobalString("region"))
+	if err != nil {
+		return nil, err
 	}
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
@@ -147,6 +141,17 @@ func NewDSQLSchemaDBFromCLI(c *cli.Context, logger log.Logger) (*DSQLSchemaDB, e
 	}
 
 	return &DSQLSchemaDB{db: db, logger: logger}, nil
+}
+
+func schemaRegion(endpoint, region string) (string, error) {
+	if region = strings.TrimSpace(region); region != "" {
+		return region, nil
+	}
+	parts := strings.Split(strings.TrimSuffix(strings.ToLower(endpoint), "."), ".")
+	if len(parts) == 5 && parts[0] != "" && parts[1] == "dsql" && parts[2] != "" && parts[3] == "on" && parts[4] == "aws" {
+		return parts[2], nil
+	}
+	return "", errors.New("cannot infer region from endpoint; set --region")
 }
 
 func schemaDSN(endpoint string, port int, user, token, dbName, sslMode string) string {

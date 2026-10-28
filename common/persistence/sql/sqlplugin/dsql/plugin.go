@@ -2,6 +2,7 @@ package dsql
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -44,13 +45,12 @@ type plugin struct {
 	credentialsInitialized bool
 
 	// Connection rate limiter (lazily initialized)
-	// Can be either local (ConnectionRateLimiter) or distributed (DistributedRateLimiter)
+	// Uses local pacing or DynamoDB token bucket reservations.
 	rateLimiterOnce        sync.Once
 	rateLimiter            driver.RateLimiter
 	rateLimiterSettings    settings
 	rateLimiterWarningOnce sync.Once
 
-	ignoredSettingsOnce sync.Once
 	lifetimeWarningOnce sync.Once
 	passwordWarningOnce sync.Once
 	sslModeWarningOnce  sync.Once
@@ -78,12 +78,11 @@ func (p *plugin) CreateDB(
 	logger log.Logger,
 	metricsHandler metrics.Handler,
 ) (sqlplugin.GenericDB, error) {
+	if dbKind == sqlplugin.DbKindVisibility {
+		return nil, errors.New("DSQL does not support visibility; configure a separate visibility store")
+	}
 	var resolved settings
 	if cfg.Connect == nil {
-		p.warnIgnoredSettings(logger)
-		if err := removedConnectionLeaseError(); err != nil {
-			return nil, err
-		}
 		var err error
 		resolved, err = resolveSettings(cfg, logger)
 		if err != nil {
@@ -250,12 +249,7 @@ func (p *plugin) initRateLimiter(resolved settings, logger log.Logger, handler m
 			logger.Error("Failed to create DynamoDB client for distributed rate limiter, falling back to local rate limiter", tag.Error(err))
 			return
 		}
-		var distributed driver.RateLimiter
-		if resolved.Limiter.Mode == tokenBucketMode {
-			distributed = newTokenBucketLimiter(client, resolved)
-		} else {
-			distributed = newDistributedRateLimiter(client, resolved)
-		}
+		distributed := newTokenBucketLimiter(client, resolved)
 		p.rateLimiter = newFailOpenRateLimiterWithSettings(distributed, resolved, logger, handler)
 		logger.Info("DSQL distributed connection rate limiter initialized", tag.NewStringTag("settings", resolved.limiterDescription()))
 	})

@@ -8,17 +8,15 @@ import (
 	"time"
 )
 
-type comparisonRun struct {
+type simulationRun struct {
 	cfg         *Config
-	name        string
 	sim         *Sim
 	start       time.Time
 	cluster     *dsqlCluster
 	limiter     *clientLimiter
 	instances   []*instance
 	pools       []*modelPool
-	stats       *comparisonStats
-	legacy      *Metrics
+	stats       *simulationStats
 	convergence map[string]*convergenceState
 }
 
@@ -35,22 +33,15 @@ func seeded(seed int64, key string) *rand.Rand {
 	return rand.New(rand.NewSource(seed ^ int64(h.Sum64())))
 }
 
-func newComparison(original *Config, variant string) (*comparisonRun, error) {
+func newSimulation(original *Config) (*simulationRun, error) {
 	c := *original
 	c.Services = append([]ServiceConfig(nil), original.Services...)
 	applyDefaults(&c)
-	if variant != "" {
-		c.Model = variant
-		for j := range c.Services {
-			c.Services[j].Model = variant
-		}
-	}
-	comparisonDefaults(&c)
 	if err := validate(&c); err != nil {
 		return nil, err
 	}
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	r := &comparisonRun{cfg: &c, name: variant, sim: NewSim(start, c.Duration), start: start, stats: newComparisonStats(), legacy: NewMetrics(), convergence: make(map[string]*convergenceState)}
+	r := &simulationRun{cfg: &c, sim: NewSim(start, c.Duration), start: start, stats: newSimulationStats(), convergence: make(map[string]*convergenceState)}
 	r.sim.quiet = true
 	for _, s := range c.Services {
 		for _, phase := range s.Workload.Phases {
@@ -59,9 +50,6 @@ func newComparison(original *Config, variant string) (*comparisonRun, error) {
 				r.stats.phases[phase.Name] = newPoolStats()
 			}
 		}
-	}
-	if r.name == "" {
-		r.name = c.Model
 	}
 	r.cluster = &dsqlCluster{run: r, cfg: c.Cluster, bucket: newTokenBucket(start, 100, 1000), rng: seeded(c.Seed, "cluster"), conns: make(map[int64]*physicalConn)}
 	r.limiter = &clientLimiter{run: r, mode: c.Limiter, bucket: newTokenBucket(start, 100, 1000), perSecond: NewPerSecondLimiter(c.LimiterPerSec), rng: seeded(c.Seed, "limiter")}
@@ -79,45 +67,23 @@ func newComparison(original *Config, variant string) (*comparisonRun, error) {
 		}
 	}
 	r.scenario()
-	r.sim.After(c.SampleEvery, "comparison-sample", r.sample)
+	r.sim.After(c.SampleEvery, "sample", r.sample)
 	return r, nil
 }
 
-func (r *comparisonRun) newInstance(name string, s ServiceConfig, generation int) *instance {
+func (r *simulationRun) newInstance(name string, s ServiceConfig, generation int) *instance {
 	return &instance{run: r, name: name, cfg: s, generation: generation, adaptive: newTokenBucket(r.sim.Now(), r.cfg.Adaptive.InitialRate, r.cfg.Adaptive.Capacity)}
 }
 
 func (i *instance) newPool(suffix string, ephemeral bool) *modelPool {
 	cfg := i.cfg
-	model := cfg.Model
-	if model == "" {
-		model = i.run.cfg.Model
-	}
-	switch model {
-	case "as-deployed":
-		model = "reservoir-sql"
-		cfg.EnforceLifetimeInUse = false
-		cfg.ConcurrentRefill = false
-		cfg.LeakOnClose = nil
-		cfg.ReconnectOnConnError = nil
-	case "option-a":
-		model = "reservoir-sql"
-		cfg.EnforceLifetimeInUse = true
-		cfg.ConcurrentRefill = true
-		no := false
-		cfg.LeakOnClose = &no
-		cfg.ReconnectOnConnError = &no
-	default:
-	}
 	if ephemeral {
 		cfg.InflightLimit = min(2, cfg.InflightLimit)
-		cfg.TargetReady = 5
-		cfg.MaxOpen = cfg.Ephemeral.Connections
 		cfg.PGX.MinConns = 0
 		cfg.PGX.MaxConns = cfg.Ephemeral.Connections
 	}
 	name := fmt.Sprintf("%s/g%d/%s", i.name, i.generation, suffix)
-	p := &modelPool{instance: i, name: name, model: model, cfg: cfg, rng: seeded(i.run.cfg.Seed, name), stats: newPoolStats(), ephemeral: ephemeral, owned: make(map[int64]*physicalConn)}
+	p := &modelPool{instance: i, name: name, cfg: cfg, rng: seeded(i.run.cfg.Seed, name), stats: newPoolStats(), ephemeral: ephemeral, owned: make(map[int64]*physicalConn)}
 	i.run.pools = append(i.run.pools, p)
 	return p
 }
@@ -130,8 +96,6 @@ func (i *instance) start() {
 		p := i.newPool(fmt.Sprintf("ephemeral-%d", j+1), true)
 		i.ephemeral = append(i.ephemeral, p)
 		p.start()
-		// Reservoir ephemeral settings: ready=5, low watermark=5, initial-fill
-		// timeout=10s, at most 2 opens locally (sequential refiller uses just 1).
 		w := WorkloadConfig{Enabled: true, MaxInUse: i.cfg.Ephemeral.Connections, ArrivalBurst: i.cfg.Ephemeral.Connections, SpawnEvery: 250 * time.Millisecond, HoldTime: 10 * time.Millisecond, MaxWait: 10 * time.Second}
 		i.workload(p, w, i.cfg.Ephemeral.Duration)
 	}
@@ -189,33 +153,7 @@ func (i *instance) workload(p *modelPool, w WorkloadConfig, duration time.Durati
 		}
 		tick()
 	}
-	p.afterInitialFill(begin)
-}
-
-func (p *modelPool) afterInitialFill(begin func()) {
-	if p.isPGX() {
-		begin()
-		return
-	}
-	// Match the reservoir low-watermark startup barrier, bounded by its fill
-	// timeout. Once admitted, driver.Open is always a nonblocking checkout.
-	timeout := 30 * time.Second
-	if p.ephemeral {
-		timeout = 10 * time.Second
-	}
-	deadline := p.run().sim.Now().Add(timeout)
-	var ready func()
-	ready = func() {
-		if p.closed || p.instance.closed {
-			return
-		}
-		if len(p.ready) >= p.cfg.TargetReady || !p.run().sim.Now().Before(deadline) {
-			begin()
-			return
-		}
-		p.run().sim.After(100*time.Millisecond, "initial-fill", ready)
-	}
-	ready()
+	begin()
 }
 
 func (i *instance) close() {
@@ -236,43 +174,7 @@ func (i *instance) close() {
 	}
 }
 
-// Each dead request queues a rebuild, including errors from the old pool while
-// it drains. A single worker serializes the rebuilds; none overlap or coalesce.
-func (i *instance) rebuild() {
-	if i.closed {
-		return
-	}
-	i.rebuildPending++
-	if i.rebuilding {
-		return
-	}
-	i.rebuilding = true
-	i.nextRebuild()
-}
-
-func (i *instance) nextRebuild() {
-	if i.closed {
-		return
-	}
-	if i.rebuildPending == 0 {
-		i.rebuilding = false
-		return
-	}
-	i.rebuildPending--
-	i.run.stats.rebuilds++
-	i.main.close()
-	i.generation++
-	i.main = i.newPool("main", false)
-	i.main.start()
-	if i.cfg.Workload.Enabled {
-		i.workload(i.main, i.cfg.Workload, 0)
-	}
-	// Serialized rebuild bookkeeping takes 1 simulated second. Initial fill and
-	// subsequent requests retain their normal limiter/handshake delays.
-	i.run.sim.After(time.Second, "rebuild-next", i.nextRebuild)
-}
-
-func (r *comparisonRun) scenario() {
+func (r *simulationRun) scenario() {
 	sc := r.cfg.Scenario
 	switch sc.Kind {
 	case "mass_drop":

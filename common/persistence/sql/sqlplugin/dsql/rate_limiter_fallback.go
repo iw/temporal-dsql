@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/common/metrics"
@@ -68,8 +69,9 @@ func (l *failOpenRateLimiter) Wait(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	var condition *types.ConditionalCheckFailedException
 	var ddbErr *dynamoDBLimiterError
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isConditionalFail(err) || !errors.As(err, &ddbErr) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &condition) || !errors.As(err, &ddbErr) {
 		return err
 	}
 	l.mu.Lock()

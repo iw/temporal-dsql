@@ -264,9 +264,9 @@ func (pdb *db) GetClusterMembers(
 			RPCAddress:    row.RPCAddress,
 			RPCPort:       row.RPCPort,
 			Role:          row.Role,
-			SessionStart:  pdb.converter.FromPostgreSQLDateTime(row.SessionStart),
-			LastHeartbeat: pdb.converter.FromPostgreSQLDateTime(row.LastHeartbeat),
-			RecordExpiry:  pdb.converter.FromPostgreSQLDateTime(row.RecordExpiry),
+			SessionStart:  pdb.converter.FromDSQLDateTime(row.SessionStart),
+			LastHeartbeat: pdb.converter.FromDSQLDateTime(row.LastHeartbeat),
+			RecordExpiry:  pdb.converter.FromDSQLDateTime(row.RecordExpiry),
 		}
 	}
 	return rows, nil

@@ -29,16 +29,12 @@ import (
 // DSQL_TEST_ENDPOINT is the cluster hostname; credentials use the default AWS chain.
 // Run from the repository root:
 //
-//	DSQL_TEST_ENDPOINT='<cluster-hostname>' AWS_REGION='<region>' go test -tags integration,disable_grpc_modules,test_dep ./common/persistence/sql/sqlplugin/dsql -run '^TestDSQLQuotasIntegration$' -count=1 -timeout=5m -v
+//	DSQL_TEST_ENDPOINT='<cluster-hostname>' go test -tags integration,disable_grpc_modules,test_dep ./common/persistence/sql/sqlplugin/dsql -run '^TestDSQLQuotasIntegration$' -count=1 -timeout=5m -v
 func TestDSQLQuotasIntegration(t *testing.T) {
 	endpoint := os.Getenv("DSQL_TEST_ENDPOINT")
 	if endpoint == "" {
 		t.Skip("set DSQL_TEST_ENDPOINT to run against a live DSQL cluster")
 	}
-	region := os.Getenv("AWS_REGION")
-	require.NotEmpty(t, region, "AWS_REGION must be set")
-	t.Setenv("REGION", region)
-	t.Setenv("CLUSTER_ENDPOINT", endpoint)
 
 	db, err := persistencesql.NewSQLDB(sqlplugin.DbKindMain, &config.SQL{
 		PluginName: dsql.PluginName, DatabaseName: "postgres",

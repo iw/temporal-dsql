@@ -12,14 +12,12 @@ type openJob struct {
 }
 
 type instance struct {
-	run                  *comparisonRun
+	run                  *simulationRun
 	name                 string
 	cfg                  ServiceConfig
 	main                 *modelPool
 	ephemeral            []*modelPool
 	generation           int
-	rebuildPending       int
-	rebuilding           bool
 	closed               bool
 	active, peakInflight int
 	queue                []*openJob
@@ -70,7 +68,7 @@ type limiterWaiter struct {
 }
 
 type clientLimiter struct {
-	run       *comparisonRun
+	run       *simulationRun
 	mode      string
 	bucket    *tokenBucket
 	perSecond *PerSecondLimiter

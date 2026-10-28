@@ -1,6 +1,0 @@
-{
-  "CurrVersion": "1.1",
-  "MinCompatibleVersion": "1.0",
-  "Description": "Add current_chasm_executions table for CHASM support (derived from PostgreSQL v1.19)",
-  "SchemaUpdateCqlFiles": ["current_chasm_executions.sql"]
-}

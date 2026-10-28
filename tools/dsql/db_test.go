@@ -40,3 +40,20 @@ func TestSchemaDSNTLS(t *testing.T) {
 		})
 	}
 }
+
+func TestSchemaRegion(t *testing.T) {
+	for _, tc := range []struct{ endpoint, region, want string }{
+		{"test.dsql.eu-west-1.on.aws", "", "eu-west-1"},
+		{"TEST.DSQL.EU-WEST-1.ON.AWS.", "", "eu-west-1"},
+		{"test.dsql.eu-west-1.on.aws", " us-east-1 ", "us-east-1"},
+		{"db.example.invalid", "us-east-1", "us-east-1"},
+	} {
+		got, err := schemaRegion(tc.endpoint, tc.region)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, got)
+	}
+	for _, endpoint := range []string{"", "db.example.invalid", ".dsql.eu-west-1.on.aws", "test.dsql.eu-west-1.on.aws.example"} {
+		_, err := schemaRegion(endpoint, "")
+		require.ErrorContains(t, err, "set --region")
+	}
+}

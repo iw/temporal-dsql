@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -79,20 +77,17 @@ func TestWorkloadPhaseValidation(t *testing.T) {
 		{"negative tick", func(w *WorkloadConfig) { w.Phases[0].SpawnEvery = -time.Second }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := testConfig("pgxpool")
+			c := testConfig()
 			c.Services[0].Workload = phaseWorkload()
 			tc.change(&c.Services[0].Workload)
-			_, err := newComparison(c, "")
+			_, err := newSimulation(c)
 			require.Error(t, err)
 		})
 	}
 	w := phaseWorkload()
 	w.Phases = append(w.Phases, WorkloadPhase{Name: "next", At: 3850 * time.Millisecond, Duration: time.Second})
 	require.NoError(t, w.validatePhases(), "adjacent phases are allowed")
-	path := filepath.Join(t.TempDir(), "legacy.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("services:\n  - name: history\n    workload:\n      maxInUse: 1\n      phases:\n        - {name: peak, at: 1s, duration: 1s, maxInUse: 2}\n"), 0600))
-	_, err := LoadConfig(path)
-	require.ErrorContains(t, err, "legacy ReservoirWorkload does not support phases")
+
 }
 
 func inUse(p *modelPool) int {
@@ -106,7 +101,7 @@ func inUse(p *modelPool) int {
 }
 
 func TestWorkloadPhaseGenerator(t *testing.T) {
-	r, p := testPool(t, "pgxpool")
+	r, p := testPool(t)
 	p.cfg.PGX.MaxConns = 30
 	p.cfg.PGX.MinConns = 30
 	p.start()
@@ -136,15 +131,14 @@ func TestWorkloadPhaseGenerator(t *testing.T) {
 }
 
 func TestWorkloadPhasesUseGlobalTimeAndExcludeEphemeral(t *testing.T) {
-	cfg := testConfig("pgxpool")
+	cfg := testConfig()
 	s := &cfg.Services[0]
-	s.TargetReady = 30
 	s.PGX.MaxConns = 30
 	s.Workload = phaseWorkload()
 	s.Workload.Phases[0].Ramp = 0
 	s.StartDelay = 2 * time.Second // Start halfway through the phase.
 	s.Ephemeral = EphemeralConfig{Pools: 1, Connections: 2, Duration: time.Second}
-	r, err := newComparison(cfg, "")
+	r, err := newSimulation(cfg)
 	require.NoError(t, err)
 	advance(r, 2010*time.Millisecond)
 	p := r.instances[0].main
@@ -154,21 +148,25 @@ func TestWorkloadPhasesUseGlobalTimeAndExcludeEphemeral(t *testing.T) {
 	require.EqualValues(t, 22, r.stats.requests)
 	require.EqualValues(t, 1, r.stats.startDelay.count)
 	require.Zero(t, r.stats.startDelay.maximum)
-	// A rebuilt main pool also uses the simulation clock.
-	r.instances[0].rebuild()
+	// A replacement instance also uses the simulation clock.
+	previous := r.instances[0]
+	previous.close()
+	replacement := r.newInstance(previous.name, previous.cfg, previous.generation+1)
+	r.instances[0] = replacement
+	replacement.start()
 	advance(r, 10*time.Millisecond)
 	require.EqualValues(t, 20, r.instances[0].main.stats.requests)
 	require.EqualValues(t, 40, r.stats.phases["peak"].requests)
 }
 
 func TestPhaseAttributionAndSummaryOrder(t *testing.T) {
-	cfg := testConfig("pgxpool")
+	cfg := testConfig()
 	cfg.Services[0].Workload = phaseWorkload()
 	cfg.Services[0].Workload.Phases = append(cfg.Services[0].Workload.Phases, WorkloadPhase{Name: "spike", At: 5 * time.Second, Duration: time.Second})
 	other := cfg.Services[0]
 	other.Name = "other"
 	cfg.Services = append(cfg.Services, other)
-	r, err := newComparison(cfg, "")
+	r, err := newSimulation(cfg)
 	require.NoError(t, err)
 	r.sim.q = nil
 	i := r.instances[0]
@@ -196,45 +194,27 @@ func TestPhaseAttributionAndSummaryOrder(t *testing.T) {
 	require.Zero(t, r.stats.phases["spike"].requests)
 	require.Equal(t, []string{"peak", "spike"}, r.stats.phaseNames)
 	rows := r.summary()
-	require.Equal(t, "peak: requests / failed", rows[17][0])
-	require.Equal(t, "3 / 1", rows[17][1])
-	require.Equal(t, "spike: requests / failed", rows[21][0])
+	require.Equal(t, "peak: requests / failed", rows[16][0])
+	require.Equal(t, "3 / 1", rows[16][1])
+	require.Equal(t, "spike: requests / failed", rows[20][0])
 }
 
 func TestWorkloadStartDelay(t *testing.T) {
-	for _, model := range []string{"as-deployed", "option-a", "pgxpool"} {
-		t.Run(model, func(t *testing.T) {
-			cfg := testConfig(model)
-			cfg.Services[0].Workload = phaseWorkload()
-			cfg.Cluster.Handshake = LatencyRange{time.Second, time.Second}
-			r, err := newComparison(cfg, "")
-			require.NoError(t, err)
-			advance(r, 3*time.Second)
-			require.EqualValues(t, 1, r.stats.startDelay.count)
-			if model == "pgxpool" {
-				require.Zero(t, r.stats.startDelay.maximum)
-			} else {
-				require.GreaterOrEqual(t, r.stats.startDelay.maximum, time.Second)
-			}
-		})
-	}
+	cfg := testConfig()
+	cfg.Services[0].Workload = phaseWorkload()
+	cfg.Cluster.Handshake = LatencyRange{time.Second, time.Second}
+	r, err := newSimulation(cfg)
+	require.NoError(t, err)
+	advance(r, 3*time.Second)
+	require.EqualValues(t, 1, r.stats.startDelay.count)
+	require.Zero(t, r.stats.startDelay.maximum)
 }
 
-func TestWorkloadStartDelayFillTimeoutAndUnstartedPools(t *testing.T) {
-	cfg := testConfig("as-deployed")
-	cfg.Cluster.MaxConnections = 1 // Target 2 can never fill.
-	cfg.Services[0].Workload = phaseWorkload()
-	r, err := newComparison(cfg, "")
-	require.NoError(t, err)
-	advance(r, 30*time.Second-time.Nanosecond)
-	require.Zero(t, r.stats.startDelay.count)
-	advance(r, time.Nanosecond)
-	require.EqualValues(t, 1, r.stats.startDelay.count)
-	require.Equal(t, 30*time.Second, r.stats.startDelay.maximum)
-	p := r.instances[0].newPool("closed-before-work", false)
+func TestClosedPoolHasNoWorkloadStartObservation(t *testing.T) {
+	r, p := testPool(t)
 	p.start()
-	p.instance.workload(p, cfg.Services[0].Workload, 0)
 	p.close()
+	p.instance.workload(p, phaseWorkload(), 0)
 	advance(r, time.Second)
-	require.EqualValues(t, 1, r.stats.startDelay.count, "pools closed before their first request have no observation")
+	require.Zero(t, r.stats.startDelay.count)
 }

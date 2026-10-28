@@ -1,6 +1,0 @@
-{
-  "CurrVersion": "1.0",
-  "MinCompatibleVersion": "1.0",
-  "Description": "Initial DSQL schema - PostgreSQL-compatible with DSQL-specific adaptations",
-  "SchemaUpdateCqlFiles": ["schema.sql"]
-}

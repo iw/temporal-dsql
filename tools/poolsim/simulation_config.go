@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// ComparisonConfig opts into physical connections; absent fields preserve the legacy engine.
-type ComparisonConfig struct {
-	Model                    string         `json:"model" yaml:"model"`
+// SimulationConfig configures the cluster, limiter and run assertions.
+type SimulationConfig struct {
 	Cluster                  ClusterConfig  `json:"cluster" yaml:"cluster"`
 	Limiter                  string         `json:"limiter" yaml:"limiter"`
 	LimiterLatency           LatencyRange   `json:"limiterLatency" yaml:"limiterLatency"`
@@ -35,16 +34,10 @@ type AdaptiveConfig struct {
 }
 
 type PoolConfig struct {
-	Model                string          `json:"model" yaml:"model"`
-	Replicas             int             `json:"replicas" yaml:"replicas"`
-	MaxOpen              int             `json:"maxOpen" yaml:"maxOpen"`
-	InflightLimit        int             `json:"inflightLimit" yaml:"inflightLimit"`
-	EnforceLifetimeInUse bool            `json:"enforceLifetimeInUse" yaml:"enforceLifetimeInUse"`
-	ConcurrentRefill     bool            `json:"concurrentRefill" yaml:"concurrentRefill"`
-	LeakOnClose          *bool           `json:"leakOnClose" yaml:"leakOnClose"`
-	ReconnectOnConnError *bool           `json:"reconnectOnConnError" yaml:"reconnectOnConnError"`
-	PGX                  PGXConfig       `json:"pgxpool" yaml:"pgxpool"`
-	Ephemeral            EphemeralConfig `json:"ephemeral" yaml:"ephemeral"`
+	Replicas      int             `json:"replicas" yaml:"replicas"`
+	InflightLimit int             `json:"inflightLimit" yaml:"inflightLimit"`
+	PGX           PGXConfig       `json:"pgxpool" yaml:"pgxpool"`
+	Ephemeral     EphemeralConfig `json:"ephemeral" yaml:"ephemeral"`
 }
 
 type PGXConfig struct {
@@ -54,8 +47,6 @@ type PGXConfig struct {
 	MaxConnLifetimeJitter time.Duration `json:"maxConnLifetimeJitter" yaml:"maxConnLifetimeJitter"`
 	MaxConnIdleTime       time.Duration `json:"maxConnIdleTime" yaml:"maxConnIdleTime"`
 	HealthCheckPeriod     time.Duration `json:"healthCheckPeriod" yaml:"healthCheckPeriod"`
-	// AcquireGuard enables the proposed BeforeAcquire guard-window check; nil means true.
-	AcquireGuard *bool `json:"acquireGuard" yaml:"acquireGuard"`
 }
 
 type EphemeralConfig struct {
@@ -64,27 +55,9 @@ type EphemeralConfig struct {
 	Duration    time.Duration `json:"duration" yaml:"duration"`
 }
 
-func usesComparison(c *Config) bool {
-	if c.Model != "" || c.Limiter != "" || c.Cluster != (ClusterConfig{}) || c.Scenario.Kind == "fleet_start" || c.Scenario.Kind == "rolling_deploy" || c.Scenario.Kind == "ddb_outage" {
-		return true
-	}
-	for _, s := range c.Services {
-		if s.PoolConfig != (PoolConfig{}) {
-			return true
-		}
-	}
-	return false
-}
-
-func comparisonDefaults(c *Config) {
-	if c.Model == "" {
-		c.Model = "reservoir"
-	}
+func simulationDefaults(c *Config) {
 	if c.Limiter == "" {
-		c.Limiter = "perSecond"
-		if c.Scenario.Kind == "ddb_outage" {
-			c.Limiter = "tokenBucket"
-		}
+		c.Limiter = "tokenBucket"
 	}
 	if c.Cluster.MaxConnections == 0 {
 		c.Cluster.MaxConnections = 10000
@@ -119,14 +92,11 @@ func poolDefaults(s *ServiceConfig) {
 	if s.Replicas == 0 {
 		s.Replicas = 1
 	}
-	if s.MaxOpen == 0 {
-		s.MaxOpen = s.TargetReady
-	}
 	if s.InflightLimit == 0 {
 		s.InflightLimit = 8
 	}
 	if s.PGX.MaxConns == 0 {
-		s.PGX.MaxConns = s.MaxOpen
+		s.PGX.MaxConns = 100
 	}
 	if s.PGX.MaxConnLifetime == 0 {
 		s.PGX.MaxConnLifetime = 50 * time.Minute
@@ -142,22 +112,10 @@ func poolDefaults(s *ServiceConfig) {
 	}
 }
 
-func validModel(model string) bool {
-	switch model {
-	case "", "reservoir", "reservoir-sql", "as-deployed", "option-a", "pgxpool":
-		return true
-	default:
-		return false
-	}
-}
-
-func validateComparison(original *Config) error {
+func validateSimulation(original *Config) error {
 	c := *original
 	c.Services = append([]ServiceConfig(nil), original.Services...)
-	comparisonDefaults(&c)
-	if !validModel(c.Model) {
-		return fmt.Errorf("unknown model %q", c.Model)
-	}
+	simulationDefaults(&c)
 	switch c.Limiter {
 	case "perSecond", "tokenBucket", "adaptive":
 	default:
@@ -196,13 +154,13 @@ func validateComparison(original *Config) error {
 }
 
 func validatePool(s ServiceConfig) error {
-	if !validModel(s.Model) || s.Replicas < 1 || s.MaxOpen < 1 || s.InflightLimit < 1 {
+	if s.Replicas < 1 || s.InflightLimit < 1 {
 		return fmt.Errorf("invalid service %q", s.Name)
 	}
-	if s.StartDelay < 0 || s.Jitter < 0 || s.GuardWindow < 0 {
-		return fmt.Errorf("invalid reservoir timing for %s", s.Name)
+	if s.StartDelay < 0 {
+		return fmt.Errorf("invalid startup timing for %s", s.Name)
 	}
-	if err := validatePGX(s.PGX, s.GuardWindow); err != nil {
+	if err := validatePGX(s.PGX); err != nil {
 		return fmt.Errorf("%s: %w", s.Name, err)
 	}
 	if s.Ephemeral.Pools < 0 || s.Ephemeral.Connections < 1 || s.Ephemeral.Duration <= 0 {
@@ -218,19 +176,12 @@ func validatePool(s ServiceConfig) error {
 	return nil
 }
 
-func validatePGX(p PGXConfig, guard time.Duration) error {
+func validatePGX(p PGXConfig) error {
 	if p.MinConns < 0 || p.MinConns > p.MaxConns || p.MaxConns < 1 {
 		return errors.New("invalid pgxpool connection bounds")
 	}
-	if p.MaxConnLifetime <= guard || p.MaxConnLifetimeJitter < 0 || p.MaxConnIdleTime < 0 || p.HealthCheckPeriod <= 0 {
+	if p.MaxConnLifetime <= 0 || p.MaxConnLifetimeJitter < 0 || p.MaxConnIdleTime < 0 || p.HealthCheckPeriod <= 0 {
 		return errors.New("invalid pgxpool timing")
 	}
 	return nil
-}
-
-func boolDefault(p *bool, fallback bool) bool {
-	if p == nil {
-		return fallback
-	}
-	return *p
 }

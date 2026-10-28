@@ -9,9 +9,6 @@ import (
 	"io"
 	"math"
 	"net/url"
-	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -180,39 +177,4 @@ func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, 
 	db.MapperFunc(strcase.ToSnake)
 	collector.StartPoolCollector(pool, poolMetricsInterval)
 	return db, connector, nil
-}
-
-// DistributedConnLeaseEnabledEnvVar is retained solely to refuse deployments
-// that still rely on the removed lease.
-const DistributedConnLeaseEnabledEnvVar = "DSQL_DISTRIBUTED_CONN_LEASE_ENABLED"
-
-func removedConnectionLeaseError() error {
-	enabled, _ := strconv.ParseBool(os.Getenv(DistributedConnLeaseEnabledEnvVar))
-	if enabled {
-		return errors.New("DSQL connection lease was removed (#33). Size the pools so the fleet's total connections, including the overlap during deploys, fits the cluster's connection limit, then unset DSQL_DISTRIBUTED_CONN_LEASE_ENABLED")
-	}
-	return nil
-}
-
-func (p *plugin) warnIgnoredSettings(logger log.Logger) {
-	p.ignoredSettingsOnce.Do(func() {
-		var ignored []string
-		// Retired settings are recognized only to emit a migration warning.
-		for _, name := range []string{
-			"DSQL_RESERVOIR_ENABLED", "DSQL_RESERVOIR_TARGET_READY", "DSQL_RESERVOIR_LOW_WATERMARK",
-			"DSQL_RESERVOIR_BASE_LIFETIME", "DSQL_RESERVOIR_LIFETIME_JITTER", "DSQL_RESERVOIR_GUARD_WINDOW",
-			"DSQL_RESERVOIR_INITIAL_FILL_TIMEOUT", "DSQL_RESERVOIR_INFLIGHT_LIMIT",
-			"DSQL_POOL_WARMUP_STAGGER_DURATION", "DSQL_POOL_KEEPER_TICK_INTERVAL", "DSQL_POOL_KEEPER_MAX_CONNS_PER_TICK",
-			"DSQL_STAGGERED_STARTUP", "DSQL_STAGGERED_STARTUP_MAX_DELAY",
-			"DSQL_DISTRIBUTED_CONN_LEASE_TABLE", "DSQL_DISTRIBUTED_CONN_LIMIT",
-			"DSQL_SLOT_BLOCK_SIZE", "DSQL_SLOT_BLOCK_COUNT", "DSQL_SLOT_BLOCK_TTL", "DSQL_SLOT_BLOCK_RENEW_INTERVAL",
-		} {
-			if _, set := os.LookupEnv(name); set {
-				ignored = append(ignored, name)
-			}
-		}
-		if len(ignored) > 0 {
-			logger.Warn("DSQL connection settings are ignored with pgxpool", tag.NewStringTag("ignored_settings", strings.Join(ignored, ", ")))
-		}
-	})
 }

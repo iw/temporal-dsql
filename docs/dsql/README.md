@@ -9,16 +9,16 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 - **IAM authentication** with automatic token refresh — no stored passwords
 - **Optimistic concurrency control** — core retries whole transactions on SQLSTATE 40001 through the plugin retry policy
 - **pgxpool connection pooling** for rate-limit-aware connection management
-- **Distributed rate limiting** via DynamoDB (opt-in), with monotonic token bucket reservations; connection leasing was removed, so size every pool to fit the cluster's connection limit
+- **Distributed rate limiting** via DynamoDB (opt-in), with monotonic token bucket reservations; size every pool to fit the cluster's connection limit
 - **Per-run buffered event IDs**, allocated inside the transaction that writes them
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [Deployment Guide](deployment.md) | Production deployment: schema setup, configuration, and operational guidance |
-| [Connection Pool](connection-pool.md) | Pool sizing, lifetime, rollout and rollback |
-| [Implementation Details](implementation.md) | Code structure, schema changes, transaction retries, shard ownership checks and batched deletion |
+| [Deployment Guide](deployment.md) | Deployment: schema setup, configuration, and operational guidance |
+| [Connection Pool](connection-pool.md) | Pool sizing, lifetime, deployment checks |
+| [Implementation Details](implementation.md) | Code structure, schema layout, transaction retries, shard ownership checks and batched deletion |
 | [Metrics Reference](metrics.md) | Emitted metrics and alerting recommendations |
 | [Upstream Changes](upstream-changes.md) | Changes outside fork-owned packages and their path upstream |
 
