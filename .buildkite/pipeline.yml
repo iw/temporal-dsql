@@ -1,0 +1,67 @@
+# Runs the ci module (docs/dsql/ci.md) on Namespace's Buildkite agents. Each step starts
+# the pinned engine and keeps its state on a Namespace cache volume, so the build cache
+# outlives the job, and stops the engine before the job ends so the volume is saved after
+# a clean shutdown. `$$` defers expansion to the job's shell. Builds leave AWS out: the
+# live tests run on a developer's machine.
+
+agents:
+  nsc-shape: "8x32"
+
+env:
+  # Jobs run in a terminal, where `dagger` would draw its interactive UI. The report is
+  # what it prints without one.
+  DAGGER_PROGRESS: report
+  # Each step's engine keeps its state on the step's cache volume.
+  TEMPORAL_DSQL_ENGINE_STATE: /cache/engine
+  # The only submodule holds Grafana dashboards, which no step needs.
+  BUILDKITE_GIT_SUBMODULES: "false"
+
+steps:
+  - label: ":go: build"
+    key: build
+    # Go cross-compiles, so one agent builds both architectures.
+    command: |
+      eval "$$(.dagger/engine.sh)"
+      trap '.dagger/engine.sh stop' EXIT
+      dagger call ci build --platform linux/amd64 entries
+      dagger call ci build --platform linux/arm64 entries
+    agents:
+      # Larger than the engine's 30 GB cache cap: a cache that outgrows its volume
+      # starts empty on the next job.
+      nsc-cache-tag: "temporal-dsql-build"
+      nsc-cache-size: "50gb"
+    timeout_in_minutes: 30
+    notify:
+      - github_commit_status:
+          context: "buildkite/build"
+
+  # A pull request lints the lines it adds since its merge base with the base branch.
+  # Other builds, where the base branch is empty, lint their own commit.
+  - label: ":lint-roller: lint"
+    key: lint
+    command: |
+      eval "$$(.dagger/engine.sh)"
+      trap '.dagger/engine.sh stop' EXIT
+      dagger call ci lint --base "$$BUILDKITE_PULL_REQUEST_BASE_BRANCH"
+    agents:
+      nsc-shape: "16x32"
+      nsc-cache-tag: "temporal-dsql-lint"
+      nsc-cache-size: "50gb"
+    timeout_in_minutes: 45
+    notify:
+      - github_commit_status:
+          context: "buildkite/lint"
+
+  - label: ":test_tube: test"
+    key: test
+    command: |
+      eval "$$(.dagger/engine.sh)"
+      trap '.dagger/engine.sh stop' EXIT
+      dagger call ci test
+    agents:
+      nsc-cache-tag: "temporal-dsql-test"
+      nsc-cache-size: "50gb"
+    timeout_in_minutes: 45
+    notify:
+      - github_commit_status:
+          context: "buildkite/test"

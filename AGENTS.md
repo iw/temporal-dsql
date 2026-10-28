@@ -95,10 +95,13 @@
 - `docs/dsql/implementation.md` - Technical implementation details
 - `docs/dsql/connection-pool.md` - Pool architecture, sizing and lifecycle
 - `docs/dsql/metrics.md` - Metrics reference
+- `docs/dsql/ci.md` - CI: the Dagger module, the Buildkite pipeline and the live tests
 
 #### Tooling
 - `tools/poolsim/` - Discrete event simulator for pgxpool, DSQL limits and workload scenarios
 - `tools/dsql/` - DSQL schema management tool
+- `.dagger/modules/ci/` - Dagger CI module: `dagger call ci build|lint|test`
+- `.dagger/live/` - Rust program for the DSQL live tests on throwaway AWS resources, run locally with the `temporal-dsql-ci` profile
 
 ### Known Constraints
 
@@ -140,4 +143,5 @@ Plugin settings come only from datastore `connectAttributes` or defaults. Region
 | `docs/dsql/implementation.md` | Technical implementation details |
 | `docs/dsql/connection-pool.md` | Pool architecture, sizing and lifecycle |
 | `docs/dsql/metrics.md` | Metrics reference |
+| `docs/dsql/ci.md` | CI: the Dagger module, the Buildkite pipeline and the live tests |
 | `tools/poolsim/README.md` | Pool simulator documentation |

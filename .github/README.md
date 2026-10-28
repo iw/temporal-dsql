@@ -64,6 +64,7 @@ The [deployment guide](../docs/dsql/deployment.md) covers the rest of the config
 - [Implementation details](../docs/dsql/implementation.md)
 - [Connection pool design and sizing](../docs/dsql/connection-pool.md)
 - [Metrics reference](../docs/dsql/metrics.md)
+- [CI](../docs/dsql/ci.md)
 
 ## Releases
 

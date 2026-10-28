@@ -1,0 +1,295 @@
+{
+  "descriptor_digest": "sha256:40b9f6bd11056127fd9957a878e695db2ed5c18aff087ae3d975b9a0ab173b13",
+  "format_version": 1,
+  "types": {
+    "Ci": {
+      "deprecation": null,
+      "documentation": null,
+      "enum_values": [],
+      "fields": [],
+      "functions": [
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Target platform, such as linux/arm64; defaults to the engine's platform.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 61,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "platform"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Compiles temporal-server, temporal-dsql-tool and temporal-elasticsearch-tool.",
+          "return_type": {
+            "kind": "named",
+            "name": "Directory",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 57,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "build"
+        },
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Branch the change merges into, such as main; the diff starts at its merge base with HEAD. Without it, the diff is HEAD's own commit.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 76,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "base"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Unified diff to lint instead of one from Git history, for a checkout without it, such as a Git worktree.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 80,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "File",
+                "nullable": true
+              },
+              "wire_name": "patch"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": "/",
+              "deprecation": null,
+              "documentation": "The repository's Git metadata; defaults to the workspace's.",
+              "ignore": [
+                "*",
+                "!.git",
+                "!.git/**"
+              ],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 86,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Directory",
+                "nullable": false
+              },
+              "wire_name": "git"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Runs golangci-lint and the errortype vet check, as make lint-code does, with\ngolangci-lint limited to the lines a change adds, as upstream CI's --new-from-rev.",
+          "return_type": {
+            "kind": "named",
+            "name": "String",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 70,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "lint"
+        },
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Package patterns to test instead of the default set.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 81,
+                "line": 136,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "element": {
+                  "kind": "named",
+                  "name": "String",
+                  "nullable": false
+                },
+                "kind": "list",
+                "nullable": true
+              },
+              "wire_name": "packages"
+            },
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": null,
+              "deprecation": null,
+              "documentation": "Only run tests matching this regular expression, as go test -run.",
+              "ignore": [],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 140,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "String",
+                "nullable": true
+              },
+              "wire_name": "run"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": false,
+          "deprecation": null,
+          "documentation": "Runs the SQL persistence, DSQL plugin, schema, DSQL tool and pool simulator tests\nwith the race detector.",
+          "return_type": {
+            "kind": "named",
+            "name": "String",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 18,
+            "line": 133,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "test"
+        }
+      ],
+      "interfaces": [],
+      "kind": "object",
+      "source": {
+        "column": 12,
+        "line": 32,
+        "path": "src/lib.rs"
+      },
+      "wire_name": "Ci"
+    },
+    "Query": {
+      "deprecation": null,
+      "documentation": "The module query root.",
+      "enum_values": [],
+      "fields": [],
+      "functions": [
+        {
+          "arguments": [
+            {
+              "default": null,
+              "default_address": null,
+              "default_path": "/",
+              "deprecation": null,
+              "documentation": "Repository checkout; defaults to the workspace root.",
+              "ignore": [
+                ".git",
+                ".claude",
+                ".cursor",
+                ".idea",
+                ".vscode",
+                ".dagger",
+                ".buildkite",
+                "**/.DS_Store",
+                ".bin",
+                ".stamp",
+                ".tmp",
+                ".testoutput",
+                ".coverage",
+                "dist",
+                "develop/docker-compose",
+                "temporal-*",
+                "tdbg",
+                "tctl*",
+                "fairsim",
+                "poolsim"
+              ],
+              "optional": true,
+              "source": {
+                "column": 9,
+                "line": 50,
+                "path": "src/lib.rs"
+              },
+              "ty": {
+                "kind": "named",
+                "name": "Directory",
+                "nullable": false
+              },
+              "wire_name": "source"
+            }
+          ],
+          "cache": {
+            "kind": "default"
+          },
+          "constructor": true,
+          "deprecation": null,
+          "documentation": null,
+          "return_type": {
+            "kind": "named",
+            "name": "Ci",
+            "nullable": false
+          },
+          "role": "ordinary",
+          "source": {
+            "column": 12,
+            "line": 40,
+            "path": "src/lib.rs"
+          },
+          "wire_name": "ci"
+        }
+      ],
+      "interfaces": [],
+      "kind": "object",
+      "source": {
+        "column": 12,
+        "line": 40,
+        "path": "src/lib.rs"
+      },
+      "wire_name": "Query"
+    }
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "artifacts": {
+    "workspace/.dagger/modules/ci/src/bin/dagger-module.rs": {
+      "digest": "sha256:a8ee44a527ce9d1db9bdbe0caf3676be21cd457d10d28d82429dd9d63f5e8c59",
+      "kind": "rust-source",
+      "ownership": "generator"
+    },
+    "workspace/.dagger/modules/ci/src/dagger_generated/binding-catalog.json": {
+      "digest": "sha256:fc528800cd25d70ea360e22aa9c859503fa09659de33d767c5c49be4489cd28e",
+      "kind": "control-manifest",
+      "ownership": "generator"
+    },
+    "workspace/.dagger/modules/ci/src/dagger_generated/generated-module-assets.json": {
+      "digest": "sha256:eb809a6b506467f9dd18d99f95bc8752f5aefbb0474eeeeaba16808b769ac390",
+      "kind": "control-manifest",
+      "ownership": "generator"
+    },
+    "workspace/.dagger/modules/ci/src/dagger_generated/mod.rs": {
+      "digest": "sha256:b210248570c61ef6f52e27bc24e546017c1e4983577f307856bfcb8ce992e5a3",
+      "kind": "rust-source",
+      "ownership": "generator"
+    },
+    "workspace/.dagger/modules/ci/src/dagger_generated/module-introspection.json": {
+      "digest": "sha256:6b53c2177034ae0664d2ff23e7facd530e80e2f6dd2a430d7331bd6101810a2b",
+      "kind": "control-manifest",
+      "ownership": "generator"
+    },
+    "workspace/.dagger/modules/ci/src/dagger_generated/module_codec.rs": {
+      "digest": "sha256:621626b4ebe56419d556c6d397fcf88d1953b383d1b0e880fa6ca982ad422bcd",
+      "kind": "rust-source",
+      "ownership": "generator"
+    },
+    "workspace/.dagger/modules/ci/src/dagger_generated/module_context.rs": {
+      "digest": "sha256:51e8e34b3ca72399d2bffe1fb3b416f132e38d74ade17533449cb7a0b618adfc",
+      "kind": "rust-source",
+      "ownership": "generator"
+    },
+    "workspace/.dagger/modules/ci/src/dagger_generated/module_descriptor.rs": {
+      "digest": "sha256:bb2eac3a22cbc7c4f78e529733b8ddce2cba5e1e6ff77d88e61a54126a3c93c5",
+      "kind": "rust-source",
+      "ownership": "generator"
+    },
+    "workspace/.dagger/modules/ci/src/dagger_generated/module_dispatch.rs": {
+      "digest": "sha256:ebfb26d9e73a4aafbc63b794db2697616d30291191103e9296f5a959d9f7538b",
+      "kind": "rust-source",
+      "ownership": "generator"
+    },
+    "workspace/.dagger/modules/ci/src/dagger_generated/module_registration.rs": {
+      "digest": "sha256:b84d3a73d513405703296857867af1aa539948c50c86af0d47caf3be12713aca",
+      "kind": "rust-source",
+      "ownership": "generator"
+    }
+  },
+  "format_version": 1,
+  "generator": {
+    "engine_source_digest": "sha256:4a02d482435f7a872320dda432cce8fb76b4e4a63f780ac7e416f20a9244e375",
+    "version": "0.3.1"
+  },
+  "input_digest": "sha256:a3f6626b1fc4368185d38a277aba508636173483402340ad4bc1baf1549ac120",
+  "mode": "checked-generated",
+  "module_source_digest": "sha256:c420717e1715137f3ab3c5d6a00d7297fbc4cc17728cecd9912bcbb55dfad5d2",
+  "operation": "generate-module",
+  "output_root": "workspace/.dagger/modules/ci",
+  "post_work": [
+    {
+      "plan": {
+        "action": "format-rust",
+        "files": [
+          "workspace/.dagger/modules/ci/src/bin/dagger-module.rs",
+          "workspace/.dagger/modules/ci/src/dagger_generated/mod.rs",
+          "workspace/.dagger/modules/ci/src/dagger_generated/module_codec.rs",
+          "workspace/.dagger/modules/ci/src/dagger_generated/module_context.rs",
+          "workspace/.dagger/modules/ci/src/dagger_generated/module_descriptor.rs",
+          "workspace/.dagger/modules/ci/src/dagger_generated/module_dispatch.rs",
+          "workspace/.dagger/modules/ci/src/dagger_generated/module_registration.rs"
+        ],
+        "toolchain": "1.99.1"
+      },
+      "result_digest": "sha256:3c50fe79825827cab85ac7dd0d72cd045cd94bab67b2f3ea3f378485aabd33cf"
+    }
+  ],
+  "sdk_dependency": {
+    "exact_version": "0.3.1",
+    "package": "tokeira-dagger-sdk",
+    "registry": "crates-io",
+    "source": "registry"
+  },
+  "target": {
+    "core_schema_digest": "sha256:fa63be22540138c2888c5779db388e117bf8b168d9f7f59b2cb2a77dc4cc9f4d",
+    "dagger_revision": "a7a2e64e853be92728f05aad9dc07bebe63c7448",
+    "engine_version": "1.0.0-beta.21",
+    "format_version": 1,
+    "repository": "https://github.com/dagger/dagger",
+    "rust_sdk_version": "0.3.1",
+    "rust_toolchain": "1.99.1"
+  },
+  "visible_schema_digest": "sha256:309b70b3f08d1036ad2a4ca03a54e0d0a13aa680edde9fc3b0b1b6992082111c"
+}
