@@ -29,6 +29,7 @@ import (
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/driver"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/session"
 	"go.temporal.io/server/common/resolver"
+	"go.temporal.io/server/common/testing/await"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -69,7 +70,7 @@ func TestPoolConfig(t *testing.T) {
 			defaults, err := pgxpool.ParseConfig("host=127.0.0.1")
 			require.NoError(t, err)
 			require.Equal(t, defaults.MaxConnIdleTime, c.MaxConnIdleTime)
-			require.Nil(t, c.BeforeAcquire)
+			require.Nil(t, c.PrepareConn)
 			require.Nil(t, c.AfterRelease)
 			require.Equal(t, adminUser, c.ConnConfig.User)
 			require.Equal(t, "postgres", c.ConnConfig.Database)
@@ -150,7 +151,7 @@ func TestBeforeConnectProcessLimit(t *testing.T) {
 	for i := range 16 {
 		go func() { results <- pools[i%2].BeforeConnect(ctx, &pgx.ConnConfig{}) }()
 	}
-	require.Eventually(t, func() bool { return len(entered) == connectionAttemptLimit }, time.Second, time.Millisecond)
+	await.RequireTrue(t, func() bool { return len(entered) == connectionAttemptLimit }, time.Second, time.Millisecond)
 	require.Equal(t, int32(8), active.Load())
 	// With all slots occupied, cancel a caller that must never reach its limiter.
 	waitingCtx, waitingCancel := context.WithCancel(t.Context())
@@ -280,7 +281,7 @@ func TestPoolClose(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, sqlDB.Close()) }()
 	require.Zero(t, sqlDB.Stats().MaxOpenConnections)
-	require.Eventually(t, func() bool { return len(entered) == 3 }, time.Second, time.Millisecond)
+	await.RequireTrue(t, func() bool { return len(entered) == 3 }, time.Second, time.Millisecond)
 	// Exercise the plugin -> handle -> sql.DB -> connector ownership chain.
 	p.driver = &driver.PGXDriver{}
 	generic, err := p.CreateDB(sqlplugin.DbKindMain, &config.SQL{
@@ -349,7 +350,7 @@ func TestPoolMetrics(t *testing.T) {
 	require.InDelta(t, 0, snapshot["dsql_pool_constructing"][0].Value, 0.001)
 	m.StartPoolCollector(connector.pool, time.Millisecond)
 	m.StartPoolCollector(connector.pool, time.Millisecond)
-	require.Eventually(t, func() bool { return len(capture.Snapshot()["dsql_pool_open"]) > 3 }, time.Second, time.Millisecond)
+	await.RequireTrue(t, func() bool { return len(capture.Snapshot()["dsql_pool_open"]) > 3 }, time.Second, time.Millisecond)
 	m.StopPoolCollector()
 	m.StopPoolCollector()
 	m.StartPoolCollector(connector.pool, time.Millisecond)

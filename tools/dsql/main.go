@@ -26,7 +26,7 @@ func cliHandler(c *cli.Context, handler func(c *cli.Context, logger log.Logger) 
 		if !quiet {
 			logger.Error("Schema operation failed", tag.Error(err))
 		}
-		os.Exit(1)
+		os.Exit(1) //nolint:revive // the exit status reports failure, as upstream's schema tools do
 	}
 }
 

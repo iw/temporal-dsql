@@ -3,7 +3,7 @@ package dsql
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
 )
@@ -30,7 +30,7 @@ func TestRetryManagerCreationForTransactions(t *testing.T) {
 			metricsHandler,
 			config,
 		)
-		assert.NotNil(t, db1.retryManager, "RetryManager should be created with logger and metrics")
+		require.NotNil(t, db1.retryManager, "RetryManager should be created with logger and metrics")
 
 		// Test 2: Without logger or metrics - should not create retry manager
 		db2 := newDBWithDependencies(
@@ -43,7 +43,7 @@ func TestRetryManagerCreationForTransactions(t *testing.T) {
 			nil, // no metrics
 			config,
 		)
-		assert.Nil(t, db2.retryManager, "RetryManager should not be created without logger and metrics")
+		require.Nil(t, db2.retryManager, "RetryManager should not be created without logger and metrics")
 
 	})
 }
@@ -61,21 +61,21 @@ func TestRetryManagerDependencyExtraction(t *testing.T) {
 
 		// Create the retry configuration and metrics shared with transactions.
 		retryManager := NewRetryManager(config, logger, metricsHandler)
-		assert.NotNil(t, retryManager, "RetryManager should be created")
+		require.NotNil(t, retryManager, "RetryManager should be created")
 
 		// Extract dependencies
 		extractedLogger, extractedMetrics, extractedConfig := retryManager.GetDependencies()
 
 		// Verify extracted values
-		assert.NotNil(t, extractedLogger, "Extracted logger should not be nil")
-		assert.NotNil(t, extractedMetrics, "Extracted metrics should not be nil")
-		assert.Equal(t, config.MaxRetries, extractedConfig.MaxRetries)
-		assert.Equal(t, config.BaseDelay, extractedConfig.BaseDelay)
-		assert.Equal(t, config.MaxDelay, extractedConfig.MaxDelay)
-		assert.Equal(t, config.JitterFactor, extractedConfig.JitterFactor)
+		require.NotNil(t, extractedLogger, "Extracted logger should not be nil")
+		require.NotNil(t, extractedMetrics, "Extracted metrics should not be nil")
+		require.Equal(t, config.MaxRetries, extractedConfig.MaxRetries)
+		require.Equal(t, config.BaseDelay, extractedConfig.BaseDelay)
+		require.Equal(t, config.MaxDelay, extractedConfig.MaxDelay)
+		require.InDelta(t, config.JitterFactor, extractedConfig.JitterFactor, 1e-9)
 
 		// Verify metrics handler can be extracted
 		extractedHandler := extractedMetrics.GetHandler()
-		assert.Equal(t, metricsHandler, extractedHandler, "Extracted metrics handler should match original")
+		require.Equal(t, metricsHandler, extractedHandler, "Extracted metrics handler should match original")
 	})
 }

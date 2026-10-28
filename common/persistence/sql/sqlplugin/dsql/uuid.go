@@ -37,7 +37,7 @@ func BytesToUUIDString(id []byte) string {
 // Panics if the UUID is not exactly 16 bytes (invalid UUID).
 func UUIDToString(u primitives.UUID) string {
 	if len(u) != 16 {
-		panic("invalid primitives.UUID length (expected 16)")
+		panic("invalid primitives.UUID length (expected 16)") //nolint:forbidigo // callers pass parsed IDs, so another length is a programming error
 	}
 	return formatUUID(u)
 }

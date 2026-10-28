@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // createPgError creates a pgconn.PgError for testing purposes
@@ -78,7 +78,7 @@ func TestClassifyError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ClassifyError(tt.err)
-			assert.Equal(t, tt.expected, result)
+			require.Equal(t, tt.expected, result)
 		})
 	}
 }
@@ -129,7 +129,7 @@ func TestIsRetryableError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := IsRetryableError(tt.err)
-			assert.Equal(t, tt.expected, result)
+			require.Equal(t, tt.expected, result)
 		})
 	}
 }
@@ -166,8 +166,8 @@ func TestWrapWithConditionFailed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := WrapWithConditionFailed(tt.err, tt.msg, tt.args...)
-			assert.Equal(t, tt.expected, result.Error())
-			assert.True(t, IsConditionFailedError(result))
+			require.Equal(t, tt.expected, result.Error())
+			require.True(t, IsConditionFailedError(result))
 		})
 	}
 }
@@ -245,7 +245,7 @@ func TestClassifyError_DSQLSpecificCodes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := createPgError(tt.sqlState, tt.message)
 			result := ClassifyError(err)
-			assert.Equal(t, tt.expected, result, "Error code %s should be classified as %s", tt.sqlState, tt.expected)
+			require.Equal(t, tt.expected, result, "Error code %s should be classified as %s", tt.sqlState, tt.expected)
 		})
 	}
 }
@@ -275,7 +275,7 @@ func TestIsRetryableError_DSQLSpecificCodes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := createPgError(tt.sqlState, tt.message)
 			result := IsRetryableError(err)
-			assert.Equal(t, tt.retryable, result)
+			require.Equal(t, tt.retryable, result)
 		})
 	}
 }
@@ -338,7 +338,7 @@ func TestClassifyError_StringBasedFallback(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := errors.New(tt.errMsg)
 			result := ClassifyError(err)
-			assert.Equal(t, tt.expected, result, "Error message '%s' should be classified as %s", tt.errMsg, tt.expected)
+			require.Equal(t, tt.expected, result, "Error message '%s' should be classified as %s", tt.errMsg, tt.expected)
 		})
 	}
 }

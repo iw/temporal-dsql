@@ -103,7 +103,7 @@ func TestBuildDSNAttr_ConnectAttributesWithSpaces(t *testing.T) {
 	require.Equal(t, "temporal", result.Get("application_name"), "should trim spaces from key and value")
 }
 
-func TestBuildDSNAttr_DuplicateConnectAttribute_Panics(t *testing.T) {
+func TestBuildDSNAttr_DuplicateConnectAttribute(t *testing.T) {
 	cfg := &config.SQL{
 		TLS: &auth.TLS{
 			Enabled:                true,
@@ -114,10 +114,11 @@ func TestBuildDSNAttr_DuplicateConnectAttribute_Panics(t *testing.T) {
 			"sslmode ": "verify-full",
 		},
 	}
-	require.Panics(t, func() {
-		// nolint: errcheck
-		buildDSNAttr(cfg)
-	}, "Should panic when duplicate keys are detected")
+	_, err := buildDSNAttr(cfg)
+	require.ErrorContains(t, err, `duplicate connection attribute "sslmode"`)
+	// An attribute can hold a secret, so the error leaves the values out.
+	require.NotContains(t, err.Error(), "require")
+	require.NotContains(t, err.Error(), "verify-full")
 }
 
 func TestBuildDSN(t *testing.T) {

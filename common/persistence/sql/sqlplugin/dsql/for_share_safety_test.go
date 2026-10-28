@@ -73,6 +73,7 @@ func TestDSQLCompatibleQueriesOnly(t *testing.T) {
 								}
 							}
 						}
+					default:
 					}
 					return true
 				})

@@ -20,7 +20,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error creating CPU profile: %v\n", err)
 			os.Exit(1)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		if err := pprof.StartCPUProfile(f); err != nil {
 			fmt.Fprintf(os.Stderr, "Error starting CPU profile: %v\n", err)
 			os.Exit(1)

@@ -21,9 +21,9 @@ import (
 // - Return the canonical hyphenated UUID string (36 chars).
 //
 // Notes:
-// - This does not preserve any semantic ordering. It provides a stable total ordering over UUID strings
-//   for comparisons/pagination, which is sufficient for SQL queries using ORDER BY task_queue_id.
-// - Collision risk is negligible for this use case (128-bit truncated SHA-256).
+//   - This does not preserve any semantic ordering. It provides a stable total ordering over UUID strings
+//     for comparisons/pagination, which is sufficient for SQL queries using ORDER BY task_queue_id.
+//   - Collision risk is negligible for this use case (128-bit truncated SHA-256).
 func TaskQueueIDToUUIDString(taskQueueID []byte) string {
 	if len(taskQueueID) == 0 {
 		return ""
@@ -31,11 +31,8 @@ func TaskQueueIDToUUIDString(taskQueueID []byte) string {
 
 	sum := sha256.Sum256(taskQueueID)
 
-	u, err := uuid.FromBytes(sum[:16])
-	if err != nil {
-		// FromBytes only fails if len != 16, which cannot happen here.
-		panic(err)
-	}
+	var u uuid.UUID
+	copy(u[:], sum[:16])
 
 	// Make it a well-formed RFC4122 UUID (set version/variant bits).
 	u[6] = (u[6] & 0x0f) | 0x40 // version 4-style nibble

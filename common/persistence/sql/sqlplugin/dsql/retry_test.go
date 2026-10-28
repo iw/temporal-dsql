@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/log"
 )
 
@@ -17,8 +17,8 @@ func TestRetryManager_Basic(t *testing.T) {
 	rm := NewRetryManager(config, log.NewNoopLogger(), nil)
 
 	// Test that RetryManager is created with correct config
-	assert.Equal(t, 2, rm.config.MaxRetries)
-	assert.Equal(t, 1*time.Millisecond, rm.config.BaseDelay)
+	require.Equal(t, 2, rm.config.MaxRetries)
+	require.Equal(t, 1*time.Millisecond, rm.config.BaseDelay)
 }
 
 func TestRetryManager_SuccessfulOperation(t *testing.T) {
@@ -31,8 +31,8 @@ func TestRetryManager_SuccessfulOperation(t *testing.T) {
 	rm := NewRetryManager(config, log.NewNoopLogger(), nil)
 
 	// Verify the retry manager was created with correct configuration
-	assert.Equal(t, 2, rm.config.MaxRetries)
-	assert.Equal(t, 1*time.Millisecond, rm.config.BaseDelay)
+	require.Equal(t, 2, rm.config.MaxRetries)
+	require.Equal(t, 1*time.Millisecond, rm.config.BaseDelay)
 }
 
 func TestRetryManager_ConditionFailedError_NoRetry(t *testing.T) {
@@ -40,9 +40,9 @@ func TestRetryManager_ConditionFailedError_NoRetry(t *testing.T) {
 	err := NewConditionFailedError(ConditionFailedUnknown, "test condition failed")
 
 	// Verify the error is properly classified
-	assert.True(t, IsConditionFailedError(err))
-	assert.Equal(t, ErrorTypeConditionFailed, ClassifyError(err))
-	assert.False(t, IsRetryableError(err))
+	require.True(t, IsConditionFailedError(err))
+	require.Equal(t, ErrorTypeConditionFailed, ClassifyError(err))
+	require.False(t, IsRetryableError(err))
 }
 
 func TestRetryConfig_Validation(t *testing.T) {
@@ -146,7 +146,7 @@ func TestRetryConfig_Validation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := tt.input.validate()
-			assert.Equal(t, tt.expected, result)
+			require.Equal(t, tt.expected, result)
 		})
 	}
 }
@@ -177,7 +177,7 @@ func TestCalculateBackoff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("attempt_%d", tt.attempt), func(t *testing.T) {
 			result := rm.calculateBackoff(tt.attempt)
-			assert.Equal(t, tt.expected, result)
+			require.Equal(t, tt.expected, result)
 		})
 	}
 }

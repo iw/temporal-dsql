@@ -76,8 +76,8 @@ func TestDSQLMetricsCreation(t *testing.T) {
 	// Create a no-op metrics handler for testing
 	handler := &noOpMetricsHandler{}
 
-	metrics := NewDSQLMetrics(handler)
-	if metrics == nil {
+	dsqlMetrics := NewDSQLMetrics(handler)
+	if dsqlMetrics == nil {
 		t.Error("Expected NewDSQLMetrics to return non-nil metrics")
 	}
 

@@ -290,7 +290,7 @@ func (pdb *db) DeleteFromExecutions(
 func (pdb *db) ReadLockExecutions(
 	ctx context.Context,
 	filter sqlplugin.ExecutionsFilter,
-) (int64, int64, error) {
+) (dbRecordVersion, nextEventID int64, err error) {
 	return pdb.WriteLockExecutions(ctx, filter)
 }
 
@@ -298,9 +298,9 @@ func (pdb *db) ReadLockExecutions(
 func (pdb *db) WriteLockExecutions(
 	ctx context.Context,
 	filter sqlplugin.ExecutionsFilter,
-) (int64, int64, error) {
+) (dbRecordVersion, nextEventID int64, err error) {
 	var executionVersion sqlplugin.ExecutionVersion
-	err := pdb.GetContext(ctx,
+	err = pdb.GetContext(ctx,
 		&executionVersion,
 		writeLockExecutionQuery,
 		filter.ShardID,
