@@ -1,0 +1,92 @@
+seed: 42
+limiter: tokenBucket
+duration: 3h
+sampleEvery: 10s
+steadyAfter: 90m
+cluster:
+  maxConnections: 10000
+  handshake: {min: 50ms, max: 200ms}
+limiterLatency: {min: 5ms, max: 10ms}
+assertMaxConnectsPerSec: -1
+assertConvergeWithin: -1s
+assertMaxClosurePerSec: -1
+assertZeroDSQLRejections: false
+assertZeroDeadRequests: false
+scenario: {kind: cold_start}
+services:
+  - name: history
+    replicas: 16
+    inflightLimit: 8
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 200
+      minConns: 200
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 30
+      holdTime: 10ms
+      holdJitter: 10ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+  - name: matching
+    replicas: 16
+    inflightLimit: 8
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 200
+      minConns: 200
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 20
+      holdTime: 5ms
+      holdJitter: 5ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+  - name: frontend
+    replicas: 9
+    inflightLimit: 8
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 200
+      minConns: 200
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 15
+      holdTime: 5ms
+      holdJitter: 5ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+  - name: worker
+    replicas: 3
+    inflightLimit: 8
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 200
+      minConns: 200
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 10
+      holdTime: 20ms
+      holdJitter: 10ms
+      spawnEvery: 1s
+      arrivalBurst: 5
+      maxWait: 10s

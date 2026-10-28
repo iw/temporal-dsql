@@ -1,0 +1,130 @@
+log:
+  stdout: true
+  level: info
+
+persistence:
+  defaultStore: dsql-default
+  visibilityStore: sqlite-visibility
+  numHistoryShards: 4 # can't be changed after the cluster is created
+  datastores:
+    dsql-default:
+      sql:
+        pluginName: "dsql"
+        databaseName: "postgres"
+        connectAddr: "your-dsql-cluster.dsql.us-east-1.on.aws:5432"
+        connectProtocol: "tcp"
+        user: "admin" # See docs/dsql/deployment.md#least-privilege-role
+        maxConns: 20
+        maxConnLifetime: "50m"
+        taskScanPartitions: 1
+        # connectAttributes:
+        #   region: "us-east-1" # Otherwise inferred from the DSQL endpoint
+        #   cluster_endpoint: "your-dsql-cluster.dsql.us-east-1.on.aws" # Defaults to connectAddr's host
+        #   token_duration: "15m" # Allowed range: 15s through 15m
+        #   connection_rate_limit: "10" # Also used during DynamoDB outages
+        #   connection_burst_limit: "100"
+        #   rate_limiter: "dynamodb_token_bucket" # Default: local
+        #   rate_limiter_table: "temporal-dsql-rate-limiter" # Required for token bucket mode
+        #   token_bucket_rate: "100"
+        #   token_bucket_capacity: "1000"
+        #   token_bucket_max_wait: "30s"
+    # In-memory visibility is for trying things out only; use a durable store for retained data.
+    sqlite-visibility:
+      sql:
+        user: ""
+        password: ""
+        pluginName: "sqlite"
+        databaseName: "default"
+        connectAddr: "localhost"
+        connectProtocol: "tcp"
+        connectAttributes:
+          mode: "memory"
+          cache: "private"
+        maxConns: 1
+        maxIdleConns: 1
+        maxConnLifetime: "1h"
+        tls:
+          enabled: false
+          caFile: ""
+          certFile: ""
+          keyFile: ""
+          enableHostVerification: false
+          serverName: ""
+
+global:
+  membership:
+    maxJoinDuration: 30s
+    broadcastAddress: "127.0.0.1"
+  pprof:
+    port: 7936
+
+services:
+  frontend:
+    rpc:
+      grpcPort: 7233
+      httpPort: 7243
+      membershipPort: 6933
+      bindOnLocalHost: true
+
+  matching:
+    rpc:
+      grpcPort: 7235
+      membershipPort: 6935
+      bindOnLocalHost: true
+
+  history:
+    rpc:
+      grpcPort: 7234
+      membershipPort: 6934
+      bindOnLocalHost: true
+
+  worker:
+    rpc:
+      grpcPort: 7239
+      membershipPort: 6939
+      bindOnLocalHost: true
+
+clusterMetadata:
+  enableGlobalNamespace: false
+  failoverVersionIncrement: 10
+  masterClusterName: "active"
+  currentClusterName: "active"
+  clusterInformation:
+    active:
+      enabled: true
+      initialFailoverVersion: 1
+      rpcName: "frontend"
+      rpcAddress: "localhost:7233"
+      httpAddress: "localhost:7243"
+
+dcRedirectionPolicy:
+  policy: "noop"
+
+archival:
+  history:
+    state: "enabled"
+    enableRead: true
+    provider:
+      filestore:
+        fileMode: "0666"
+        dirMode: "0766"
+  visibility:
+    state: "enabled"
+    enableRead: true
+    provider:
+      filestore:
+        fileMode: "0666"
+        dirMode: "0766"
+
+namespaceDefaults:
+  archival:
+    history:
+      state: "disabled"
+      URI: "file:///tmp/temporal_archival/development"
+    visibility:
+      state: "disabled"
+      URI: "file:///tmp/temporal_vis_archival/development"
+
+dynamicConfigClient:
+  filepath: "config/dynamicconfig/development-dsql.yaml"
+  pollInterval: "10s"

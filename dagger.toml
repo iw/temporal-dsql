@@ -1,0 +1,19 @@
+# Dagger workspace configuration
+# Install modules with: dagger module install <module>
+# Example:
+#   dagger module install dagger.io/linux/wolfi
+
+[modules]
+
+[modules.rust-sdk]
+source = "github.com/tokeira/dagger-rust-sdk/runtime@v0.3.1"
+
+[sdks.rust]
+module = "rust-sdk"
+
+[modules.ci]
+source = ".dagger/modules/ci"
+
+[sdks.rust.scopes.".dagger/modules/ci"]
+is-module = true
+name = "ci"

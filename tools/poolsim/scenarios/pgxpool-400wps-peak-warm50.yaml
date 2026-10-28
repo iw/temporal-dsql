@@ -1,0 +1,176 @@
+seed: 42
+limiter: tokenBucket
+duration: 3h
+sampleEvery: 10s
+steadyAfter: 90m
+cluster:
+  maxConnections: 25000
+  handshake: {min: 50ms, max: 200ms}
+limiterLatency: {min: 5ms, max: 10ms}
+assertMaxConnectsPerSec: -1
+assertConvergeWithin: -1s
+assertMaxClosurePerSec: -1
+assertZeroDSQLRejections: false
+assertZeroDeadRequests: false
+scenario: {kind: cold_start}
+services:
+  - name: history
+    replicas: 16
+    inflightLimit: 8
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 500
+      minConns: 50
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 30
+      holdTime: 10ms
+      holdJitter: 10ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+      phases:
+        - name: peak
+          at: 40m
+          ramp: 5m
+          duration: 30m
+          maxInUse: 450
+          arrivalBurst: 450
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+        - name: spike-1
+          at: 100m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 600
+          arrivalBurst: 600
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+        - name: spike-2
+          at: 150m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 600
+          arrivalBurst: 600
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+  - name: matching
+    replicas: 16
+    inflightLimit: 8
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 500
+      minConns: 50
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 20
+      holdTime: 5ms
+      holdJitter: 5ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+      phases:
+        - name: peak
+          at: 40m
+          ramp: 5m
+          duration: 30m
+          maxInUse: 300
+          arrivalBurst: 300
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+        - name: spike-1
+          at: 100m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 450
+          arrivalBurst: 450
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+        - name: spike-2
+          at: 150m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 450
+          arrivalBurst: 450
+          spawnEvery: 100ms
+          holdTime: 500ms
+          holdJitter: 1s
+  - name: frontend
+    replicas: 9
+    inflightLimit: 8
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 500
+      minConns: 50
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 15
+      holdTime: 5ms
+      holdJitter: 5ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
+      phases:
+        - name: peak
+          at: 40m
+          ramp: 5m
+          duration: 30m
+          maxInUse: 100
+          arrivalBurst: 100
+          spawnEvery: 100ms
+          holdTime: 250ms
+          holdJitter: 500ms
+        - name: spike-1
+          at: 100m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 150
+          arrivalBurst: 150
+          spawnEvery: 100ms
+          holdTime: 250ms
+          holdJitter: 500ms
+        - name: spike-2
+          at: 150m
+          ramp: 0s
+          duration: 3m
+          maxInUse: 150
+          arrivalBurst: 150
+          spawnEvery: 100ms
+          holdTime: 250ms
+          holdJitter: 500ms
+  - name: worker
+    replicas: 3
+    inflightLimit: 8
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 500
+      minConns: 50
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 10
+      holdTime: 20ms
+      holdJitter: 10ms
+      spawnEvery: 1s
+      arrivalBurst: 5
+      maxWait: 10s

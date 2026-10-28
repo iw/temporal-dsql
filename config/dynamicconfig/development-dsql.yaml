@@ -1,0 +1,63 @@
+# Dynamic configuration for Aurora DSQL development environment
+
+# Persistence request rate per history host
+history.persistenceMaxQPS:
+  - value: 3000
+    constraints: {}
+
+# A history batch occupies one column, capped at 1 MiB by DSQL.
+system.transactionSizeLimit:
+  - value: 1048576
+    constraints: {}
+
+# Reject oversized payloads up front, leaving room under 1 MiB for the event envelope.
+limit.blobSize.error:
+  - value: 1000000
+    constraints: {}
+
+# Maximum buffered queries per workflow
+history.maxBufferedQueryCount:
+  - value: 1000
+    constraints: {}
+
+# Task processing settings optimized for DSQL
+matching.numTaskqueueReadPartitions:
+  - value: 4
+    constraints: {}
+
+matching.numTaskqueueWritePartitions:
+  - value: 4
+    constraints: {}
+
+# History service settings
+history.timerProcessorMaxPollRPS:
+  - value: 20
+    constraints: {}
+
+history.timerProcessorUpdateAckInterval:
+  - value: 30s
+    constraints: {}
+
+# Visibility uses its separate store
+frontend.visibilityMaxPageSize:
+  - value: 1000
+    constraints: {}
+
+# Archival settings
+system.enableReadFromHistoryArchival:
+  - value: true
+    constraints: {}
+
+system.enableReadFromVisibilityArchival:
+  - value: true
+    constraints: {}
+
+# Namespace settings
+system.enableNamespaceNotActiveAutoForwarding:
+  - value: true
+    constraints: {}
+
+# System settings
+history.enableParentClosePolicy:
+  - value: true
+    constraints: {}

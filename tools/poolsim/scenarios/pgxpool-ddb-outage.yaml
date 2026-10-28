@@ -1,0 +1,36 @@
+seed: 42
+limiter: tokenBucket
+adaptive: {initialRate: 100, increase: 0.1, capacity: 100}
+duration: 3h
+sampleEvery: 10s
+steadyAfter: 90m
+cluster:
+  maxConnections: 10000
+  handshake: {min: 50ms, max: 200ms}
+limiterLatency: {min: 5ms, max: 10ms}
+assertMaxConnectsPerSec: -1
+assertConvergeWithin: -1s
+assertMaxClosurePerSec: -1
+assertZeroDSQLRejections: false
+assertZeroDeadRequests: false
+scenario: {kind: ddb_outage, eventAt: 5s}
+services:
+  - name: history
+    replicas: 4
+    inflightLimit: 8
+    ephemeral: {pools: 2, connections: 3, duration: 1s}
+    pgxpool:
+      maxConns: 500
+      minConns: 500
+      maxConnLifetime: 50m
+      maxConnLifetimeJitter: 4m
+      maxConnIdleTime: 0s
+      healthCheckPeriod: 1m
+    workload:
+      enabled: true
+      maxInUse: 30
+      holdTime: 10ms
+      holdJitter: 10ms
+      spawnEvery: 1s
+      arrivalBurst: 10
+      maxWait: 10s
