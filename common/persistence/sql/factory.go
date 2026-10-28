@@ -113,13 +113,29 @@ func (f *Factory) NewClusterMetadataStore() (p.ClusterMetadataStore, error) {
 	return newClusterMetadataPersistence(conn, f.logger, f.serializer)
 }
 
+// ExecutionStoreCreator is an optional interface that SQL plugins can implement
+// to provide plugin-specific ExecutionStore implementations with optimizations.
+// If a plugin's DB implements this interface, the factory will use it instead
+// of the common NewSQLExecutionStore.
+type ExecutionStoreCreator interface {
+	NewExecutionStore(baseStore p.ExecutionStore, logger log.Logger) p.ExecutionStore
+}
+
 // NewExecutionStore returns a new ExecutionStore
 func (f *Factory) NewExecutionStore() (p.ExecutionStore, error) {
 	conn, err := f.mainDBConn.Get()
 	if err != nil {
 		return nil, err
 	}
-	return NewSQLExecutionStore(conn, f.logger, f.serializer)
+	baseStore, err := NewSQLExecutionStore(conn, f.logger, f.serializer)
+	if err != nil {
+		return nil, err
+	}
+	// Allow plugins to wrap the base store with optimizations
+	if creator, ok := conn.(ExecutionStoreCreator); ok {
+		return creator.NewExecutionStore(baseStore, f.logger), nil
+	}
+	return baseStore, nil
 }
 
 // NewQueue returns a new queue backed by sql
