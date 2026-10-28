@@ -1469,17 +1469,10 @@ var (
 	CassandraSessionRefreshFailures        = NewCounterDef("cassandra_session_refresh_failures")
 	PersistenceSessionRefreshFailures      = NewCounterDef("persistence_session_refresh_failures")
 	PersistenceSessionRefreshAttempts      = NewCounterDef("persistence_session_refresh_attempts")
-
-	// DSQL Token Cache metrics
-	DSQLTokenCacheHits       = NewCounterDef("dsql_token_cache_hits")
-	DSQLTokenCacheMisses     = NewCounterDef("dsql_token_cache_misses")
-	DSQLTokenRefreshes       = NewCounterDef("dsql_token_refreshes")
-	DSQLTokenRefreshFailures = NewCounterDef("dsql_token_refresh_failures")
-
-	PersistenceSQLMaxOpenConn = NewGaugeDef("persistence_sql_max_open_conn")
-	PersistenceSQLOpenConn    = NewGaugeDef("persistence_sql_open_conn")
-	PersistenceSQLIdleConn    = NewGaugeDef("persistence_sql_idle_conn")
-	PersistenceSQLInUse       = NewGaugeDef("persistence_sql_in_use")
+	PersistenceSQLMaxOpenConn              = NewGaugeDef("persistence_sql_max_open_conn")
+	PersistenceSQLOpenConn                 = NewGaugeDef("persistence_sql_open_conn")
+	PersistenceSQLIdleConn                 = NewGaugeDef("persistence_sql_idle_conn")
+	PersistenceSQLInUse                    = NewGaugeDef("persistence_sql_in_use")
 
 	// Common service base metrics
 	RestartCount            = NewCounterDef("restarts")

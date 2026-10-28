@@ -3,7 +3,7 @@
 install: bins
 
 # Rebuild binaries (used by Dockerfile).
-bins: temporal-server temporal-cassandra-tool temporal-sql-tool temporal-elasticsearch-tool temporal-dsql-tool tdbg
+bins: temporal-server temporal-cassandra-tool temporal-sql-tool temporal-elasticsearch-tool tdbg
 
 # Install all tools, recompile proto files, run all possible checks and tests (long but comprehensive).
 all: clean proto bins check test
@@ -349,7 +349,6 @@ clean-bins:
 	@rm -f fairsim
 	@rm -f temporal-sql-tool
 	@rm -f temporal-elasticsearch-tool
-	@rm -f temporal-dsql-tool
 
 temporal-server: $(ALL_SRC)
 	@printf $(COLOR) "Build temporal-server with CGO_ENABLED=$(CGO_ENABLED) for $(GOOS)/$(GOARCH)..."
@@ -370,10 +369,6 @@ temporal-cassandra-tool: $(ALL_SRC)
 temporal-sql-tool: $(ALL_SRC)
 	@printf $(COLOR) "Build temporal-sql-tool with CGO_ENABLED=$(CGO_ENABLED) for $(GOOS)/$(GOARCH)..."
 	CGO_ENABLED=$(CGO_ENABLED) go build $(BUILD_TAG_FLAG) -o temporal-sql-tool ./cmd/tools/sql
-
-temporal-dsql-tool: $(ALL_SRC)
-	@printf $(COLOR) "Build temporal-dsql-tool with CGO_ENABLED=$(CGO_ENABLED) for $(GOOS)/$(GOARCH)..."
-	CGO_ENABLED=$(CGO_ENABLED) go build $(BUILD_TAG_FLAG) -o temporal-dsql-tool ./cmd/tools/dsql
 
 temporal-elasticsearch-tool: $(ALL_SRC)
 	@printf $(COLOR) "Build temporal-elasticsearch-tool with CGO_ENABLED=$(CGO_ENABLED) for $(GOOS)/$(GOARCH)..."
@@ -596,14 +591,6 @@ install-schema-postgresql12: temporal-sql-tool
 	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl postgres12 --db $(VISIBILITY_DB) setup-schema -v 0.0
 	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl postgres12 --db $(VISIBILITY_DB) update-schema -d ./schema/postgresql/v12/visibility/versioned
 
-# Install DSQL schema using PostgreSQL plugin as a surrogate (persistence only, visibility unchanged)
-install-schema-dsql: temporal-sql-tool
-	@printf $(COLOR) "Install DSQL schema (PostgreSQL surrogate)..."
-	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl dsql --db $(TEMPORAL_DB) drop -f
-	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl dsql --db $(TEMPORAL_DB) create
-	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl dsql --db $(TEMPORAL_DB) setup-schema -v 0.0
-	./temporal-sql-tool -u $(SQL_USER) --pw $(SQL_PASSWORD) -p 5432 --pl dsql --db $(TEMPORAL_DB) update-schema -d ./schema/dsql/temporal/versioned
-
 install-schema-es: temporal-elasticsearch-tool
 	@printf $(COLOR) "Install Elasticsearch schema..."
 	./temporal-elasticsearch-tool -ep http://127.0.0.1:9200 setup-schema
@@ -742,3 +729,4 @@ ensure-no-changes:
 	@printf $(COLOR) "========================================================================"
 	@git status --porcelain
 	@test -z "`git status --porcelain`" || (printf $(COLOR) "========================================================================"; printf $(RED) "Above files are not regenerated properly. Regenerate them and try again."; git diff HEAD ; exit 1)
+include dsql.mk

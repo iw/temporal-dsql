@@ -165,7 +165,7 @@ func BuildCLIOptions() *cli.App {
 				cli.StringFlag{
 					Name: schema.CLIFlagSchemaName,
 					Usage: fmt.Sprintf("name of embedded versioned schema, one of: %v",
-						dbschemas.PathsByDB("sql")),
+						dbschemas.PathsByDB("mysql")),
 				},
 			},
 			Action: func(c *cli.Context) {
