@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,7 +83,7 @@ func LoadConfig(path string) (*Config, error) {
 		// Try YAML first, then JSON
 		if err := yaml.Unmarshal(b, cfg); err != nil {
 			if err := json.Unmarshal(b, cfg); err != nil {
-				return nil, fmt.Errorf("unknown config format")
+				return nil, errors.New("unknown config format")
 			}
 		}
 	}
@@ -147,26 +148,25 @@ func applyDefaults(cfg *Config) {
 
 func validate(cfg *Config) error {
 	if len(cfg.Services) == 0 {
-		return fmt.Errorf("config: services must be non-empty")
+		return errors.New("config: services must be non-empty")
 	}
 	if cfg.LimiterPerSec <= 0 {
-		return fmt.Errorf("config: limiterPerSec must be > 0")
+		return errors.New("config: limiterPerSec must be > 0")
 	}
 
 	for _, s := range cfg.Services {
 		if s.Name == "" {
-			return fmt.Errorf("config: each service needs a name")
+			return errors.New("config: each service needs a name")
 		}
 
 	}
 
 	switch cfg.Scenario.Kind {
-	case "cold_start":
+	case "cold_start", "fleet_start", "ddb_outage":
 	case "rolling_restart", "rolling_deploy":
 		if cfg.Scenario.RollEvery == 0 {
 			cfg.Scenario.RollEvery = 60 * time.Second
 		}
-	case "fleet_start", "ddb_outage":
 	case "mass_drop":
 		if cfg.Scenario.DropAt == 0 {
 			cfg.Scenario.DropAt = 5 * time.Minute

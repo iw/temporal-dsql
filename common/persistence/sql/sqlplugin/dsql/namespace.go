@@ -101,6 +101,8 @@ func (pdb *db) selectFromNamespace(
 			partitionID,
 			*filter.Name,
 		)
+	default:
+		return nil, errMissingArgs
 	}
 	if err != nil {
 		return nil, err

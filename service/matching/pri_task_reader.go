@@ -109,6 +109,8 @@ func (tr *priTaskReader) getOldestBacklogTime() time.Time {
 }
 
 func (tr *priTaskReader) completeTask(task *internalTask, res taskResponse) {
+	recordDroppedTask(tr.backlogMgr.metricsHandler, res.dropReason)
+
 	err := res.err()
 
 	// We can handle some transient errors by just putting the task back in the matcher to
@@ -137,14 +139,13 @@ func (tr *priTaskReader) completeTask(task *internalTask, res taskResponse) {
 	tr.lock.Lock()
 	defer tr.lock.Unlock()
 
-	tr.backlogAge.record(task.event.AllocatedTaskInfo.Data.CreateTime, -1)
+	tr.backlogAge.record(task.event.Data.CreateTime, -1)
 
 	numAcked := tr.ackTaskLocked(task.event.TaskId)
 
 	tr.maybeGCLocked()
 
 	// use == so we just signal once when we cross this threshold
-	// TODO(pri): is this safe? maybe we need to improve this
 	if tr.loadedTasks == tr.backlogMgr.config.GetTasksReloadAt() {
 		tr.SignalTaskLoading()
 	}
@@ -248,13 +249,26 @@ func (tr *priTaskReader) processTaskBatch(tasks []*persistencespb.AllocatedTaskI
 
 		if IsTaskExpired(t) {
 			// task expired when we read it
-			metrics.ExpiredTasksPerTaskQueueCounter.With(tr.backlogMgr.metricsHandler).Record(1, metrics.TaskExpireStageReadTag)
+			recordDroppedTask(tr.backlogMgr.metricsHandler, dropReasonExpiredRead)
 			return true
 		}
 
 		// We may race to read tasks with signalNewTasks. If it wins, we may end up seeing
 		// tasks twice. In that case, we should just ignore them. If we win (based on
 		// readLevel), signalNewTasks will give up and signal us.
+		//
+		// It's even possible for a task from signalNewTasks to be acked, and the ack level
+		// advanced, before we see it here. This would show up as a task below the ack level.
+		if t.TaskId <= tr.ackLevel {
+			tr.backlogMgr.throttledLogger.Info("ignoring already-acked task read from persistence",
+				tag.TaskID(t.TaskId),
+				tag.Int("subqueue-id", int(tr.subqueue)),
+				tag.Any("ack-level", tr.ackLevel))
+			return true
+		}
+
+		// If it was added to outstandingTasks but the ack level has not advaned over it,
+		// it would show up here.
 		_, found := tr.outstandingTasks.Get(t.TaskId)
 		return found
 	})
@@ -298,7 +312,7 @@ func (tr *priTaskReader) addTaskToMatcher(task *internalTask) {
 	}
 
 	if drop, retry := tr.addErrorBehavior(err); drop {
-		task.finish(nil, false)
+		task.finish(taskFinishResult{})
 	} else if retry {
 		// This should only be due to persistence problems. Retry in a new goroutine
 		// to not block other tasks, up to some concurrency limit.
@@ -347,12 +361,12 @@ func (tr *priTaskReader) retryAddAfterError(task *internalTask) {
 		tr.backlogMgr.tqCtx,
 		func(context.Context) error {
 			if IsTaskExpired(task.event.AllocatedTaskInfo) {
-				task.finish(nil, false)
+				task.finish(taskFinishResult{})
 				return nil
 			}
 			err := tr.backlogMgr.addSpooledTask(task)
 			if drop, retry := tr.addErrorBehavior(err); drop {
-				task.finish(nil, false)
+				task.finish(taskFinishResult{})
 			} else if retry {
 				metrics.BufferThrottlePerTaskQueueCounter.With(tr.backlogMgr.metricsHandler).Record(1)
 				return err
@@ -378,7 +392,8 @@ func (tr *priTaskReader) signalNewTasks(resp subqueueCreateTasksResponse) {
 			// Because we checked readLevel, we know that getTasksPump can't have beat us to
 			// adding these tasks to outstandingTasks. So they should definitely not be there.
 			_, found := tr.outstandingTasks.Get(t.TaskId)
-			return softassert.That(tr.logger, !found, "newly-written task already present in outstanding tasks")
+			softassert.That(tr.logger, !found, "newly-written task already present in outstanding tasks")
+			return found
 		})
 
 	if !canAddDirect {
@@ -468,6 +483,17 @@ func (tr *priTaskReader) ackTaskLocked(taskId int64) int64 {
 func (tr *priTaskReader) setReadLevelAfterGap(newReadLevel int64) {
 	tr.lock.Lock()
 	defer tr.lock.Unlock()
+	if newReadLevel < tr.readLevel {
+		// The levels that getTaskBatch based this call on are stale: signalNewTasks advanced
+		// readLevel past the range we scanned while the read was in flight, and may have loaded
+		// tasks in it. Applying the read level (or ack level) update here would move it backwards.
+		//
+		// Technically we don't have to do another read here: if signalNewTasks did advance read
+		// level, it advanced it to the max. But that couples the logic more than desired, so just
+		// defensively signal another read here.
+		tr.SignalTaskLoading()
+		return
+	}
 	if tr.ackLevel == tr.readLevel {
 		// This is called after we read a range and find no tasks. The range we read was tr.readLevel to newReadLevel.
 		// (We know this because nothing should change tr.readLevel except the getTasksPump loop itself, after initialization.
@@ -476,6 +502,10 @@ func (tr *priTaskReader) setReadLevelAfterGap(newReadLevel int64) {
 		// acked all tasks up to newReadLevel too. This lets us advance the ack level on a task queue with no activity
 		// but where the rangeid has moved higher, to prevent excessive reads on the next load.
 		tr.ackLevel = newReadLevel
+		// Push the updated ack level to the db. If we didn't do this here, the updated ack level
+		// wouldn't reach the db until another task is written and acked, which could be far in the
+		// future. This also lets the approximate backlog count reset if we've reached max read level.
+		tr.backlogMgr.db.updateAckLevelAndBacklogStats(tr.subqueue, tr.ackLevel, 0, tr.backlogAge.oldestTime())
 	}
 	tr.readLevel = newReadLevel
 }

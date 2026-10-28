@@ -14,8 +14,7 @@ import (
 	commonnexus "go.temporal.io/server/common/nexus"
 )
 
-// Header key used to identify callbacks that originate from and target the same cluster.
-// Note: this is the nexusoperations.NexusCallbackSourceHeader stripped of Nexus-Callback-
+// Legacy header key used to identify callbacks that originate from and target the same cluster.
 const callbackSourceHeader = "source"
 
 // routeSystemCallbackRequest routes a system callback request to the appropriate frontend client
@@ -42,16 +41,25 @@ func routeSystemCallbackRequest(
 			logger.Error("failed to decode completion from token", tag.Error(err))
 			return nil, nexus.NewHandlerErrorf(nexus.HandlerErrorTypeBadRequest, "invalid callback token")
 		}
-		ns, err := namespaceRegistry.GetNamespaceByID(namespace.ID(completion.NamespaceId))
+		// Resolve the target namespace/workflow from the token. For CHASM completions (e.g.
+		// standalone Nexus operations) the namespace lives inside the ComponentRef, not the
+		// top-level field, so use the shared helper rather than reading completion.NamespaceId
+		// directly.
+		namespaceID, businessID, _, err := commonnexus.CompletionTarget(completion)
 		if err != nil {
-			logger.Error("failed to get namespace for nexus completion request", tag.WorkflowNamespaceID(completion.NamespaceId), tag.Error(err))
+			logger.Error("failed to extract target from nexus completion token", tag.Error(err))
+			return nil, nexus.NewHandlerErrorf(nexus.HandlerErrorTypeBadRequest, "invalid callback token")
+		}
+		ns, err := namespaceRegistry.GetNamespaceByID(namespace.ID(namespaceID))
+		if err != nil {
+			logger.Error("failed to get namespace for nexus completion request", tag.WorkflowNamespaceID(namespaceID), tag.Error(err))
 			var nfe *serviceerror.NamespaceNotFound
 			if errors.As(err, &nfe) {
-				return nil, nexus.NewHandlerErrorf(nexus.HandlerErrorTypeNotFound, "namespace %q not found", completion.NamespaceId)
+				return nil, nexus.NewHandlerErrorf(nexus.HandlerErrorTypeNotFound, "namespace %q not found", namespaceID)
 			}
 			return nil, commonnexus.ConvertGRPCError(err, false)
 		}
-		clusterName := ns.ActiveClusterName(completion.GetWorkflowId())
+		clusterName := ns.ActiveClusterName(namespace.RoutingKey{ID: businessID})
 		if clusterMetadata.GetCurrentClusterName() == clusterName {
 			frontendClient = localClient
 		} else {
@@ -87,13 +95,13 @@ func routeRequest(
 	defaultClient *http.Client,
 	localClient *common.FrontendHTTPClient,
 	logger log.Logger,
+	inspectSourceHeader bool,
 ) (*http.Response, error) {
 	if r.URL.String() == commonnexus.SystemCallbackURL {
 		return routeSystemCallbackRequest(r, clusterMetadata, namespaceRegistry, httpClientCache, callbackTokenGenerator, localClient, logger)
 	}
-	// This source header is populated in nexusoperations/executors (via the ClientProvider) for worker targets
-	// if this header is not populated then we assume it's an external target.
-	if r.Header == nil || r.Header.Get(callbackSourceHeader) == "" {
+	// Older servers populated this header for worker targets. Treat the request as external unless legacy inspection is enabled.
+	if !inspectSourceHeader || r.Header == nil || r.Header.Get(callbackSourceHeader) == "" {
 		return defaultClient.Do(r)
 	}
 	// If we got here, we assume that the endpoint in the original call was a worker target, and we should route

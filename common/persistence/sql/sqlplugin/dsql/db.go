@@ -183,7 +183,7 @@ func (pdb *db) PluginName() string {
 }
 
 // DbName returns the name of the database
-func (pdb *db) DbName() string {
+func (pdb *db) DbName() string { //nolint:staticcheck // sqlplugin.DB names this method
 	return pdb.dbName
 }
 
@@ -193,7 +193,7 @@ func (pdb *db) ExpectedVersion() string {
 	case sqlplugin.DbKindMain:
 		return dsqlschemaversion.Version
 	default:
-		panic(fmt.Sprintf("unknown db kind %v", pdb.dbKind))
+		panic(fmt.Sprintf("unknown db kind %v", pdb.dbKind)) //nolint:forbidigo // CreateDB refuses every kind but the main store
 	}
 }
 

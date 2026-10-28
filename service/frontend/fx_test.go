@@ -12,6 +12,7 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/membership"
 	"go.temporal.io/server/common/metrics"
@@ -32,6 +33,8 @@ type rateLimitInterceptorTestCase struct {
 	name string
 	// t is the test object
 	t *testing.T
+	// ctrl is the mock controller
+	ctrl *gomock.Controller
 	// globalRPSLimit is the global RPS limit for all frontend hosts
 	globalRPSLimit int
 	// perInstanceRPSLimit is the RPS limit for each frontend host
@@ -182,7 +185,7 @@ func TestRateLimitInterceptorProvider(t *testing.T) {
 				tc.perInstanceRPSLimit = highPerInstanceRPSLimit
 				tc.operatorRPSRatio = operatorRPSRatio
 				tc.expectRateLimit = false
-				serviceResolver := membership.NewMockServiceResolver(gomock.NewController(tc.t))
+				serviceResolver := membership.NewMockServiceResolver(tc.ctrl)
 				serviceResolver.EXPECT().AvailableMemberCount().Return(0).AnyTimes()
 				tc.serviceResolver = serviceResolver
 			},
@@ -195,15 +198,21 @@ func TestRateLimitInterceptorProvider(t *testing.T) {
 
 			tc.numRequests = 10
 			tc.t = t
+			tc.ctrl = gomock.NewController(t)
 			{
 				// Create a mock service resolver which returns the number of frontend hosts.
 				// This may be overridden by the test case.
-				ctrl := gomock.NewController(t)
-				serviceResolver := membership.NewMockServiceResolver(ctrl)
+				serviceResolver := membership.NewMockServiceResolver(tc.ctrl)
 				serviceResolver.EXPECT().AvailableMemberCount().Return(numHosts).AnyTimes()
 				tc.serviceResolver = serviceResolver
 			}
 			tc.configure(&tc)
+
+			serviceErrorInterceptor := interceptor.NewServiceErrorInterceptor(
+				dynamicconfig.GetIntPropertyFn(4000),
+				metrics.NewMockHandler(tc.ctrl),
+				log.NewTestLogger(),
+			)
 
 			// Create a rate limit interceptor which uses the per-instance and global RPS limits from the test case.
 			rateLimitInterceptor := RateLimitInterceptorProvider(&Config{
@@ -225,7 +234,7 @@ func TestRateLimitInterceptorProvider(t *testing.T) {
 			// Create a gRPC server for the fake workflow service.
 			svc := &testSvc{}
 			server := grpc.NewServer(grpc.ChainUnaryInterceptor(
-				interceptor.ServiceErrorInterceptor,
+				serviceErrorInterceptor.Intercept,
 				interceptor.NewFrontendServiceErrorInterceptor(log.NewTestLogger()),
 				rateLimitInterceptor.Intercept,
 			))
@@ -560,29 +569,40 @@ func TestNamespaceRateLimitInterceptorProvider(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			ctrl := gomock.NewController(t)
 
 			namespaceName := "test-namespace"
-			mockRegistry := namespace.NewMockRegistry(gomock.NewController(t))
+			mockRegistry := namespace.NewMockRegistry(ctrl)
 			mockRegistry.EXPECT().GetNamespace(namespace.Name(namespaceName)).Return(&namespace.Namespace{}, nil).AnyTimes()
-			serviceResolver := membership.NewMockServiceResolver(gomock.NewController(t))
+			serviceResolver := membership.NewMockServiceResolver(ctrl)
 			serviceResolver.EXPECT().AvailableMemberCount().Return(tc.frontendServiceCount).AnyTimes()
 
 			config := getTestConfig(tc)
 
+			serviceErrorInterceptor := interceptor.NewServiceErrorInterceptor(
+				dynamicconfig.GetIntPropertyFn(4000),
+				metrics.NewMockHandler(ctrl),
+				log.NewTestLogger(),
+			)
+
 			// Create a rate limit interceptor.
-			rateLimitInterceptor := NamespaceRateLimitInterceptorProvider(
+			rateLimiters := NamespaceRateLimitersProvider(
 				primitives.FrontendService,
 				&config,
-				mockRegistry,
 				serviceResolver,
-				metrics.NoopMetricsHandler,
 				log.NewTestLogger(),
+			)
+			rateLimitInterceptor := NamespaceRateLimitInterceptorProvider(
+				mockRegistry,
+				rateLimiters,
+				&config,
+				metrics.NoopMetricsHandler,
 			)
 
 			// Create a gRPC server for the fake workflow service.
 			svc := &testSvc{}
 			server := grpc.NewServer(grpc.ChainUnaryInterceptor(
-				interceptor.ServiceErrorInterceptor,
+				serviceErrorInterceptor.Intercept,
 				interceptor.NewFrontendServiceErrorInterceptor(log.NewTestLogger()),
 				rateLimitInterceptor.Intercept,
 			))
@@ -739,11 +759,12 @@ func TestNamespaceRateLimitMetrics(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			ctrl := gomock.NewController(t)
 
 			testNS := "test_namespace"
-			mockRegistry := namespace.NewMockRegistry(gomock.NewController(t))
+			mockRegistry := namespace.NewMockRegistry(ctrl)
 			mockRegistry.EXPECT().GetNamespace(namespace.Name(testNS)).Return(&namespace.Namespace{}, nil).AnyTimes()
-			serviceResolver := membership.NewMockServiceResolver(gomock.NewController(t))
+			serviceResolver := membership.NewMockServiceResolver(ctrl)
 			serviceResolver.EXPECT().AvailableMemberCount().Return(tc.frontendServiceCount).AnyTimes()
 			metricsHandler := metricstest.NewCaptureHandler()
 			capture := metricsHandler.StartCapture()
@@ -764,13 +785,19 @@ func TestNamespaceRateLimitMetrics(t *testing.T) {
 				},
 			}
 
+			serviceErrorInterceptor := interceptor.NewServiceErrorInterceptor(
+				dynamicconfig.GetIntPropertyFn(4000),
+				metrics.NewMockHandler(ctrl),
+				log.NewTestLogger(),
+			)
+
 			// Create a rate limit interceptor which uses the per-instance and global RPS limits from the test case.
 			rateLimitInterceptor := RateLimitInterceptorProvider(config, serviceResolver, metricsHandler, log.NewTestLogger())
 
 			// Create a gRPC server for the fake workflow service.
 			svc := &testSvc{}
 			server := grpc.NewServer(grpc.ChainUnaryInterceptor(
-				interceptor.ServiceErrorInterceptor,
+				serviceErrorInterceptor.Intercept,
 				interceptor.NewFrontendServiceErrorInterceptor(log.NewTestLogger()),
 				rateLimitInterceptor.Intercept,
 			))

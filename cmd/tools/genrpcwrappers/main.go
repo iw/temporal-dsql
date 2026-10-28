@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"go.temporal.io/api/operatorservice/v1"
 	taskqueuepb "go.temporal.io/api/taskqueue/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/server/cmd/tools/codegen"
@@ -43,22 +44,27 @@ var (
 	services = []service{
 		{
 			name:            "frontend",
-			clientType:      reflect.TypeOf((*workflowservice.WorkflowServiceClient)(nil)),
+			clientType:      reflect.TypeFor[*workflowservice.WorkflowServiceClient](),
 			clientGenerator: generateFrontendOrAdminClient,
 		},
 		{
 			name:            "admin",
-			clientType:      reflect.TypeOf((*adminservice.AdminServiceClient)(nil)),
+			clientType:      reflect.TypeFor[*adminservice.AdminServiceClient](),
+			clientGenerator: generateFrontendOrAdminClient,
+		},
+		{
+			name:            "operator",
+			clientType:      reflect.TypeFor[*operatorservice.OperatorServiceClient](),
 			clientGenerator: generateFrontendOrAdminClient,
 		},
 		{
 			name:            "history",
-			clientType:      reflect.TypeOf((*historyservice.HistoryServiceClient)(nil)),
+			clientType:      reflect.TypeFor[*historyservice.HistoryServiceClient](),
 			clientGenerator: generateHistoryClient,
 		},
 		{
 			name:            "matching",
-			clientType:      reflect.TypeOf((*matchingservice.MatchingServiceClient)(nil)),
+			clientType:      reflect.TypeFor[*matchingservice.MatchingServiceClient](),
 			clientGenerator: generateMatchingClient,
 		},
 	}
@@ -98,12 +104,17 @@ var (
 		"client.matching.PollActivityTaskQueue": true,
 		"client.matching.PollWorkflowTaskQueue": true,
 		"client.matching.QueryWorkflow":         true,
+		"client.matching.DispatchNexusTask":     true,
+		"client.matching.PollNexusTaskQueue":    true,
+
 		// these do forwarding stats. too complicated.
 		"metricsClient.matching.AddActivityTask":       true,
 		"metricsClient.matching.AddWorkflowTask":       true,
 		"metricsClient.matching.PollActivityTaskQueue": true,
 		"metricsClient.matching.PollWorkflowTaskQueue": true,
 		"metricsClient.matching.QueryWorkflow":         true,
+		"metricsClient.matching.DispatchNexusTask":     true,
+		"metricsClient.matching.PollNexusTaskQueue":    true,
 	}
 	// Fields to ignore when looking for the routing fields in a request object.
 	ignoreField = map[string]bool{
@@ -167,8 +178,7 @@ func findNestedField(t reflect.Type, name string, path string, maxDepth int) []f
 		return nil
 	}
 	var out []fieldWithPath
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
+	for f := range t.Fields() {
 		if ignoreField[t.Name()+"."+f.Name] {
 			continue
 		}
@@ -237,7 +247,25 @@ func toGetter(snake string) string {
 func makeGetHistoryClient(reqType reflect.Type, routingOptions *historyservice.RoutingOptions) string {
 	t := reqType.Elem() // we know it's a pointer
 
-	if routingOptions.AnyHost && routingOptions.ShardId != "" && routingOptions.WorkflowId != "" && routingOptions.TaskToken != "" && routingOptions.TaskInfos != "" && routingOptions.ChasmComponentRef != "" {
+	hasWorkflowIDRouting := routingOptions.WorkflowId != "" && routingOptions.ChasmComponentRef == ""
+	hasComponentRefRouting := routingOptions.ChasmComponentRef != "" && routingOptions.WorkflowId == ""
+	hasComponentRefFallbackRouting := routingOptions.WorkflowId != "" && routingOptions.ChasmComponentRef != ""
+
+	routingDirectiveCount := 0
+	for _, configured := range []bool{
+		routingOptions.AnyHost,
+		routingOptions.ShardId != "",
+		hasWorkflowIDRouting,
+		routingOptions.TaskToken != "",
+		routingOptions.TaskInfos != "",
+		hasComponentRefRouting,
+		hasComponentRefFallbackRouting,
+	} {
+		if configured {
+			routingDirectiveCount++
+		}
+	}
+	if routingDirectiveCount > 1 {
 		log.Fatalf("Found more than one routing directive in %s", t)
 	}
 	if routingOptions.AnyHost {
@@ -247,7 +275,36 @@ func makeGetHistoryClient(reqType reflect.Type, routingOptions *historyservice.R
 		verifyFieldExists(t, routingOptions.ShardId)
 		return "shardID := " + toGetter(routingOptions.ShardId)
 	}
-	if routingOptions.WorkflowId != "" {
+	if hasComponentRefFallbackRouting {
+		namespaceIDField := routingOptions.NamespaceId
+		if namespaceIDField == "" {
+			namespaceIDField = "namespace_id"
+		}
+
+		verifyFieldExists(t, namespaceIDField)
+		verifyFieldExists(t, routingOptions.WorkflowId)
+		verifyFieldExists(t, routingOptions.ChasmComponentRef)
+		return fmt.Sprintf(`var shardID int32
+	if len(%s) == 0 {
+		shardID = c.shardIDFromWorkflowID(%s, %s)
+	} else {
+		componentRef, err := c.tokenSerializer.DeserializeChasmComponentRef(%s)
+		if err != nil {
+			return nil, serviceerror.NewInvalidArgument("error deserializing component ref")
+		}
+		if componentRef.GetNamespaceId() == "" || componentRef.GetBusinessId() == "" {
+			return nil, serviceerror.NewInvalidArgument("component ref missing namespace ID or business ID")
+		}
+
+		shardID = c.shardIDFromWorkflowID(componentRef.GetNamespaceId(), componentRef.GetBusinessId())
+	}`,
+			toGetter(routingOptions.ChasmComponentRef),
+			toGetter(namespaceIDField),
+			toGetter(routingOptions.WorkflowId),
+			toGetter(routingOptions.ChasmComponentRef),
+		) + "\n"
+	}
+	if hasWorkflowIDRouting {
 		namespaceIdField := routingOptions.NamespaceId
 		if namespaceIdField == "" {
 			namespaceIdField = "namespace_id"
@@ -281,17 +338,20 @@ func makeGetHistoryClient(reqType reflect.Type, routingOptions *historyservice.R
 		namespaceID = %s
 		businessID = taskToken.GetWorkflowId()
 	}
-	shardID := c.shardIDFromWorkflowID(namespaceID, businessID)
-	`, toGetter(routingOptions.TaskToken), toGetter(namespaceIdField))
+	shardID := c.shardIDFromWorkflowID(namespaceID, businessID)`,
+			toGetter(routingOptions.TaskToken),
+			toGetter(namespaceIdField),
+		) + "\n"
 	}
-	if routingOptions.ChasmComponentRef != "" {
+	if hasComponentRefRouting {
 		verifyFieldExists(t, routingOptions.ChasmComponentRef)
 		return fmt.Sprintf(`ref, err := c.tokenSerializer.DeserializeChasmComponentRef(%s)
 	if err != nil {
 		return nil, serviceerror.NewInvalidArgument("error deserializing component ref")
 	}
-	shardID := c.shardIDFromWorkflowID(ref.GetNamespaceId(), ref.GetBusinessId())
-	`, toGetter(routingOptions.ChasmComponentRef))
+	shardID := c.shardIDFromWorkflowID(ref.GetNamespaceId(), ref.GetBusinessId())`,
+			toGetter(routingOptions.ChasmComponentRef),
+		) + "\n"
 	}
 	if routingOptions.TaskInfos != "" {
 		verifyFieldExists(t, routingOptions.TaskInfos)
@@ -324,6 +384,7 @@ func makeGetMatchingClient(reqType reflect.Type) string {
 		"ReplicateTaskQueueUserDataRequest",
 		"RecordWorkerHeartbeatRequest",
 		"ListWorkersRequest",
+		"CountWorkersRequest",
 		"DescribeWorkerRequest":
 		// Always route these requests to the same matching node by namespace.
 		tq = fieldWithPath{path: "\"not-applicable\""}
@@ -379,7 +440,7 @@ func makeGetMatchingClient(reqType reflect.Type) string {
 	if tq.found() && tqt.found() {
 		partitionMaker := fmt.Sprintf("tqid.PartitionFromProto(%s, %s, %s)", tq.path, nsID.path, tqt.path)
 		// Some task queue fields are full messages, some are just strings
-		isTaskQueueMessage := tq.field != nil && tq.field.Type == reflect.TypeOf((*taskqueuepb.TaskQueue)(nil))
+		isTaskQueueMessage := tq.field != nil && tq.field.Type == reflect.TypeFor[*taskqueuepb.TaskQueue]()
 		if !isTaskQueueMessage {
 			partitionMaker = fmt.Sprintf("tqid.NormalPartitionFromRpcName(%s, %s, %s)", tq.path, nsID.path, tqt.path)
 		}
@@ -445,8 +506,8 @@ func writeTemplatedMethod(w io.Writer, service service, impl string, m reflect.M
 
 func writeTemplatedMethods(w io.Writer, service service, impl string, tmpl string) {
 	sType := service.clientType.Elem()
-	for n := 0; n < sType.NumMethod(); n++ {
-		writeTemplatedMethod(w, service, impl, sType.Method(n), tmpl)
+	for method := range sType.Methods() {
+		writeTemplatedMethod(w, service, impl, method, tmpl)
 	}
 }
 

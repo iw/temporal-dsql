@@ -75,19 +75,6 @@ ScheduleNexusOperation commands with a "nexus_header" field that exceeds this li
 Uses Go's len() function on header keys and values to determine the total size.`,
 )
 
-var UseSystemCallbackURL = dynamicconfig.NewGlobalBoolSetting(
-	"component.nexusoperations.useSystemCallbackURL",
-	true,
-	`UseSystemCallbackURL is a global feature toggle that controls how the executor generates
-	callback URLs for worker targets in Nexus Operations.When set to true,
-	the executor will use the fixed system callback URL ("temporal://system") for all worker targets,
-	instead of generating URLs from the callback URL template.
-	This simplifies configuration and improves reliability for worker callbacks.
-	- false: The executor uses the callback URL template to generate callback URLs for worker targets.
-	- true (default): The executor uses the fixed system callback URL ("temporal://system") for worker targets.
-	Note: The default will switch to true in future releases.`,
-)
-
 var DisallowedOperationHeaders = dynamicconfig.NewGlobalTypedSettingWithConverter(
 	"component.nexusoperations.disallowedHeaders",
 	func(in any) ([]string, error) {
@@ -102,7 +89,8 @@ var DisallowedOperationHeaders = dynamicconfig.NewGlobalTypedSettingWithConverte
 	},
 	[]string{
 		"request-timeout",
-		interceptor.DCRedirectionApiHeaderName,
+		interceptor.DCRedirectionAPIHeaderName,
+		interceptor.DCRedirectionSourceCellHeaderName,
 		interceptor.DCRedirectionContextHeaderName,
 		headers.CallerNameHeaderName,
 		headers.CallerTypeHeaderName,
@@ -147,9 +135,9 @@ var MetricTagConfiguration = dynamicconfig.NewGlobalTypedSetting(
 	"component.nexusoperations.metrics.tags",
 	chasmnexus.NexusMetricTagConfig{},
 	`Controls which metric tags are included with Nexus operation metrics. This configuration supports:
-1. Service name tag - adds the Nexus service name as a metric dimension (IncludeServiceTag)
-2. Operation name tag - adds the Nexus operation name as a metric dimension (IncludeOperationTag)
-3. Header-based tags - maps values from request headers to metric tags (HeaderTagMappings)
+1. Service name tag - adds the Nexus service name as a metric dimension (IncludeServiceTag). Used by callers and handlers.
+2. Operation name tag - adds the Nexus operation name as a metric dimension (IncludeOperationTag). Used by callers and handlers.
+3. Header-based tags - maps values from request headers to metric tags (HeaderTagMappings). Only used by handlers.
 
 Note: default metric tags (like namespace, endpoint) are always included and not affected by this configuration.
 Adding high-cardinality tags (like unique operation names) can significantly increase metric storage
@@ -176,9 +164,9 @@ type Config struct {
 	MaxOperationScheduleToCloseTimeout  dynamicconfig.DurationPropertyFnWithNamespaceFilter
 	PayloadSizeLimit                    dynamicconfig.IntPropertyFnWithNamespaceFilter
 	CallbackURLTemplate                 dynamicconfig.StringPropertyFn
-	UseSystemCallbackURL                dynamicconfig.BoolPropertyFn
 	UseNewFailureWireFormat             dynamicconfig.BoolPropertyFnWithNamespaceFilter
 	RecordCancelRequestCompletionEvents dynamicconfig.BoolPropertyFn
+	MetricTagConfig                     dynamicconfig.TypedPropertyFn[chasmnexus.NexusMetricTagConfig]
 	RetryPolicy                         func() backoff.RetryPolicy
 }
 
@@ -195,9 +183,9 @@ func ConfigProvider(dc *dynamicconfig.Collection, cfg *config.Persistence) *Conf
 		MaxOperationScheduleToCloseTimeout:  MaxOperationScheduleToCloseTimeout.Get(dc),
 		PayloadSizeLimit:                    dynamicconfig.BlobSizeLimitError.Get(dc),
 		CallbackURLTemplate:                 CallbackURLTemplate.Get(dc),
-		UseSystemCallbackURL:                UseSystemCallbackURL.Get(dc),
 		UseNewFailureWireFormat:             chasmnexus.UseNewFailureWireFormat.Get(dc),
 		RecordCancelRequestCompletionEvents: RecordCancelRequestCompletionEvents.Get(dc),
+		MetricTagConfig:                     MetricTagConfiguration.Get(dc),
 		RetryPolicy: func() backoff.RetryPolicy {
 			return backoff.NewExponentialRetryPolicy(
 				RetryPolicyInitialInterval.Get(dc)(),
@@ -209,4 +197,14 @@ func ConfigProvider(dc *dynamicconfig.Collection, cfg *config.Persistence) *Conf
 		},
 		NumHistoryShards: cfg.NumHistoryShards,
 	}
+}
+
+// ResolvedMetricTagConfig returns the configured metric tag config, defaulting to an empty config
+// when the receiver or the setting is nil (e.g. in tests that construct a bare Config). It is
+// nil-receiver safe.
+func (c *Config) ResolvedMetricTagConfig() chasmnexus.NexusMetricTagConfig {
+	if c == nil || c.MetricTagConfig == nil {
+		return chasmnexus.NexusMetricTagConfig{}
+	}
+	return c.MetricTagConfig()
 }

@@ -12,6 +12,10 @@ plugin stays in its own directories, which never conflict on a rebase, so a
 separate plugin repository isn't needed while the plugin depends on the patch
 set.
 
+The fork is based on upstream release `v1.32.1`. [Upgrading to a new release
+tag](#upgrading-to-a-new-release-tag) describes how the patch set moves to the
+next one.
+
 ## Transaction retry hook
 
 `common/persistence/sql/common.go` lets a database opt into
@@ -131,17 +135,44 @@ Schema tests live in the fork-owned `tools/dsql` package. They verify schema-nam
 discovery and both baseline setup paths, with embedded and filesystem schemas,
 without changing upstream's embedding code or tests.
 
-## Listing the upstream-file diff
+## Upgrading to a new release tag
 
-With an `upstream/main` ref available locally, this Bash command lists the fork's
-committed changes since the common base, restricted to paths that exist in the
-upstream tree:
+Moving the fork from `v1.32.1` to a later release tag, such as `v1.33.0`,
+rebuilds the patch set on the new tag, so a reviewer can read it as a short
+series of commits:
+
+1. Fetch the tag and branch from it: `git fetch upstream tag v1.33.0 --no-tags`,
+   then `git switch -c upstream-v1.33.0 v1.33.0`.
+2. Copy the fork's own files from `main` in one commit. They are the files that
+   `git diff --diff-filter=A --name-only v1.32.1 main` lists.
+3. Apply `main`'s changes to upstream files, one commit for each section of this
+   document, with `git diff v1.32.1 main -- <files> | git apply -3 --index`. A
+   conflict here means upstream changed code that the patch set also changes.
+4. Rebuild `go.mod` and `go.sum` from the new tag's, adding the plugin's AWS SDK
+   modules with `go get`, then run `go mod tidy`.
+5. Build, then run the ci module's `test`, its `lint` with the whole change as
+   `--patch`, so the fork's code meets the new tag's lint rules, and the live
+   tests.
+6. Merge `main` into the branch with `git merge -s ours main`, then open a pull
+   request into `main`. The branch already carries everything on `main`, so the
+   merge keeps `main`'s history without changing the branch's files, and the
+   pull request merges cleanly. If `main` moved after step 2, bring those
+   changes in first.
+7. Update the base tag in this document and in the README.
+
+`v1.32.1` was the first release tag rebuilt this way. Before it, the fork followed
+upstream `main`, last merged at `a13350340` from April 2026.
+
+## Listing the patch set
+
+With the base tag available locally, this Bash command lists the fork's committed
+changes to upstream files:
 
 ```bash
-base=$(git merge-base HEAD upstream/main)
+base=v1.32.1
 paths=()
 while IFS= read -r -d '' path; do
-  if git cat-file -e "upstream/main:$path" 2>/dev/null; then
+  if git cat-file -e "$base:$path" 2>/dev/null; then
     paths+=("$path")
   fi
 done < <(git diff --name-only -z "$base" HEAD)
@@ -152,6 +183,6 @@ fi
 
 Remove `--stat` for the patch. To include tracked, uncommitted work, omit `HEAD`
 from both `git diff` commands. Review `git status --short` separately for new,
-untracked files. To inventory fork-added files as well, run
-`git diff --diff-filter=A --name-only "$base" HEAD` without the upstream-path
-filter. None of these commands fetches or changes a ref.
+untracked files. To list the fork's own files instead, run
+`git diff --diff-filter=A --name-only "$base" HEAD`. None of these commands
+fetches or changes a ref.

@@ -136,7 +136,7 @@ func (s *VisibilityStore) RecordWorkflowExecutionClosed(
 	row.CloseTime = &request.CloseTime
 	row.HistoryLength = &request.HistoryLength
 	row.HistorySizeBytes = &request.HistorySizeBytes
-	row.ExecutionDuration = &request.ExecutionDuration
+	row.ExecutionDuration = new(request.ExecutionDuration.Nanoseconds())
 	row.StateTransitionCount = &request.StateTransitionCount
 
 	result, err := s.sqlStore.DB.ReplaceIntoVisibility(ctx, row)
@@ -275,6 +275,8 @@ func (s *VisibilityStore) countChasmExecutions(
 		saMapper,
 		mapper,
 		request.ArchetypeId,
+		s.metricsHandler,
+		s.logger,
 	)
 	if err != nil {
 		var converterErr *query.ConverterError
@@ -387,6 +389,8 @@ func (s *VisibilityStore) listExecutionsInternal(
 		saMapper,
 		request.ChasmMapper,
 		request.ArchetypeID,
+		s.metricsHandler,
+		s.logger,
 	)
 	if err != nil {
 		// Convert ConverterError to InvalidArgument and pass through all other errors (which should be
@@ -622,6 +626,8 @@ func (s *VisibilityStore) countWorkflowExecutions(
 		saMapper,
 		nil,
 		chasm.UnspecifiedArchetypeID,
+		s.metricsHandler,
+		s.logger,
 	)
 	if err != nil {
 		// Convert ConverterError to InvalidArgument and pass through all other errors (which should be
@@ -852,7 +858,7 @@ func (s *VisibilityStore) rowToInfo(
 		info.CloseTime = *row.CloseTime
 	}
 	if row.ExecutionDuration != nil {
-		info.ExecutionDuration = *row.ExecutionDuration
+		info.ExecutionDuration = time.Duration(*row.ExecutionDuration)
 	}
 	if row.HistoryLength != nil {
 		info.HistoryLength = *row.HistoryLength
@@ -935,8 +941,10 @@ func buildQueryParams(
 	saMapper searchattribute.Mapper,
 	chasmMapper *chasm.VisibilitySearchAttributesMapper,
 	archetypeID chasm.ArchetypeID,
+	metricsHandler metrics.Handler,
+	logger log.Logger,
 ) (*query.QueryParams[sqlparser.Expr], error) {
-	c := query.NewQueryConverter(sqlQC, namespaceName, saTypeMap, saMapper).
+	c := query.NewQueryConverter(sqlQC, namespaceName, saTypeMap, saMapper, metricsHandler, logger).
 		WithChasmMapper(chasmMapper).
 		WithArchetypeID(archetypeID)
 

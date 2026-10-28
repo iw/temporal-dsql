@@ -80,7 +80,10 @@ func (s *Sim) Run() {
 	eventCount := 0
 	lastReport := s.now
 	for s.q.Len() > 0 {
-		ev := heap.Pop(&s.q).(*Event)
+		ev, ok := heap.Pop(&s.q).(*Event)
+		if !ok {
+			continue
+		}
 		if ev.At.After(s.end) {
 			return
 		}

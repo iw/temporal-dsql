@@ -8,6 +8,7 @@ import (
 	"time"
 
 	commonpb "go.temporal.io/api/common/v1"
+	computepb "go.temporal.io/api/compute/v1"
 	deploymentpb "go.temporal.io/api/deployment/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
@@ -19,9 +20,9 @@ import (
 	"go.temporal.io/sdk/workflow"
 	deploymentspb "go.temporal.io/server/api/deployment/v1"
 	"go.temporal.io/server/api/historyservice/v1"
+	"go.temporal.io/server/chasm"
 	"go.temporal.io/server/common/backoff"
 	"go.temporal.io/server/common/namespace"
-	"go.temporal.io/server/common/payload"
 	"go.temporal.io/server/common/primitives"
 	"go.temporal.io/server/common/sdk"
 	"go.temporal.io/server/common/searchattribute"
@@ -39,7 +40,8 @@ const (
 	WorkerDeploymentWorkflowType        = "temporal-sys-worker-deployment-workflow"
 
 	// Namespace division
-	WorkerDeploymentNamespaceDivision = "TemporalWorkerDeployment"
+	WorkerDeploymentNamespaceDivision   = "TemporalWorkerDeployment"
+	workerDeploymentWorkflowPriorityKey = 1
 
 	// Updates
 	RegisterWorkerInDeploymentVersion = "register-task-queue-worker"    // for Worker Deployment Version wf
@@ -64,6 +66,7 @@ const (
 	SyncVersionSummarySignal    = "sync-version-summary"
 	PropagationCompleteSignal   = "propagation-complete"
 	ReactivateVersionSignalName = "reactivate-version" // for Worker Deployment Version wfs
+	DemoteVersionSignalName     = "demote-version"     // for Worker Deployment Version wfs
 
 	// Queries
 	QueryDescribeVersion    = "describe-version"    // for Worker Deployment Version wf
@@ -430,21 +433,25 @@ func makeStartRequest(
 		SearchAttributes:         buildSearchAttributes(),
 		Memo:                     memo,
 		Identity:                 identity,
+		Priority:                 &commonpb.Priority{PriorityKey: workerDeploymentWorkflowPriorityKey},
 	}
 }
 
 func buildSearchAttributes() *commonpb.SearchAttributes {
 	sa := &commonpb.SearchAttributes{}
-	searchattribute.AddSearchAttribute(&sa, sadefs.TemporalNamespaceDivision, payload.EncodeString(WorkerDeploymentNamespaceDivision))
+	searchattribute.AddSearchAttributes(
+		&sa,
+		chasm.SearchAttributeTemporalNamespaceDivision.Value(WorkerDeploymentNamespaceDivision),
+	)
 	return sa
 }
 
 func makeNewVersionState(
-	deploymentName,
-	buildID string,
+	deploymentName, buildID string,
 	createTime time.Time,
 	identity string,
 	initialStatus enumspb.WorkerDeploymentVersionStatus,
+	computeConfig *computepb.ComputeConfigSummary,
 	syncBatchSize int32,
 ) *deploymentspb.VersionLocalState {
 	return &deploymentspb.VersionLocalState{
@@ -462,5 +469,6 @@ func makeNewVersionState(
 		Metadata:             nil,
 		SyncBatchSize:        syncBatchSize,
 		LastModifierIdentity: identity,
+		ComputeConfig:        computeConfig,
 	}
 }

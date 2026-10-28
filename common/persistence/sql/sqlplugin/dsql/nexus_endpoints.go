@@ -54,7 +54,7 @@ const (
 	createEndpointQry  = `INSERT INTO nexus_endpoints(id, data, data_encoding, version) VALUES ($1, $2, $3, 1)`
 	updateEndpointQry  = `UPDATE nexus_endpoints SET data = $1, data_encoding = $2, version = $3 WHERE id = $4 AND version = $5`
 	deleteEndpointQry  = `DELETE FROM nexus_endpoints WHERE id = $1`
-	getEndpointByIdQry = `SELECT id, data, data_encoding, version FROM nexus_endpoints WHERE id = $1`
+	getEndpointByIDQry = `SELECT id, data, data_encoding, version FROM nexus_endpoints WHERE id = $1`
 	getEndpointsQry    = `SELECT id, data, data_encoding, version FROM nexus_endpoints WHERE id > $1 ORDER BY id LIMIT $2`
 )
 
@@ -126,7 +126,7 @@ func (pdb *db) GetNexusEndpointByID(
 	var dsqlRow dsqlNexusEndpointRow
 	// Convert UUID bytes to string for DSQL UUID column compatibility
 	idStr := BytesToUUIDString(id)
-	err := pdb.GetContext(ctx, &dsqlRow, getEndpointByIdQry, idStr)
+	err := pdb.GetContext(ctx, &dsqlRow, getEndpointByIDQry, idStr)
 	if err != nil {
 		return nil, err
 	}

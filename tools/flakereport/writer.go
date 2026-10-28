@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.temporal.io/server/tools/common/github"
 )
 
 // writeFailuresJSON writes failures.json containing every individual test failure (for analytics).
@@ -95,7 +98,7 @@ func generateGitHubSummary(summary *ReportSummary, runID string, maxLinks int) s
 
 	// Link to run
 	if runID != "" {
-		content += fmt.Sprintf("\n[View Full Report & Artifacts](https://github.com/%s/actions/runs/%s)\n", defaultRepository, runID)
+		content += fmt.Sprintf("\n[View Full Report & Artifacts](%s)\n", github.RunURL(defaultRepository, runID))
 	}
 
 	return content
@@ -130,7 +133,7 @@ func writeBisectTable(sb *strings.Builder, reports []TestBisectReport, repo stri
 			if len(shortSHA) > 7 {
 				shortSHA = shortSHA[:7]
 			}
-			commitURL := fmt.Sprintf("https://github.com/%s/commit/%s", repo, s.CommitSHA)
+			commitURL := github.CommitURL(repo, s.CommitSHA)
 			title := s.CommitTitle
 			if title == s.CommitSHA || title == "" {
 				title = shortSHA
@@ -171,6 +174,19 @@ func generateBisectSummary(reports []TestBisectReport, repo string, minProb floa
 		sb.WriteString(fmt.Sprintf(", %d below confidence threshold", skipped))
 	}
 	sb.WriteString("\n\n")
+
+	// Sort by top suspect probability descending so the most actionable rows appear first.
+	sort.Slice(reports, func(i, j int) bool {
+		pi := 0.0
+		if len(reports[i].TopSuspects) > 0 {
+			pi = reports[i].TopSuspects[0].Probability
+		}
+		pj := 0.0
+		if len(reports[j].TopSuspects) > 0 {
+			pj = reports[j].TopSuspects[0].Probability
+		}
+		return pi > pj
+	})
 
 	writeBisectTable(&sb, reports, repo)
 	return sb.String()

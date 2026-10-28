@@ -55,6 +55,14 @@ func newTokenBucketLimiter(ddb dynamoDBUpdater, resolved settings) *TokenBucketL
 	}
 }
 
+// gcraSchedule holds the reservation parameters, in microseconds, that a limiter's
+// rate, capacity and max wait imply.
+type gcraSchedule struct {
+	interval int64 // between reservations
+	tau      int64 // how far ahead of now a burst can reserve
+	horizon  int64 // how far ahead of now a reservation may land, max wait included
+}
+
 func (l *TokenBucketLimiter) Wait(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -62,80 +70,97 @@ func (l *TokenBucketLimiter) Wait(ctx context.Context) error {
 	if l.Rate <= 0 || l.Capacity <= 0 {
 		return nil
 	}
-	// Round up to microseconds so non-divisor rates never exceed their budget.
-	if l.Rate > int64(time.Second/time.Microsecond) || l.MaxWait < 0 {
-		return errors.New("invalid GCRA rate or max wait")
+	schedule, err := l.schedule()
+	if err != nil {
+		return err
 	}
-	interval := (int64(time.Second/time.Microsecond) + l.Rate - 1) / l.Rate
-	if l.Capacity-1 > (math.MaxInt64/int64(time.Microsecond)-l.MaxWait.Microseconds())/interval {
-		return errors.New("GCRA reservation horizon overflows duration")
-	}
-	tau := (l.Capacity - 1) * interval
-	horizon := tau + l.MaxWait.Microseconds()
 	var lastErr error
 	for range gcraMaxAttempts {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		now := l.now()
-		t := now.UnixMicro()
-		ttl := numberAttribute(now.Add(l.TTLWindow).Unix())
-		input := &dynamodb.UpdateItemInput{
-			TableName:           aws.String(l.tableName),
-			Key:                 map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: tokenBucketPKPrefix + l.endpoint}},
-			UpdateExpression:    aws.String("SET tat_us = tat_us + :T, ttl_epoch = :ttl"),
-			ConditionExpression: aws.String("tat_us BETWEEN :t AND :limit"),
-			ExpressionAttributeValues: map[string]types.AttributeValue{
-				":T": numberAttribute(interval), ":t": numberAttribute(t),
-				":limit": numberAttribute(t + horizon), ":ttl": ttl,
-			},
-			ReturnValues:                        types.ReturnValueUpdatedOld,
-			ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
-		}
-		out, err := l.ddb.UpdateItem(ctx, input)
-		if err == nil {
-			old, present, err := theoreticalArrival(out.Attributes)
-			if err != nil {
-				return err
-			}
-			if !present {
-				return errors.New("GCRA update returned no tat_us")
-			}
-			reserved := max(t, old-tau)
-			return l.sleep(ctx, max(0, time.UnixMicro(reserved).Sub(l.now())))
-		}
-		var condition *types.ConditionalCheckFailedException
-		if !errors.As(err, &condition) {
-			return &dynamoDBLimiterError{err: err}
-		}
-		old, present, err := theoreticalArrival(condition.Item)
-		if err != nil {
+		retry, err := l.reserve(ctx, schedule)
+		if !retry {
 			return err
-		}
-		if present && old > t+horizon {
-			return fmt.Errorf("%w (endpoint=%s)", errGCRAHorizon, l.endpoint)
-		}
-		if present && old >= t {
-			return errors.New("GCRA condition failed inside reservation horizon")
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		input.UpdateExpression = aws.String("SET tat_us = :t_plus_T, ttl_epoch = :ttl")
-		input.ConditionExpression = aws.String("attribute_not_exists(tat_us) OR tat_us < :t")
-		input.ExpressionAttributeValues = map[string]types.AttributeValue{
-			":t_plus_T": numberAttribute(t + interval), ":t": numberAttribute(t), ":ttl": ttl,
-		}
-		_, err = l.ddb.UpdateItem(ctx, input)
-		if err == nil {
-			return ctx.Err()
-		}
-		if !errors.As(err, &condition) {
-			return &dynamoDBLimiterError{err: err}
 		}
 		lastErr = err
 	}
 	return fmt.Errorf("GCRA idle reservation contention after %d attempts: %w", gcraMaxAttempts, lastErr)
+}
+
+func (l *TokenBucketLimiter) schedule() (gcraSchedule, error) {
+	// Round up to microseconds so non-divisor rates never exceed their budget.
+	if l.Rate > int64(time.Second/time.Microsecond) || l.MaxWait < 0 {
+		return gcraSchedule{}, errors.New("invalid GCRA rate or max wait")
+	}
+	interval := (int64(time.Second/time.Microsecond) + l.Rate - 1) / l.Rate
+	if l.Capacity-1 > (math.MaxInt64/int64(time.Microsecond)-l.MaxWait.Microseconds())/interval {
+		return gcraSchedule{}, errors.New("GCRA reservation horizon overflows duration")
+	}
+	tau := (l.Capacity - 1) * interval
+	return gcraSchedule{interval: interval, tau: tau, horizon: tau + l.MaxWait.Microseconds()}, nil
+}
+
+// reserve makes one reservation attempt. It reports a retry when another caller won
+// the race to restart an idle bucket, and otherwise returns the attempt's outcome.
+func (l *TokenBucketLimiter) reserve(ctx context.Context, s gcraSchedule) (bool, error) {
+	now := l.now()
+	t := now.UnixMicro()
+	ttl := numberAttribute(now.Add(l.TTLWindow).Unix())
+	input := &dynamodb.UpdateItemInput{
+		TableName:           aws.String(l.tableName),
+		Key:                 map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: tokenBucketPKPrefix + l.endpoint}},
+		UpdateExpression:    aws.String("SET tat_us = tat_us + :T, ttl_epoch = :ttl"),
+		ConditionExpression: aws.String("tat_us BETWEEN :t AND :limit"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":T": numberAttribute(s.interval), ":t": numberAttribute(t),
+			":limit": numberAttribute(t + s.horizon), ":ttl": ttl,
+		},
+		ReturnValues:                        types.ReturnValueUpdatedOld,
+		ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
+	}
+	out, err := l.ddb.UpdateItem(ctx, input)
+	if err == nil {
+		old, present, err := theoreticalArrival(out.Attributes)
+		if err != nil {
+			return false, err
+		}
+		if !present {
+			return false, errors.New("GCRA update returned no tat_us")
+		}
+		reserved := max(t, old-s.tau)
+		return false, l.sleep(ctx, max(0, time.UnixMicro(reserved).Sub(l.now())))
+	}
+	var condition *types.ConditionalCheckFailedException
+	if !errors.As(err, &condition) {
+		return false, &dynamoDBLimiterError{err: err}
+	}
+	old, present, err := theoreticalArrival(condition.Item)
+	if err != nil {
+		return false, err
+	}
+	if present && old > t+s.horizon {
+		return false, fmt.Errorf("%w (endpoint=%s)", errGCRAHorizon, l.endpoint)
+	}
+	if present && old >= t {
+		return false, errors.New("GCRA condition failed inside reservation horizon")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	input.UpdateExpression = aws.String("SET tat_us = :t_plus_T, ttl_epoch = :ttl")
+	input.ConditionExpression = aws.String("attribute_not_exists(tat_us) OR tat_us < :t")
+	input.ExpressionAttributeValues = map[string]types.AttributeValue{
+		":t_plus_T": numberAttribute(t + s.interval), ":t": numberAttribute(t), ":ttl": ttl,
+	}
+	_, err = l.ddb.UpdateItem(ctx, input)
+	if err == nil {
+		return false, ctx.Err()
+	}
+	if !errors.As(err, &condition) {
+		return false, &dynamoDBLimiterError{err: err}
+	}
+	return true, err
 }
 
 func numberAttribute(n int64) *types.AttributeValueMemberN {

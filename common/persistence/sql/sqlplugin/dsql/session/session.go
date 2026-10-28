@@ -53,11 +53,8 @@ func buildDSNAttr(cfg *config.SQL) (url.Values, error) {
 		key := strings.TrimSpace(k)
 		value := strings.TrimSpace(v)
 		if parameters.Get(key) != "" {
-			panic(fmt.Sprintf("duplicate connection attr: %v:%v, %v:%v",
-				key,
-				parameters.Get(key),
-				key, value,
-			))
+			// The values stay out of the error, since an attribute can hold a secret.
+			return nil, fmt.Errorf("duplicate connection attribute %q", key)
 		}
 		parameters.Set(key, value)
 	}

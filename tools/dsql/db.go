@@ -10,12 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urfave/cli"
-
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dsql/auth"
-	_ "github.com/jackc/pgx/v5/stdlib"
-
+	_ "github.com/jackc/pgx/v5/stdlib" // registers the pgx driver with database/sql
+	"github.com/urfave/cli"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/tools/common/schema"
@@ -262,7 +260,7 @@ ORDER BY table_name`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tables []string
 	for rows.Next() {
