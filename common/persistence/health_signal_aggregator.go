@@ -1,10 +1,13 @@
 package persistence
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common"
 	"go.temporal.io/server/common/aggregate"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -25,8 +28,9 @@ type (
 		LatencyQuantile(quantile float64) float64
 		ErrorRatio() float64
 		// RecentSnapshot summarises the newest n latency windows: p99, unhealthy
-		// error ratio and successful throughput over the same span. Returns a
-		// zero snapshot when percentiles are disabled.
+		// error ratio and successful throughput over the same span. Calls that the
+		// persistence rate limiter rejected are left out. Returns a zero snapshot
+		// when percentiles are disabled.
 		RecentSnapshot(windows int) HealthSnapshot
 		Start()
 		Stop()
@@ -137,7 +141,10 @@ func (s *healthSignalAggregatorImpl) Record(callerSegment int32, latency time.Du
 		s.latencyAverage.Record(latency.Milliseconds())
 
 		unhealthy := isUnhealthyError(err)
-		if s.percentilesEnabled() && s.latencyDistribution != nil {
+		// The rate limiter's own rejections never reach the store. Counted here, they
+		// would read as fast, delivered work exactly when the capacity controller's
+		// limit binds, so the windows its snapshot reads leave them out.
+		if s.percentilesEnabled() && s.latencyDistribution != nil && !isPersistenceLimitRejection(err) {
 			now := time.Now()
 			s.latencyDistribution.Record(float64(latency.Milliseconds()), now)
 			s.counters.record(now, unhealthy)
@@ -246,4 +253,12 @@ func isUnhealthyError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// isPersistenceLimitRejection reports whether err is a rejection by the persistence
+// rate limiter itself (persistence_rate_limited_clients.go): the call never reached
+// the store.
+func isPersistenceLimitRejection(err error) bool {
+	var exhausted *serviceerror.ResourceExhausted
+	return errors.As(err, &exhausted) && exhausted.Cause == enumspb.RESOURCE_EXHAUSTED_CAUSE_PERSISTENCE_LIMIT
 }
