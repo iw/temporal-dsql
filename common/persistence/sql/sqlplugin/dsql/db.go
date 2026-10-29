@@ -50,6 +50,7 @@ type db struct {
 
 	handle *sqlplugin.DatabaseHandle
 	tx     *sqlx.Tx
+	facts  *storeFacts
 }
 
 var _ sqlplugin.DB = (*db)(nil)
@@ -85,6 +86,7 @@ func newDBWithDependencies(
 		handle:   handle,
 		tx:       tx,
 		logger:   logger,
+		facts:    &storeFacts{},
 	}
 	mdb.converter = &converter{}
 
@@ -113,6 +115,7 @@ func (pdb *db) maybeConvertError(err error) error {
 		return nil
 	}
 	if errors.Is(err, errConnectThrottled) {
+		pdb.facts.report(persistence.StoreFactThrottled, 1)
 		return connectionNotAttempted(err)
 	}
 	var pgErr *pgconn.PgError
@@ -121,9 +124,14 @@ func (pdb *db) maybeConvertError(err error) error {
 		case "40001", "0A000":
 			return err
 		case "54000":
+			pdb.facts.report(persistence.StoreFactLimit, 1)
 			return &persistence.TransactionSizeLimitError{Msg: err.Error()}
 		case "53400", "53300":
+			pdb.facts.report(persistence.StoreFactThrottled, 1)
 			return connectionNotAttempted(err)
+		case "53200", "53100":
+			// A transaction's memory and the cluster's storage are fixed limits too.
+			pdb.facts.report(persistence.StoreFactLimit, 1)
 		}
 	}
 
@@ -168,7 +176,9 @@ func (pdb *db) BeginTx(ctx context.Context) (sqlplugin.Tx, error) {
 		metricsHandler = dsqlMetrics.GetHandler()
 	}
 
-	return newDBWithDependencies(pdb.dbKind, pdb.dbName, pdb.dbDriver, pdb.handle, tx, logger, metricsHandler, retryConfig), nil
+	txDB := newDBWithDependencies(pdb.dbKind, pdb.dbName, pdb.dbDriver, pdb.handle, tx, logger, metricsHandler, retryConfig)
+	txDB.facts = pdb.facts
+	return txDB, nil
 }
 
 // Close closes the connection to the dsql db
