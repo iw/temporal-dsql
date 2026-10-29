@@ -24,8 +24,22 @@ type (
 		AverageLatency() float64
 		LatencyQuantile(quantile float64) float64
 		ErrorRatio() float64
+		// RecentSnapshot summarises the newest n latency windows: p99, unhealthy
+		// error ratio and successful throughput over the same span. Returns a
+		// zero snapshot when percentiles are disabled.
+		RecentSnapshot(windows int) HealthSnapshot
 		Start()
 		Stop()
+	}
+
+	// HealthSnapshot is a consistent view of recent persistence health, used as
+	// the signal for the persistence capacity controller.
+	HealthSnapshot struct {
+		P99        time.Duration
+		ErrorRatio float64
+		Throughput float64 // successful requests per second
+		Samples    int
+		Span       time.Duration // wall-clock span the snapshot covers
 	}
 
 	healthSignalAggregatorImpl struct {
@@ -41,6 +55,7 @@ type (
 
 		latencyAverage      aggregate.MovingWindowAverage
 		latencyDistribution stats.TimeWindowedStats
+		counters            *windowedCounter // aligned with latencyDistribution windows
 		errorRatio          aggregate.MovingWindowAverage
 
 		metricsHandler   metrics.Handler
@@ -74,6 +89,9 @@ func NewHealthSignalAggregator(
 			logger.Error("failed to create fallback latency distribution helper", tag.Error(err))
 		}
 	}
+	if latencyWindowSize <= 50*time.Millisecond || latencyWindowCount <= 0 {
+		latencyWindowSize, latencyWindowCount = 5*time.Second, 10
+	}
 
 	ret := &healthSignalAggregatorImpl{
 		status:              common.DaemonStatusInitialized,
@@ -85,6 +103,7 @@ func NewHealthSignalAggregator(
 		aggregationEnabled:  aggregationEnabled,
 		percentilesEnabled:  percentilesEnabled,
 		latencyDistribution: latencyDistribution,
+		counters:            newWindowedCounter(latencyWindowSize, latencyWindowCount),
 	}
 
 	if aggregationEnabled {
@@ -117,11 +136,14 @@ func (s *healthSignalAggregatorImpl) Record(callerSegment int32, latency time.Du
 	if s.aggregationEnabled {
 		s.latencyAverage.Record(latency.Milliseconds())
 
+		unhealthy := isUnhealthyError(err)
 		if s.percentilesEnabled() && s.latencyDistribution != nil {
-			s.latencyDistribution.RecordToLatestWindow(float64(latency.Milliseconds()))
+			now := time.Now()
+			s.latencyDistribution.Record(float64(latency.Milliseconds()), now)
+			s.counters.record(now, unhealthy)
 		}
 
-		if isUnhealthyError(err) {
+		if unhealthy {
 			s.errorRatio.Record(1)
 		} else {
 			s.errorRatio.Record(0)
@@ -151,6 +173,31 @@ func (s *healthSignalAggregatorImpl) LatencyQuantile(quantile float64) float64 {
 
 func (s *healthSignalAggregatorImpl) ErrorRatio() float64 {
 	return s.errorRatio.Average()
+}
+
+func (s *healthSignalAggregatorImpl) RecentSnapshot(windows int) HealthSnapshot {
+	if !s.aggregationEnabled || !s.percentilesEnabled() || s.latencyDistribution == nil {
+		return HealthSnapshot{}
+	}
+	rq, ok := s.latencyDistribution.(stats.RecentQuantiler)
+	if !ok {
+		return HealthSnapshot{}
+	}
+	now := time.Now()
+	p99ms, _ := rq.QuantileRecent(0.99, windows, now)
+	total, errs, span := s.counters.sum(now, windows)
+	snap := HealthSnapshot{
+		P99:     time.Duration(p99ms * float64(time.Millisecond)),
+		Samples: int(total),
+		Span:    span,
+	}
+	if total > 0 {
+		snap.ErrorRatio = float64(errs) / float64(total)
+	}
+	if span > 0 {
+		snap.Throughput = float64(total-errs) / span.Seconds()
+	}
+	return snap
 }
 
 func (s *healthSignalAggregatorImpl) incrementShardRequestCount(shardID int32) {

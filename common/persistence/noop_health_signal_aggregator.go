@@ -29,3 +29,7 @@ func (a *noopSignalAggregator) LatencyQuantile(quantile float64) float64 {
 func (*noopSignalAggregator) ErrorRatio() float64 {
 	return 0
 }
+
+func (*noopSignalAggregator) RecentSnapshot(int) HealthSnapshot {
+	return HealthSnapshot{}
+}

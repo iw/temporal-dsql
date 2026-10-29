@@ -38,6 +38,16 @@ type (
 		TrimmedMean(lowerQuantile, upperQuantile float64) float64
 	}
 
+	// RecentQuantiler is implemented by TimeWindowedStats that can answer over
+	// only the newest windows. Quantile merges every retained window
+	// (WindowCount x WindowSize), which is too slow a signal for feedback
+	// control; the persistence capacity controller reads a few recent windows.
+	RecentQuantiler interface {
+		// QuantileRecent returns the q-quantile and sample count over the newest
+		// n windows that ended after now - n*WindowSize.
+		QuantileRecent(q float64, n int, now time.Time) (value float64, count uint64)
+	}
+
 	// WindowConfig controls the windowing behavior.
 	WindowConfig struct {
 		// windowSize is the duration of each window.
@@ -65,6 +75,7 @@ type (
 
 // Compile-time assertion that timeWindowedTDigest implements TimeWindowedStats.
 var _ TimeWindowedStats = (*timeWindowedTDigest)(nil)
+var _ RecentQuantiler = (*timeWindowedTDigest)(nil)
 
 // NewWindowedTDigest creates a new TimeWindowedStats backed by per-window t-digests.
 // Some guidance on sizing the windows/counts: Prefer windows containing about 10,000 datapoints.
@@ -138,6 +149,35 @@ func (w *timeWindowedTDigest) getMergedWindows() *tdigest.TDigest {
 		} else {
 			_ = merged.Merge(td)
 		}
+	}
+	return merged
+}
+
+func (w *timeWindowedTDigest) QuantileRecent(q float64, n int, now time.Time) (float64, uint64) {
+	merged := w.getMergedRecent(n, now)
+	if merged == nil || merged.Count() == 0 {
+		return 0, 0
+	}
+	return merged.Quantile(q), uint64(merged.Count())
+}
+
+func (w *timeWindowedTDigest) getMergedRecent(n int, now time.Time) *tdigest.TDigest {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	cutoff := now.Add(-time.Duration(n) * w.cfg.WindowSize)
+	var merged *tdigest.TDigest
+	idx := w.head
+	for range min(n, len(w.windows)) {
+		win := &w.windows[idx]
+		if win.tdigest != nil && win.end.After(cutoff) {
+			if merged == nil {
+				merged = win.tdigest.Clone()
+			} else {
+				_ = merged.Merge(win.tdigest)
+			}
+		}
+		idx = w.modDec(idx)
 	}
 	return merged
 }

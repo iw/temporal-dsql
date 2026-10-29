@@ -71,10 +71,31 @@ func NewPriorityRateLimiter(
 	logger log.Logger,
 ) quotas.RequestRateLimiter {
 	hostRateFn := func() float64 { return float64(hostMaxQPS()) }
+	// When the capacity controller is enabled, the basic limiter becomes a safety
+	// ceiling at Capacity.MaxMultiplier x hostMaxQPS so the controller can use
+	// database headroom. Note the basic limiter refreshes its rate once a minute.
+	staticCeilingFn := func() float64 {
+		params := dynamicParams()
+		if params.Enabled && params.Capacity.Mode == capacityModeEnabled && params.Capacity.MaxMultiplier > 1 {
+			return params.Capacity.MaxMultiplier * hostRateFn()
+		}
+		return hostRateFn()
+	}
 
 	return quotas.NewMultiRequestRateLimiter(
-		// host-level dynamic rate limiter
-		newPriorityDynamicRateLimiter(
+		// host-level dynamic rate limiter: the existing per-priority health
+		// limiter, or the capacity controller when Capacity.Mode is "enabled"
+		newCapacityAwareRateLimiter(
+			newPriorityDynamicRateLimiter(
+				hostRateFn,
+				requestPriorityFn,
+				operatorRPSRatio,
+				burstRatio,
+				healthSignals,
+				dynamicParams,
+				metricsHandler,
+				logger,
+			),
 			hostRateFn,
 			requestPriorityFn,
 			operatorRPSRatio,
@@ -86,7 +107,7 @@ func NewPriorityRateLimiter(
 		),
 		// basic host-level rate limiter
 		newPriorityRateLimiter(
-			hostRateFn,
+			staticCeilingFn,
 			requestPriorityFn,
 			operatorRPSRatio,
 			burstRatio,
