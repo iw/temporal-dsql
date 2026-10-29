@@ -1,6 +1,6 @@
 # Store facts for the capacity controller
 
-*Draft for review. It applies to the Phase 1 controller in `common/adaptive/capacity`, described in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller).*
+*Agreed on 29 October 2026, and implemented in steps on the `adaptive-behaviour` branch. It applies to the Phase 1 controller in `common/adaptive/capacity`, described in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller).*
 
 ## Summary
 
@@ -48,7 +48,7 @@ This has two consequences:
 This applies to any store.
 - **What changes:** `Record` stops putting calls that ended in `ResourceExhausted`, cause `PERSISTENCE_LIMIT`, into the latency distribution and the windowed counter, because they never reached the store. The average and error ratio that the per-priority health limiters read stay as they are.
 - **Why the controller doesn't need them:** the capacity limiter learns from its own denials that its limit binds.
-- **When it can land:** it fixes Phase 1 on its own, needs no new types, and can land first.
+- **Landed** in #85, ahead of the facts.
 
 ### 2. Classify what the store did
 
@@ -61,6 +61,7 @@ This applies to any store.
 | Throttled | The store's plugin reports that capacity held the call back | Overload |
 | Contention | The store's plugin reports that conflicting writes used up their retries | Reported, not an overload signal (decision 2) |
 | Limit | The request exceeds a fixed store limit | Neither: load doesn't change it |
+| Queued | The store's plugin reports that a caller waited for one of its connections | An early overload signal: the plugin's own pool is short before any deadline expires |
 | Done | Anything else the store answered, errors included | Throughput and latency |
 
 The class names belong to Temporal, not DSQL, so another store's plugin can report the same classes.
@@ -76,41 +77,54 @@ So the plugin reports each fact to a small sink when it happens, and returns the
 type StoreFact int
 
 const (
-	StoreFactThrottled StoreFact = iota + 1
+	StoreFactThrottled StoreFact = iota
 	StoreFactContention
 	StoreFactLimit
+	StoreFactQueued
 )
 
 // StoreFacts receives typed facts from a persistence plugin.
 type StoreFacts interface {
-	Report(fact StoreFact)
+	ReportStoreFact(fact StoreFact, count int64)
+}
+
+// StoreFactsReceiver is implemented by what passes the sink on to a plugin.
+type StoreFactsReceiver interface {
+	SetStoreFacts(StoreFacts)
 }
 ```
 
-The health signal aggregator implements `StoreFacts` and counts facts in the same windows as requests. The snapshot then gains three ratios, for throttled, contention and limit facts per store request.
+The health signal aggregator implements `StoreFacts`.
+- It counts facts in the same windows as requests, so the snapshot gains a count of each fact.
+- It also emits them as `persistence_store_facts`, tagged by fact, so shadow runs show them.
 
-How the sink reaches the plugin is still open (decision 1):
-
-- **Inject it once (recommended).** `client.NewFactory` hands the aggregator to the data store factory through an optional interface, and the SQL factory passes it to the plugin. That's one wiring point, with no change to the persistence interfaces.
-- **Per call, through the context.** The metrics client puts a recorder in each call's context, and the plugin reports into it. Facts belong to the exact call, but every metrics client method changes.
-- **A process-wide sink.** This is the smallest change, but it's global state that tests have to manage.
+**The sink is injected once.** `client.NewFactory` hands the aggregator to the data store factory, which keeps it on its connection and passes it to the plugin's database when that is created. The other options were a recorder in each call's context, which would change every metrics client method, and a process-wide sink, which tests would have to manage. Visibility has its own factory, so its facts don't reach the persistence controller.
 
 ### 4. What the DSQL plugin reports
 
 | Where | Fact |
 |---|---|
-| `beforeConnect`: the call's deadline expired while waiting for a connection-attempt slot or the connection rate limiter | Throttled |
+| `maybeConvertError`: the call's deadline expired while `beforeConnect` waited for a connection-attempt slot or the connection rate limiter | Throttled |
 | `maybeConvertError`: DSQL returned 53400 (connection rate exceeded) or 53300 (too many connections) | Throttled |
-| `dsqlTxRetryPolicy.TxRetryBackoff`: retries on 40001 ran out | Contention |
-| `maybeConvertError`: DSQL returned 54000 | Limit |
+| `TxRetryBackoff`: retries on 40001 ran out | Contention |
+| `maybeConvertError`: DSQL returned 54000 (transaction, row, key or age limits), 53200 (a transaction's memory) or 53100 (storage) | Limit |
+| A once-a-second sample of the pool's acquires that found no idle connection | Queued |
 
-`txExecute` is core code from the fork's patch set, and its retry policy belongs to the plugin. The plugin reports contention where it already counts exhausted retries, in `IncTxExhausted`.
+The plugin reports each failed call once, where it already converts the error. Its existing pool collector samples every 15 seconds, which is too coarse for the controller's windows, so queued facts have a sampler of their own.
+
+`txExecute` is core code from the fork's patch set, and its retry policy belongs to the plugin. The plugin reports contention where its retries run out.
+
+AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection rate and 53300 for the connection count. Its other codes are fixed limits. Nothing throttles query throughput, so on DSQL these facts and Temporal's timeouts cover every documented constraint.
 
 ### 5. How the controller uses the facts
 
 - **Throttled facts are overload.** The snapshot's error ratio becomes timeouts plus throttled facts, divided by store requests, and the existing `MaxErrorRatio` still applies. A cut for throttling reports a new reason, `throttled`.
 - **Contention is reported, not acted on.** Conflicts concentrate on hot keys, so cutting the host's rate would shed unrelated work. Contention appears as a metric and as a decision reason.
-- **Latency for a store that reports facts is open** (decision 3). The controller can keep the learned p99 target, or it can drop latency as a trigger and rely on facts and Temporal's own timeouts. Dropping it follows the principle. Shadow mode can compare the two on the same traffic before either is enabled.
+- **Queued facts are an early overload signal.** The pool belongs to the plugin, so callers queueing for its connections is a fact, not an inference. It warns before deadlines expire, which latency did before.
+- **On a store that reports facts, latency isn't a trigger.** The controller relies on facts and Temporal's own timeouts.
+  - The learned p99 law keeps running in shadow for comparison, logging what it would have done.
+  - If shadow runs show the facts miss nothing it catches, it goes for those stores.
+  - Stores whose plugins report no facts keep it.
 
 ## What stays the same
 
@@ -128,9 +142,11 @@ How the sink reaches the plugin is still open (decision 1):
 - **Simulator:** record the limiter's rejections as the host does, add a source of throttled facts, and rerun the six scenarios.
 - **Live:** run in shadow mode on a throwaway cluster, with `maxConns` and the connection rate set low enough to cause throttling. The decisions it logs show whether the controller hears DSQL.
 
-## Decisions for review
+## Decisions
 
-1. **The boundary:** inject the sink once (recommended), pass it per call through the context, or use a process-wide sink?
-2. **Contention:** only report it (recommended), or also cut the rate when it's widespread?
-3. **Latency on DSQL:** keep the learned p99 target, or rely on facts and timeouts?
-4. **Order:** land fix 1 first on its own (recommended), or together with the facts?
+Agreed on 29 October 2026:
+
+1. **The boundary:** the sink is injected once, through the persistence factory.
+2. **Contention:** it's reported, not acted on.
+3. **Latency on DSQL:** the controller relies on facts and timeouts. The learned p99 law runs in shadow for comparison, and queued facts give the early warning.
+4. **Order:** fix 1 landed first, in #85. Next come the sink and the plugin's facts, then the controller acting on them.
