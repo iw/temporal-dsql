@@ -10,6 +10,8 @@ import (
 
 type factSink struct{}
 
+func (factSink) DeclareStoreFacts() {}
+
 func (factSink) ReportStoreFact(p.StoreFact, int64) {}
 
 // factsDB is a plugin database that reports store facts.

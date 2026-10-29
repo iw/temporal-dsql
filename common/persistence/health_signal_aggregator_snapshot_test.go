@@ -50,6 +50,37 @@ func TestRecentSnapshotCountsStoreFacts(t *testing.T) {
 	require.Equal(t, "queued", recordings[2].Tags["fact"])
 }
 
+func TestRecentSnapshotDeclaredFactsAndThrottledThroughput(t *testing.T) {
+	agg := NewHealthSignalAggregator(
+		true,
+		func() bool { return true },
+		time.Minute,
+		1000,
+		metrics.NoopMetricsHandler,
+		log.NewNoopLogger(),
+		time.Second,
+		10,
+	)
+	t.Cleanup(agg.emitMetricsTimer.Stop)
+	require.False(t, agg.RecentSnapshot(3).StoreReportsFacts)
+
+	agg.DeclareStoreFacts()
+	for range 10 {
+		agg.Record(CallerSegmentMissing, 10*time.Millisecond, nil)
+	}
+	// Throttled calls come back as ResourceExhausted, which the store never handled.
+	for range 4 {
+		agg.Record(CallerSegmentMissing, 0, &serviceerror.ResourceExhausted{Cause: enumspb.RESOURCE_EXHAUSTED_CAUSE_SYSTEM_OVERLOADED})
+		agg.ReportStoreFact(StoreFactThrottled, 1)
+	}
+
+	snap := agg.RecentSnapshot(3)
+	require.True(t, snap.StoreReportsFacts)
+	require.Equal(t, 14, snap.Samples)
+	require.Equal(t, 4, snap.Throttled)
+	require.InDelta(t, 10.0, snap.Throughput*snap.Span.Seconds(), 1e-6)
+}
+
 func TestRecentSnapshotLeavesOutLimiterRejections(t *testing.T) {
 	agg := NewHealthSignalAggregator(
 		true,

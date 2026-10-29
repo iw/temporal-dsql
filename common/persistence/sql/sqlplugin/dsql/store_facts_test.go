@@ -18,8 +18,15 @@ import (
 )
 
 type recordedFacts struct {
-	mu     sync.Mutex
-	counts map[persistence.StoreFact]int64
+	mu       sync.Mutex
+	counts   map[persistence.StoreFact]int64
+	declared bool
+}
+
+func (r *recordedFacts) DeclareStoreFacts() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.declared = true
 }
 
 func (r *recordedFacts) ReportStoreFact(fact persistence.StoreFact, count int64) {
@@ -43,6 +50,13 @@ func newFactsTestDB(t *testing.T) (*db, *recordedFacts) {
 	facts := &recordedFacts{}
 	pdb.SetStoreFacts(facts)
 	return pdb, facts
+}
+
+func TestSetStoreFactsDeclaresThatDSQLReportsFacts(t *testing.T) {
+	_, facts := newFactsTestDB(t)
+	facts.mu.Lock()
+	defer facts.mu.Unlock()
+	require.True(t, facts.declared)
 }
 
 func TestMaybeConvertErrorReportsStoreFacts(t *testing.T) {

@@ -42,11 +42,12 @@ type (
 	HealthSnapshot struct {
 		P99        time.Duration
 		ErrorRatio float64
-		Throughput float64 // successful requests per second
+		Throughput float64 // requests per second that the store completed
 		Samples    int
 		Span       time.Duration // wall-clock span the snapshot covers
-		// Facts the store's plugin reported over the same span; zero for a plugin
-		// that reports none.
+		// StoreReportsFacts is set once the store's plugin declares that it reports
+		// facts. The counts are its facts over the same span.
+		StoreReportsFacts                    bool
 		Throttled, Contention, Limit, Queued int
 	}
 
@@ -65,6 +66,7 @@ type (
 		latencyDistribution stats.TimeWindowedStats
 		counters            *windowedCounter // aligned with latencyDistribution windows
 		errorRatio          aggregate.MovingWindowAverage
+		factsDeclared       atomic.Bool
 
 		metricsHandler   metrics.Handler
 		emitMetricsTimer *time.Ticker
@@ -198,21 +200,30 @@ func (s *healthSignalAggregatorImpl) RecentSnapshot(windows int) HealthSnapshot 
 	p99ms, _ := rq.QuantileRecent(0.99, windows, now)
 	counts, span := s.counters.sum(now, windows)
 	snap := HealthSnapshot{
-		P99:        time.Duration(p99ms * float64(time.Millisecond)),
-		Samples:    int(counts.total),
-		Span:       span,
-		Throttled:  int(counts.facts[StoreFactThrottled]),
-		Contention: int(counts.facts[StoreFactContention]),
-		Limit:      int(counts.facts[StoreFactLimit]),
-		Queued:     int(counts.facts[StoreFactQueued]),
+		P99:               time.Duration(p99ms * float64(time.Millisecond)),
+		Samples:           int(counts.total),
+		Span:              span,
+		StoreReportsFacts: s.factsDeclared.Load(),
+		Throttled:         int(counts.facts[StoreFactThrottled]),
+		Contention:        int(counts.facts[StoreFactContention]),
+		Limit:             int(counts.facts[StoreFactLimit]),
+		Queued:            int(counts.facts[StoreFactQueued]),
 	}
 	if counts.total > 0 {
 		snap.ErrorRatio = float64(counts.errors) / float64(counts.total)
 	}
 	if span > 0 {
-		snap.Throughput = float64(counts.total-counts.errors) / span.Seconds()
+		// Calls the store's plugin reports as throttled never reached the store either.
+		delivered := counts.total - counts.errors
+		delivered -= min(delivered, counts.facts[StoreFactThrottled])
+		snap.Throughput = float64(delivered) / span.Seconds()
 	}
 	return snap
+}
+
+// DeclareStoreFacts records that the store's plugin reports facts.
+func (s *healthSignalAggregatorImpl) DeclareStoreFacts() {
+	s.factsDeclared.Store(true)
 }
 
 // ReportStoreFact counts a fact from the store's plugin in the windows RecentSnapshot

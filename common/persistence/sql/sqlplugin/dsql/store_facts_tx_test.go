@@ -18,6 +18,8 @@ import (
 
 type countedFacts map[persistence.StoreFact]int64
 
+func (countedFacts) DeclareStoreFacts() {}
+
 func (c countedFacts) ReportStoreFact(fact persistence.StoreFact, count int64) { c[fact] += count }
 
 func TestTransactionsReportThroughTheirDatabasesSink(t *testing.T) {
