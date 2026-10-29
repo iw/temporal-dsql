@@ -22,10 +22,16 @@ const (
 		`tasks(range_hash, task_queue_id, task_id, data, data_encoding) ` +
 		`VALUES(:range_hash, :task_queue_id, :task_id, :data, :data_encoding)`
 
-	rangeDeleteTaskQry = `DELETE FROM tasks ` +
-		`WHERE range_hash = $1 AND task_queue_id = $2 AND task_id IN (SELECT task_id FROM
-		 tasks WHERE range_hash = $1 AND task_queue_id = $2 AND task_id < $3 ` +
-		`ORDER BY task_queue_id,task_id LIMIT $4 )`
+	// The delete reads only the key range of the batch it removes. While a queue is
+	// missing from the table statistics, DSQL can plan the IN (subquery) form as a
+	// nested loop that reruns the subquery for every row in the queue.
+	rangeDeleteTaskQry = `WITH batch AS (` +
+		`SELECT min(task_id) AS min_task_id, max(task_id) AS max_task_id FROM (` +
+		`SELECT task_id FROM tasks WHERE range_hash = $1 AND task_queue_id = $2 AND task_id < $3 ` +
+		`ORDER BY task_id LIMIT $4) batch_ids) ` +
+		`DELETE FROM tasks ` +
+		`WHERE range_hash = $1 AND task_queue_id = $2 ` +
+		`AND task_id >= (SELECT min_task_id FROM batch) AND task_id <= (SELECT max_task_id FROM batch)`
 )
 
 // InsertIntoTasks inserts one or more rows into tasks table

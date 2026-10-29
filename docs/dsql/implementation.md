@@ -221,6 +221,8 @@ Core calls the shard, task queue and namespace metadata locks inside transaction
 
 V1 queue deletion preserves an exclusive lower and inclusive upper bound. V2 includes both bounds. Core computes the v2 range before deletion and always retains the last physical message so enqueue IDs remain increasing. After deletion, a transaction re-reads queue metadata and advances the partition minimum only when the computed minimum is higher. Readers skip missing rows if the metadata update fails; retrying completes the update. Overlapping deletes cannot move the minimum backwards. Large deletes perform more statements as the range grows, without growing the per-transaction row count.
 
+Matching's task cleanup deletes one batch per call: core passes an exclusive upper `task_id` and a limit, `matching.maxTaskDeleteBatchSize` (100 by default), under a 5-second timeout. The statement reads the batch's lowest and highest `task_id` with one limited scan, then deletes that key range, so its plan has no join. With upstream's `task_id IN (subquery)` form, DSQL can plan a nested loop that reruns the subquery for every row in the queue. It does so while a queue is missing from the table statistics, as a new worker's sticky queue is. Each rerun is a storage round trip, and a 100-row cleanup on a 5,000-row queue took 8 seconds.
+
 ## IAM Authentication
 
 ### BeforeConnect

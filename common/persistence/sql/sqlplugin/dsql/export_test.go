@@ -9,6 +9,8 @@ import (
 
 const FastRetryPluginName = "dsql-fast-retry-test"
 
+const RangeDeleteTaskQuery = rangeDeleteTaskQry
+
 func init() {
 	cfg := DefaultRetryConfig()
 	cfg.BaseDelay = time.Millisecond
