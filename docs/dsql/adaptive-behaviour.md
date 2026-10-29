@@ -178,7 +178,7 @@ history.persistenceDynamicRateLimitingParams:
 
 **Couple the task scheduler to it next.** `QueueSchedulerRateLimiterProvider` should derive the scheduler's host rate from the controller's admitted rate divided by measured persistence calls per task, instead of a static fallback. Tasks then wait in the scheduler, which is cheap, instead of failing mid-execution and bouncing through the rescheduler.
 
-**On DSQL, hear the plugin's facts.** A draft for passing the DSQL plugin's throttling and contention to the controller, rather than inferring the store's health from latency, is in [Store facts for the capacity controller](adaptive-store-facts.md).
+**On DSQL, hear the plugin's facts.** The design for passing the DSQL plugin's throttling, contention and pool pressure to the controller, rather than inferring the store's health from latency, is in [Store facts for the capacity controller](adaptive-store-facts.md).
 
 ## Proposal 4: worker counts follow queueing delay
 

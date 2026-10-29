@@ -23,6 +23,7 @@ const (
 
 type (
 	HealthSignalAggregator interface {
+		StoreFacts
 		Record(callerSegment int32, latency time.Duration, err error)
 		AverageLatency() float64
 		LatencyQuantile(quantile float64) float64
@@ -44,6 +45,9 @@ type (
 		Throughput float64 // successful requests per second
 		Samples    int
 		Span       time.Duration // wall-clock span the snapshot covers
+		// Facts the store's plugin reported over the same span; zero for a plugin
+		// that reports none.
+		Throttled, Contention, Limit, Queued int
 	}
 
 	healthSignalAggregatorImpl struct {
@@ -192,19 +196,35 @@ func (s *healthSignalAggregatorImpl) RecentSnapshot(windows int) HealthSnapshot 
 	}
 	now := time.Now()
 	p99ms, _ := rq.QuantileRecent(0.99, windows, now)
-	total, errs, span := s.counters.sum(now, windows)
+	counts, span := s.counters.sum(now, windows)
 	snap := HealthSnapshot{
-		P99:     time.Duration(p99ms * float64(time.Millisecond)),
-		Samples: int(total),
-		Span:    span,
+		P99:        time.Duration(p99ms * float64(time.Millisecond)),
+		Samples:    int(counts.total),
+		Span:       span,
+		Throttled:  int(counts.facts[StoreFactThrottled]),
+		Contention: int(counts.facts[StoreFactContention]),
+		Limit:      int(counts.facts[StoreFactLimit]),
+		Queued:     int(counts.facts[StoreFactQueued]),
 	}
-	if total > 0 {
-		snap.ErrorRatio = float64(errs) / float64(total)
+	if counts.total > 0 {
+		snap.ErrorRatio = float64(counts.errors) / float64(counts.total)
 	}
 	if span > 0 {
-		snap.Throughput = float64(total-errs) / span.Seconds()
+		snap.Throughput = float64(counts.total-counts.errors) / span.Seconds()
 	}
 	return snap
+}
+
+// ReportStoreFact counts a fact from the store's plugin in the windows RecentSnapshot
+// reads, and emits it as a metric.
+func (s *healthSignalAggregatorImpl) ReportStoreFact(fact StoreFact, count int64) {
+	if count <= 0 || fact < 0 || fact >= numStoreFacts {
+		return
+	}
+	metrics.PersistenceStoreFacts.With(s.metricsHandler).Record(count, metrics.StringTag("fact", fact.String()))
+	if s.aggregationEnabled && s.percentilesEnabled() && s.latencyDistribution != nil {
+		s.counters.recordFact(time.Now(), fact, uint64(count))
+	}
 }
 
 func (s *healthSignalAggregatorImpl) incrementShardRequestCount(shardID int32) {

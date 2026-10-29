@@ -37,6 +37,7 @@ const (
 	EphemeralPoolSize   = 5
 	poolPingTimeout     = 30 * time.Second
 	poolMetricsInterval = 15 * time.Second
+	queuedFactsInterval = time.Second
 )
 
 var (
@@ -133,8 +134,10 @@ type poolConnector struct {
 	sqldriver.Connector
 	pool      *pgxpool.Pool
 	metrics   DSQLMetrics
+	ctx       context.Context
 	cancel    context.CancelFunc
 	closeOnce sync.Once
+	factsDone chan struct{}
 }
 
 var _ io.Closer = (*poolConnector)(nil)
@@ -142,10 +145,27 @@ var _ io.Closer = (*poolConnector)(nil)
 func (c *poolConnector) Close() error {
 	c.closeOnce.Do(func() {
 		c.cancel()
+		if c.factsDone != nil {
+			<-c.factsDone
+		}
 		c.metrics.StopPoolCollector()
 		c.pool.Close()
 	})
 	return nil
+}
+
+// reportQueuedFacts samples the pool's empty acquires for queued facts until the
+// connector closes.
+func (c *poolConnector) reportQueuedFacts(facts *storeFacts) {
+	if facts == nil {
+		return
+	}
+	c.factsDone = make(chan struct{})
+	start := c.pool.Stat().EmptyAcquireCount()
+	go func() {
+		defer close(c.factsDone)
+		reportQueuedFacts(c.ctx, facts, queuedFactsInterval, start, func() int64 { return c.pool.Stat().EmptyAcquireCount() })
+	}()
 }
 
 func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, *poolConnector, error) {
@@ -170,7 +190,7 @@ func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, 
 		return nil, nil, err
 	}
 	collector := NewDSQLMetrics(metricsHandler)
-	connector := &poolConnector{Connector: stdlib.GetPoolConnector(pool), pool: pool, metrics: collector, cancel: cancel}
+	connector := &poolConnector{Connector: stdlib.GetPoolConnector(pool), pool: pool, metrics: collector, ctx: ctx, cancel: cancel}
 	sqlDB := sql.OpenDB(connector)
 	sqlDB.SetMaxIdleConns(0)
 	db := sqlx.NewDb(sqlDB, "pgx")

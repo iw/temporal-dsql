@@ -36,7 +36,8 @@ type (
 		sqlplugin.DB
 
 		sync.Mutex
-		refCnt int
+		refCnt     int
+		storeFacts p.StoreFacts
 	}
 )
 
@@ -203,6 +204,7 @@ func (c *DbConn) Get() (sqlplugin.DB, error) {
 			return nil, err
 		}
 		c.DB = conn
+		c.applyStoreFacts()
 	}
 	c.refCnt++
 	return c, nil

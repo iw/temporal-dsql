@@ -88,15 +88,18 @@ func (p *plugin) CreateDB(
 			return nil, err
 		}
 	}
+	// The database, its transactions and every pool the handle opens report through one holder.
+	facts := &storeFacts{}
 	connect := func() (*sqlx.DB, error) {
 		if cfg.Connect != nil {
 			return cfg.Connect(cfg)
 		}
-		return p.connectWithSettings(cfg, resolved, r, logger, metricsHandler)
+		return p.connectWithSettings(cfg, resolved, r, logger, metricsHandler, facts)
 	}
 
 	handle := sqlplugin.NewDatabaseHandle(dbKind, connect, func(error) bool { return false }, logger, metricsHandler, clock.NewRealTimeSource())
 	db := newDBWithDependencies(dbKind, cfg.DatabaseName, p.driver, handle, nil, logger, metricsHandler, p.retryConfig)
+	db.facts = facts
 
 	return db, nil
 }
@@ -104,16 +107,17 @@ func (p *plugin) CreateDB(
 // connectWithSettings retains the default database fallback for callers without a name.
 func (p *plugin) connectWithSettings(
 	cfg *config.SQL, resolved settings, r resolver.ServiceResolver, logger log.Logger, metricsHandler metrics.Handler,
+	facts *storeFacts,
 ) (*sqlx.DB, error) {
 	if cfg.DatabaseName != "" {
-		return p.createDSQLConnectionWithAuth(cfg, resolved, r, logger, metricsHandler)
+		return p.createDSQLConnectionWithAuth(cfg, resolved, r, logger, metricsHandler, facts)
 	}
 	copyConfig := *cfg
 	cfg = &copyConfig
 	var errs []error
 	for _, databaseName := range defaultDatabaseNames {
 		cfg.DatabaseName = databaseName
-		db, err := p.createDSQLConnectionWithAuth(cfg, resolved, r, logger, metricsHandler)
+		db, err := p.createDSQLConnectionWithAuth(cfg, resolved, r, logger, metricsHandler, facts)
 		if err == nil {
 			return db, nil
 		}
@@ -124,6 +128,7 @@ func (p *plugin) connectWithSettings(
 
 func (p *plugin) createDSQLConnectionWithAuth(
 	cfg *config.SQL, resolved settings, r resolver.ServiceResolver, logger log.Logger, metricsHandler metrics.Handler,
+	facts *storeFacts,
 ) (*sqlx.DB, error) {
 	p.initRateLimiter(resolved, logger, metricsHandler)
 
@@ -139,7 +144,7 @@ func (p *plugin) createDSQLConnectionWithAuth(
 	if err != nil {
 		return nil, err
 	}
-	db, _, err := openPoolDB(poolConfig, metricsHandler)
+	db, connector, err := openPoolDB(poolConfig, metricsHandler)
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +154,7 @@ func (p *plugin) createDSQLConnectionWithAuth(
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping DSQL: %w", err)
 	}
+	connector.reportQueuedFacts(facts)
 	return db, nil
 }
 
