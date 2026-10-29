@@ -4,7 +4,7 @@ log:
 
 persistence:
   defaultStore: dsql-default
-  visibilityStore: sqlite-visibility
+  visibilityStore: dsql-visibility
   numHistoryShards: 4 # can't be changed after the cluster is created
   datastores:
     dsql-default:
@@ -28,28 +28,18 @@ persistence:
         #   token_bucket_rate: "100"
         #   token_bucket_capacity: "1000"
         #   token_bucket_max_wait: "30s"
-    # In-memory visibility is for trying things out only; use a durable store for retained data.
-    sqlite-visibility:
+    # Visibility in its own schema on the same cluster; see docs/dsql/visibility.md
+    dsql-visibility:
       sql:
-        user: ""
-        password: ""
-        pluginName: "sqlite"
-        databaseName: "default"
-        connectAddr: "localhost"
+        pluginName: "dsql"
+        databaseName: "postgres"
+        connectAddr: "your-dsql-cluster.dsql.us-east-1.on.aws:5432"
         connectProtocol: "tcp"
+        user: "admin" # See docs/dsql/deployment.md#least-privilege-role
+        maxConns: 10
+        maxConnLifetime: "50m"
         connectAttributes:
-          mode: "memory"
-          cache: "private"
-        maxConns: 1
-        maxIdleConns: 1
-        maxConnLifetime: "1h"
-        tls:
-          enabled: false
-          caFile: ""
-          certFile: ""
-          keyFile: ""
-          enableHostVerification: false
-          serverName: ""
+          search_path: "temporal_visibility" # The default for a DSQL visibility datastore
 
 global:
   membership:

@@ -10,7 +10,7 @@ import (
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql"
-	"go.temporal.io/server/common/persistence/sql/sqlplugin/sqlite"
+	dsqlschema "go.temporal.io/server/schema/dsql"
 )
 
 func TestDevelopmentDSQLConfig(t *testing.T) {
@@ -25,9 +25,10 @@ func TestDevelopmentDSQLConfig(t *testing.T) {
 	require.Equal(t, "admin", main.User)
 	visibility := cfg.Persistence.DataStores[cfg.Persistence.VisibilityStore].SQL
 	require.NotNil(t, visibility)
-	require.NotEqual(t, dsql.PluginName, visibility.PluginName)
-	require.Equal(t, sqlite.PluginName, visibility.PluginName)
-	require.Equal(t, "memory", visibility.ConnectAttributes["mode"])
+	require.Equal(t, dsql.PluginName, visibility.PluginName)
+	require.Equal(t, main.ConnectAddr, visibility.ConnectAddr)
+	require.Equal(t, "postgres", visibility.DatabaseName)
+	require.Equal(t, dsqlschema.VisibilitySchema, visibility.ConnectAttributes["search_path"])
 }
 
 func TestDevelopmentDSQLDynamicConfig(t *testing.T) {
