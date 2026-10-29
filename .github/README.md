@@ -37,18 +37,18 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
    make temporal-server temporal-dsql-tool
    ```
 
-2. Create the schema on a new cluster:
+2. Create the persistence and visibility schemas on a new cluster:
 
    ```bash
    ./temporal-dsql-tool --endpoint <cluster-id>.dsql.us-east-1.on.aws --region us-east-1 \
      setup-schema --schema-name dsql/temporal --version 1.3
+   ./temporal-dsql-tool --endpoint <cluster-id>.dsql.us-east-1.on.aws --region us-east-1 \
+     setup-schema --schema-name dsql/visibility --version 1.0
    ```
 
-   Create a fresh schema at version 1.3. Both schema setup paths are documented in the [deployment guide](../docs/dsql/deployment.md#1-schema-setup).
+   The first creates a fresh persistence schema at version 1.3. The second creates the visibility store in its own PostgreSQL schema, `temporal_visibility`, at version 1.0. The tool waits for each index build, so these take a few minutes. The deployment guide covers both [schemas](../docs/dsql/deployment.md#1-schema-setup).
 
-   To keep visibility on DSQL as well, also run `setup-schema --schema-name dsql/visibility --version 1.0`. The deployment guide covers its [schema](../docs/dsql/deployment.md#visibility-schema) and datastore.
-
-3. Copy [`config/development-dsql.yaml`](../config/development-dsql.yaml) and replace its `connectAddr` placeholder with your cluster endpoint. It uses the DSQL database `postgres` and a separate in-memory SQLite visibility store for trying things out only. Keep [`config/dynamicconfig/development-dsql.yaml`](../config/dynamicconfig/development-dsql.yaml) at the configured path, or adjust `dynamicConfigClient.filepath`.
+3. Copy [`config/development-dsql.yaml`](../config/development-dsql.yaml) and replace the `connectAddr` placeholder in both of its datastores with your cluster endpoint. Both stores use the DSQL database `postgres`: persistence in its default schema, and visibility in `temporal_visibility`. Keep [`config/dynamicconfig/development-dsql.yaml`](../config/dynamicconfig/development-dsql.yaml) at the configured path, or adjust `dynamicConfigClient.filepath`.
 
    The plugin connects as `user`, which defaults to `admin`, using IAM tokens. It ignores `password` and defaults to `sslmode=verify-full` for server certificate and hostname verification. It takes the region from the cluster's host name, and credentials from the default AWS credential chain. Other plugin settings, such as rate limiting, go in the datastore's `connectAttributes`. The [deployment guide](../docs/dsql/deployment.md#datastore-settings) lists the attributes and defaults. See [least-privilege role setup](../docs/dsql/deployment.md#least-privilege-role) before choosing another role.
 

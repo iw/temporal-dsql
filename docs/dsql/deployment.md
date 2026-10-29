@@ -139,7 +139,7 @@ persistence:
 
 The visibility datastore can point at the persistence cluster or at another one. Without `search_path`, a DSQL visibility datastore uses `temporal_visibility`. See [visibility](visibility.md#limits) for the namespace sizes it suits.
 
-Visibility can also use any other store Temporal supports, such as Elasticsearch, OpenSearch, PostgreSQL or MySQL, configured as for upstream Temporal. The in-memory SQLite visibility in [`config/development-dsql.yaml`](../../config/development-dsql.yaml) loses its data on restart, so use it only for trying things out.
+Visibility can also use any other store Temporal supports, such as Elasticsearch, OpenSearch, PostgreSQL or MySQL, configured as for upstream Temporal. [`config/development-dsql.yaml`](../../config/development-dsql.yaml) keeps both stores on one cluster.
 
 `maxIdleConns` is ignored. Service pools open and keep `maxConns` connections in the background (100 if unset). `maxConnLifetime` is capped at 50 minutes; shorter positive values apply. The pool uses four minutes of lifetime jitter and one-minute health checks. See [connection pool](connection-pool.md) for lifecycle details and limitations.
 
