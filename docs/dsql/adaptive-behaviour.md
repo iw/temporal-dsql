@@ -178,6 +178,8 @@ history.persistenceDynamicRateLimitingParams:
 
 **Couple the task scheduler to it next.** `QueueSchedulerRateLimiterProvider` should derive the scheduler's host rate from the controller's admitted rate divided by measured persistence calls per task, instead of a static fallback. Tasks then wait in the scheduler, which is cheap, instead of failing mid-execution and bouncing through the rescheduler.
 
+**On DSQL, hear the plugin's facts.** A draft for passing the DSQL plugin's throttling and contention to the controller, rather than inferring the store's health from latency, is in [Store facts for the capacity controller](adaptive-store-facts.md).
+
 ## Proposal 4: worker counts follow queueing delay
 
 The `*ProcessorSchedulerWorkerCount` settings (transfer, timer, memory timer, visibility, archival, replication, low-priority replication) become controller outputs with the old values as their fallback. The actuator already exists: `FIFOScheduler.updateWorkerCount` resizes the pool live from a `TypedSubscribable[int]`.
@@ -341,4 +343,4 @@ All paths are in [temporalio/temporal at v1.32.1](https://github.com/temporalio/
 | `computeEffectiveConfig`, `autoEnableIfNeeded` | [service/matching/task_queue_partition_manager.go:211](https://github.com/temporalio/temporal/blob/v1.32.1/service/matching/task_queue_partition_manager.go#L211) | Template: observed state persisted in user data |
 | `TaskQueueUserData` | [proto/internal/temporal/server/api/persistence/v1/task_queues.proto:147](https://github.com/temporalio/temporal/blob/v1.32.1/proto/internal/temporal/server/api/persistence/v1/task_queues.proto#L147) | Reserved room for partition control |
 
-The Phase 1 prototype is a patch, `0001-persistence-capacity-controller.patch`, and a simulator, `adaptive-persistence-sim.zip`, both kept outside this repository.
+The Phase 1 controller is in `common/adaptive/capacity`, wired in through `common/persistence/client/capacity_rate_limiter.go`. Its simulator, `adaptive-persistence-sim.zip`, is kept outside this repository.

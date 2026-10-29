@@ -154,4 +154,5 @@ Plugin settings come only from datastore `connectAttributes` or defaults. Region
 | `docs/dsql/metrics.md` | Metrics reference |
 | `docs/dsql/ci.md` | CI: the Dagger module, the Buildkite pipeline and the live tests |
 | `docs/dsql/adaptive-behaviour.md` | Adaptive behaviour design: dynamic config as the envelope around controllers |
+| `docs/dsql/adaptive-store-facts.md` | Draft: typed store facts for the persistence capacity controller |
 | `tools/poolsim/README.md` | Pool simulator documentation |
