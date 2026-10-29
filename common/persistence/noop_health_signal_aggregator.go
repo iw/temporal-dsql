@@ -34,4 +34,6 @@ func (*noopSignalAggregator) RecentSnapshot(int) HealthSnapshot {
 	return HealthSnapshot{}
 }
 
+func (*noopSignalAggregator) DeclareStoreFacts() {}
+
 func (*noopSignalAggregator) ReportStoreFact(StoreFact, int64) {}

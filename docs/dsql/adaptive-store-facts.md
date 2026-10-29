@@ -85,6 +85,7 @@ const (
 
 // StoreFacts receives typed facts from a persistence plugin.
 type StoreFacts interface {
+	DeclareStoreFacts() // once, by a plugin that reports facts
 	ReportStoreFact(fact StoreFact, count int64)
 }
 
@@ -99,6 +100,8 @@ The health signal aggregator implements `StoreFacts`.
 - It also emits them as `persistence_store_facts`, tagged by fact, so shadow runs show them.
 
 **The sink is injected once.** `client.NewFactory` hands the aggregator to the data store factory, which keeps it on its connection and passes it to the plugin's database when that is created. The other options were a recorder in each call's context, which would change every metrics client method, and a process-wide sink, which tests would have to manage. Visibility has its own factory, so its facts don't reach the persistence controller.
+
+**A plugin declares its facts.** A plugin that reports facts calls `DeclareStoreFacts` when it receives the sink. A healthy store can go a long time without reporting a fact, so the controller can't wait for one to learn the store reports them.
 
 ### 4. What the DSQL plugin reports
 
@@ -118,11 +121,15 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
 
 ### 5. How the controller uses the facts
 
-- **Throttled facts are overload.** The snapshot's error ratio becomes timeouts plus throttled facts, divided by store requests, and the existing `MaxErrorRatio` still applies. A cut for throttling reports a new reason, `throttled`.
-- **Contention is reported, not acted on.** Conflicts concentrate on hot keys, so cutting the host's rate would shed unrelated work. Contention appears as a metric and as a decision reason.
-- **Queued facts are an early overload signal.** The pool belongs to the plugin, so callers queueing for its connections is a fact, not an inference. It warns before deadlines expire, which latency did before.
+- **Throttled facts are overload.**
+  - Timeouts plus throttled facts, divided by store requests, are held to the existing `MaxErrorRatio`. A cut for throttling reports the reason `throttled`.
+  - Delivered throughput, which a cut is based on, leaves out calls reported as throttled, because they never reached the store.
+- **Contention is reported, not acted on.** Conflicts concentrate on hot keys, so cutting the host's rate would shed unrelated work. Contention appears in `persistence_store_facts`.
+- **Queued facts are an early overload signal.** The pool belongs to the plugin, so callers queueing for its connections is a fact, not an inference.
+  - It warns before deadlines expire, as latency did before.
+  - Queued facts divided by store requests are held to `MaxQueuedRatio`, 0.25 by default, and a cut reports the reason `queued`.
 - **On a store that reports facts, latency isn't a trigger.** The controller relies on facts and Temporal's own timeouts.
-  - The learned p99 law keeps running in shadow for comparison, logging what it would have done.
+  - The learned p99 law keeps running in shadow for comparison. When it would have cut, the step is logged, and counted as `latency-shadow` in `persistence_capacity_decisions`, which records every step's reason.
   - If shadow runs show the facts miss nothing it catches, it goes for those stores.
   - Stores whose plugins report no facts keep it.
 
@@ -139,7 +146,9 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
   - the aggregator's fact counts per window;
   - the controller cutting on throttled facts but not on contention.
 - **Plugin tests:** each DSQL path reports its fact once, using the overlay and fake-driver technique from the October review.
-- **Simulator:** record the limiter's rejections as the host does, add a source of throttled facts, and rerun the six scenarios.
+- **Simulator:**
+  - Without facts, the controller's simulator results match the original controller byte for byte.
+  - The simulator doesn't yet model the host recording the limiter's rejections, or a source of throttled facts. Once it does, rerun the six scenarios.
 - **Live:** run in shadow mode on a throwaway cluster, with `maxConns` and the connection rate set low enough to cause throttling. The decisions it logs show whether the controller hears DSQL.
 
 ## Decisions
@@ -149,4 +158,4 @@ Agreed on 29 October 2026:
 1. **The boundary:** the sink is injected once, through the persistence factory.
 2. **Contention:** it's reported, not acted on.
 3. **Latency on DSQL:** the controller relies on facts and timeouts. The learned p99 law runs in shadow for comparison, and queued facts give the early warning.
-4. **Order:** fix 1 landed first, in #85. Next come the sink and the plugin's facts, then the controller acting on them.
+4. **Order:** fix 1 landed first, in #85, then the sink and the plugin's facts, in #86, then the controller acting on them.

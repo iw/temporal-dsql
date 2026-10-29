@@ -37,9 +37,13 @@ func (f *storeFacts) report(fact persistence.StoreFact, count int64) {
 
 var _ persistence.StoreFactsReceiver = (*db)(nil)
 
-// SetStoreFacts implements persistence.StoreFactsReceiver.
+// SetStoreFacts implements persistence.StoreFactsReceiver, and declares that DSQL
+// reports facts.
 func (pdb *db) SetStoreFacts(sink persistence.StoreFacts) {
 	pdb.facts.set(sink)
+	if sink != nil {
+		sink.DeclareStoreFacts()
+	}
 }
 
 // TxRetryBackoff reports contention once retries on conflicting writes run out.

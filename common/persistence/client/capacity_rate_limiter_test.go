@@ -8,7 +8,7 @@ import (
 	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/headers"
 	"go.temporal.io/server/common/log"
-	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/metrics/metricstest"
 	"go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/quotas"
 )
@@ -41,18 +41,22 @@ type capacityLimiterFixture struct {
 	signals *fakeHealthSignals
 	params  dynamicconfig.DynamicRateLimitingParams
 	now     time.Time
+	metrics *metricstest.Capture
 }
 
 const testHostRPS = 1000.0
 
 func newCapacityLimiterFixture(t *testing.T, mode string) *capacityLimiterFixture {
 	t.Helper()
+	handler := metricstest.NewCaptureHandler()
 	f := &capacityLimiterFixture{
 		legacy:  &countingLimiter{allow: true},
 		signals: &fakeHealthSignals{snapshot: healthySnapshot()},
 		params:  dynamicconfig.DefaultDynamicRateLimitingParams,
 		now:     time.Unix(1_700_000_000, 0),
+		metrics: handler.StartCapture(),
 	}
+	t.Cleanup(func() { handler.StopCapture(f.metrics) })
 	f.params.Enabled = true
 	f.params.Capacity.Mode = mode
 	f.limiter = newCapacityAwareRateLimiter(
@@ -63,10 +67,19 @@ func newCapacityLimiterFixture(t *testing.T, mode string) *capacityLimiterFixtur
 		func() float64 { return 1 },
 		f.signals,
 		func() dynamicconfig.DynamicRateLimitingParams { return f.params },
-		metrics.NoopMetricsHandler,
+		handler,
 		log.NewNoopLogger(),
 	)
 	return f
+}
+
+// decisions lists the reasons the limiter recorded, in order.
+func (f *capacityLimiterFixture) decisions() []string {
+	var reasons []string
+	for _, recording := range f.metrics.Snapshot()["persistence_capacity_decisions"] {
+		reasons = append(reasons, recording.Tags["reason"])
+	}
+	return reasons
 }
 
 func healthySnapshot() persistence.HealthSnapshot {
@@ -191,4 +204,40 @@ func TestCapacityCeiling(t *testing.T) {
 			require.InDelta(t, tc.want, ceiling(), 0.001)
 		})
 	}
+}
+
+func TestCapacityLimiterActsOnStoreFacts(t *testing.T) {
+	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f.signals.snapshot.StoreReportsFacts = true
+	f.allowAfter(0) // learns a 10ms baseline
+
+	// 5% of calls throttled by the store, while latency stays at the baseline.
+	f.signals.snapshot = persistence.HealthSnapshot{
+		P99: 10 * time.Millisecond, Samples: 1000, Throughput: 600, StoreReportsFacts: true, Throttled: 50,
+	}
+	f.allowAfter(time.Second)
+
+	require.InDelta(t, 540, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+	require.Equal(t, []string{"idle", "throttled"}, f.decisions())
+}
+
+func TestCapacityLimiterRunsLatencyInShadowForStoresWithFacts(t *testing.T) {
+	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f.signals.snapshot.StoreReportsFacts = true
+	f.allowAfter(0)
+
+	f.signals.snapshot = persistence.HealthSnapshot{
+		P99: 200 * time.Millisecond, Samples: 1000, Throughput: 600, StoreReportsFacts: true,
+	}
+	f.allowAfter(time.Second)
+
+	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+	require.Equal(t, []string{"idle", "idle", capacityReasonLatencyShadow}, f.decisions())
+}
+
+func TestCapacityLimiterRecordsNoDecisionsWhenDisabled(t *testing.T) {
+	f := newCapacityLimiterFixture(t, capacityModeDisabled)
+	f.allowAfter(0)
+	f.allowAfter(time.Second)
+	require.Empty(t, f.decisions())
 }

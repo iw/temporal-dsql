@@ -22,6 +22,9 @@ const (
 type (
 	// StoreFacts receives store facts. The health signal aggregator implements it.
 	StoreFacts interface {
+		// DeclareStoreFacts is called once by a plugin that reports facts, so core relies
+		// on them instead of inferring the store's health from latency.
+		DeclareStoreFacts()
 		ReportStoreFact(fact StoreFact, count int64)
 	}
 

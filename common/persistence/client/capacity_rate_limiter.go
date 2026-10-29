@@ -55,6 +55,7 @@ type capacityAwareRateLimiter struct {
 	ctrl       *capacity.Controller
 	mode       string
 	lastReason capacity.Reason
+	lastShadow bool
 }
 
 var _ quotas.RequestRateLimiter = (*capacityAwareRateLimiter)(nil)
@@ -154,12 +155,15 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 		snap = l.healthSignals.RecentSnapshot(p.Capacity.SignalWindows)
 	}
 	d := l.ctrl.Step(capacityEnvelope(p.Capacity, mode, static, snap.Span), static, capacity.Signals{
-		Now:        now,
-		P99:        snap.P99,
-		ErrorRatio: snap.ErrorRatio,
-		Throughput: snap.Throughput,
-		Samples:    snap.Samples,
-		Binding:    l.denied.Swap(false),
+		Now:            now,
+		P99:            snap.P99,
+		ErrorRatio:     snap.ErrorRatio,
+		Throughput:     snap.Throughput,
+		Samples:        snap.Samples,
+		Binding:        l.denied.Swap(false),
+		FactsReported:  snap.StoreReportsFacts,
+		ThrottledRatio: perRequest(snap.Throttled, snap.Samples),
+		QueuedRatio:    perRequest(snap.Queued, snap.Samples),
 	})
 
 	if mode == capacityModeEnabled {
@@ -186,7 +190,11 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 	if static > 0 {
 		metrics.DynamicRateLimiterMultiplier.With(l.metrics).Record(d.Proposed / static)
 	}
-	if d.Reason != l.lastReason && (d.Reason == capacity.ReasonLatency || d.Reason == capacity.ReasonErrors) {
+	metrics.PersistenceCapacityDecisions.With(l.metrics).Record(1, metrics.StringTag("reason", string(d.Reason)))
+	if d.LatencyShadow {
+		metrics.PersistenceCapacityDecisions.With(l.metrics).Record(1, metrics.StringTag("reason", capacityReasonLatencyShadow))
+	}
+	if d.Reason != l.lastReason && isDecrease(d.Reason) {
 		l.logger.Info("Persistence capacity controller decreased rate.",
 			tag.NewStringTag("mode", mode),
 			tag.NewStringTag("reason", string(d.Reason)),
@@ -195,9 +203,40 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 			tag.NewDurationTag("p99", snap.P99),
 			tag.NewDurationTag("target", d.Target),
 			tag.Float64("errorRatio", snap.ErrorRatio),
+			tag.NewInt("throttled", snap.Throttled),
+			tag.NewInt("queued", snap.Queued),
+		)
+	}
+	if d.LatencyShadow && !l.lastShadow {
+		l.logger.Info("Persistence capacity controller's latency law would have decreased rate; the store reports facts, so it ran in shadow.",
+			tag.NewStringTag("mode", mode),
+			tag.NewDurationTag("p99", snap.P99),
+			tag.NewDurationTag("target", d.Target),
 		)
 	}
 	l.lastReason = d.Reason
+	l.lastShadow = d.LatencyShadow
+}
+
+// capacityReasonLatencyShadow tags a step where the latency law would have cut a
+// store that reports facts, so shadow runs can compare the two.
+const capacityReasonLatencyShadow = "latency-shadow"
+
+func isDecrease(reason capacity.Reason) bool {
+	switch reason {
+	case capacity.ReasonErrors, capacity.ReasonThrottled, capacity.ReasonQueued, capacity.ReasonLatency:
+		return true
+	default:
+		return false
+	}
+}
+
+// perRequest is count per request recorded over the same span.
+func perRequest(count, requests int) float64 {
+	if requests <= 0 {
+		return 0
+	}
+	return float64(count) / float64(requests)
 }
 
 func (l *capacityAwareRateLimiter) priorityFactor(priority int) float64 {
@@ -252,6 +291,7 @@ func capacityEnvelope(
 		LatencyCeiling:  p.LatencyCeiling,
 		LatencyFloor:    p.LatencyFloor,
 		MaxErrorRatio:   p.MaxErrorRatio,
+		MaxQueuedRatio:  p.MaxQueuedRatio,
 		MaxDecrease:     p.MaxDecrease,
 		DeliveryBackoff: p.DeliveryBackoff,
 		IncreaseFrac:    p.IncreaseFrac,
