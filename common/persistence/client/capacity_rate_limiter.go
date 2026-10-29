@@ -211,6 +211,20 @@ func (l *capacityAwareRateLimiter) burst(rps float64) int {
 	return max(1, int(rps*l.burstRatio()))
 }
 
+// capacityCeilingFn is the basic host-level limiter's rate. While the capacity
+// controller is enabled it becomes a safety ceiling at Capacity.MaxMultiplier x
+// hostMaxQPS, so the controller can use database headroom; otherwise it is
+// hostMaxQPS, as before. The basic limiter refreshes its rate once a minute.
+func capacityCeilingFn(hostRateFn quotas.RateFn, dynamicParams DynamicRateLimitingParams) quotas.RateFn {
+	return func() float64 {
+		params := dynamicParams()
+		if params.Enabled && params.Capacity.Mode == capacityModeEnabled && params.Capacity.MaxMultiplier > 1 {
+			return params.Capacity.MaxMultiplier * hostRateFn()
+		}
+		return hostRateFn()
+	}
+}
+
 // capacityEnvelope converts dynamic config into a controller envelope. The
 // effective cooldown is never shorter than twice the signal span, so the
 // controller cannot act twice on the same stale data even if the latency
@@ -221,12 +235,14 @@ func capacityEnvelope(
 	static float64,
 	signalSpan time.Duration,
 ) capacity.Envelope {
-	m := capacity.ModeOff
+	var m capacity.Mode
 	switch mode {
 	case capacityModeShadow:
 		m = capacity.ModeShadow
 	case capacityModeEnabled:
 		m = capacity.ModeOn
+	default:
+		m = capacity.ModeOff
 	}
 	return capacity.Envelope{
 		Mode:            m,
