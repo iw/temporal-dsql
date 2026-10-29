@@ -11,8 +11,9 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 | `common/dynamicconfig/shared_constants.go` | `DynamicRateLimitingParams` gains `Capacity`, the controller's envelope. Its `Mode` is disabled by default. |
 | `common/persistence/client/quotas.go` | `NewPriorityRateLimiter` wraps the per-priority health limiters in the capacity-aware limiter. The basic limiter's rate comes from `capacityCeilingFn`. |
 | `common/persistence/client/factory.go` | `NewFactory` hands the health signal aggregator to a data store factory that accepts store facts. |
-| `common/persistence/health_signal_aggregator.go` | The aggregator gains `RecentSnapshot` and implements `StoreFacts`. The snapshot leaves out the persistence limiter's own rejections, and leaves calls the store reports as throttled out of delivered throughput. |
+| `common/persistence/health_signal_aggregator.go` | The aggregator gains `RecentSnapshot` and `RecordCall`, and implements `StoreFacts`. The snapshot leaves out the persistence limiter's own rejections, counts a call that failed after its deadline as a timeout, and leaves calls the store reports as throttled out of delivered throughput. |
 | `common/persistence/noop_health_signal_aggregator.go` | The no-op aggregator implements the new methods. |
+| `common/persistence/persistence_metric_clients.go` | Each call records its own context through `RecordCall`, so a call that fails after its deadline counts as a timeout, whatever error the store wrapped it in. |
 | `common/persistence/sql/factory.go` | `DbConn` keeps the store-facts sink and passes it to the plugin's database when that's created. |
 | `common/stats/windowed_tdigest.go` | `QuantileRecent` reads a quantile over the newest windows only. |
 | `common/metrics/metric_defs.go` | Adds `persistence_store_facts` and `persistence_capacity_decisions`. |
