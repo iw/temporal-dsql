@@ -11,6 +11,68 @@ func healthy(at time.Duration, p99 time.Duration, binding bool) Signals {
 	return Signals{Now: t0.Add(at), P99: p99, Samples: 1000, Binding: binding}
 }
 
+// withFacts is a signal from a store whose plugin reports facts.
+func withFacts(at time.Duration, p99 time.Duration, binding bool) Signals {
+	s := healthy(at, p99, binding)
+	s.FactsReported = true
+	return s
+}
+
+func TestThrottledFactsCutWhileLatencyIsFine(t *testing.T) {
+	c := New(1000)
+	env := DefaultEnvelope(1000)
+	c.Step(env, 1000, withFacts(0, 10*time.Millisecond, false))
+	s := withFacts(time.Second, 10*time.Millisecond, true)
+	s.ThrottledRatio = 0.05
+	s.Throughput = 800
+	if d := c.Step(env, 1000, s); d.Reason != ReasonThrottled || d.Proposed != 720 {
+		t.Fatalf("expected a cut to 0.9 x delivered for throttling, got %+v", d)
+	}
+}
+
+func TestThrottledFactsAndTimeoutsShareTheErrorRatio(t *testing.T) {
+	c := New(1000)
+	env := DefaultEnvelope(1000)
+	s := withFacts(0, 10*time.Millisecond, true)
+	s.ErrorRatio, s.ThrottledRatio = 0.006, 0.006 // neither alone is over 1%
+	if d := c.Step(env, 1000, s); d.Reason != ReasonThrottled || d.Proposed != 500 {
+		t.Fatalf("expected throttling plus timeouts to halve the rate, got %+v", d)
+	}
+}
+
+func TestQueuedFactsCut(t *testing.T) {
+	c := New(1000)
+	env := DefaultEnvelope(1000)
+	s := withFacts(0, 10*time.Millisecond, true)
+	s.QueuedRatio = 0.2
+	if d := c.Step(env, 1000, s); d.Reason == ReasonQueued {
+		t.Fatalf("queueing under MaxQueuedRatio must not cut, got %+v", d)
+	}
+	s = withFacts(time.Second, 10*time.Millisecond, true)
+	s.QueuedRatio = 0.4
+	if d := c.Step(env, 1000, s); d.Reason != ReasonQueued || d.Proposed >= 1000 {
+		t.Fatalf("expected a cut for queueing on the plugin's pool, got %+v", d)
+	}
+}
+
+func TestLatencyRunsInShadowWhenTheStoreReportsFacts(t *testing.T) {
+	env := DefaultEnvelope(1000)
+	c := New(1000)
+	c.Step(env, 1000, withFacts(0, 10*time.Millisecond, false)) // baseline 10ms, target 20ms
+	d := c.Step(env, 1000, withFacts(time.Second, 200*time.Millisecond, false))
+	if d.Proposed != 1000 || d.Reason != ReasonIdle || !d.LatencyShadow {
+		t.Fatalf("latency must not cut a store that reports facts, got %+v", d)
+	}
+
+	// Without facts, the same signals cut as before.
+	c = New(1000)
+	c.Step(env, 1000, healthy(0, 10*time.Millisecond, false))
+	d = c.Step(env, 1000, healthy(time.Second, 200*time.Millisecond, false))
+	if d.Reason != ReasonLatency || d.Proposed >= 1000 || d.LatencyShadow {
+		t.Fatalf("expected the latency law to cut a store without facts, got %+v", d)
+	}
+}
+
 func TestOffModeIsExactlyStatic(t *testing.T) {
 	c := New(3000)
 	env := DefaultEnvelope(3000)

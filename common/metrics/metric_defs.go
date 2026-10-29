@@ -1673,6 +1673,10 @@ var (
 		"persistence_store_facts",
 		WithDescription("Typed facts persistence plugins report about their stores, keyed by `fact`: throttled, contention, limit or queued"),
 	)
+	PersistenceCapacityDecisions = NewCounterDef(
+		"persistence_capacity_decisions",
+		WithDescription("Steps of the persistence capacity controller, keyed by `reason`. `latency-shadow` counts steps where the latency law would have cut a store that reports facts"),
+	)
 	VisibilityPersistenceRequests          = NewCounterDef("visibility_persistence_requests")
 	VisibilityPersistenceErrorWithType     = NewCounterDef("visibility_persistence_error_with_type")
 	VisibilityPersistenceFailures          = NewCounterDef("visibility_persistence_errors")

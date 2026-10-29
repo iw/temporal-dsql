@@ -106,8 +106,13 @@ type CapacityControllerParams struct {
 	Tolerance      float64
 	LatencyCeiling time.Duration
 	LatencyFloor   time.Duration
-	// MaxErrorRatio of unhealthy errors that forces a decrease.
+	// MaxErrorRatio of unhealthy errors, plus calls the store reports as
+	// throttled, that forces a decrease.
 	MaxErrorRatio float64
+	// MaxQueuedRatio of calls that waited for one of the store plugin's
+	// connections that forces a decrease. It applies only to stores whose plugins
+	// report queued facts.
+	MaxQueuedRatio float64
 	// On overload: cut to DeliveryBackoff x delivered throughput, never below
 	// MaxDecrease x current rate in one step, at most once per Cooldown.
 	MaxDecrease     float64
@@ -144,6 +149,7 @@ var DefaultDynamicRateLimitingParams = DynamicRateLimitingParams{
 		LatencyCeiling:  750 * time.Millisecond,
 		LatencyFloor:    2 * time.Millisecond,
 		MaxErrorRatio:   0.01,
+		MaxQueuedRatio:  0.25,
 		MaxDecrease:     0.5,
 		DeliveryBackoff: 0.9,
 		Cooldown:        6 * time.Second,

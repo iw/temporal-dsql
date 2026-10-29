@@ -14,6 +14,10 @@
 //     slowly near the rate where overload was last seen, accelerating the
 //     longer the system stays healthy.
 //
+// When the store's plugin reports facts (docs/dsql/adaptive-store-facts.md), the
+// controller acts on those and on timeouts instead, and runs the latency law only
+// in shadow.
+//
 // Dynamic config supplies an Envelope, not the value.
 //
 // The package is deliberately stdlib-only and side-effect free: Step is a pure
@@ -55,9 +59,13 @@ type Envelope struct {
 	// very fast stores).
 	LatencyFloor time.Duration
 
-	// MaxErrorRatio of unhealthy errors (timeouts, deadline exceeded) that
-	// triggers a decrease regardless of latency.
+	// MaxErrorRatio of unhealthy errors (timeouts, deadline exceeded), plus calls
+	// the store reports as throttled, that triggers a decrease regardless of latency.
 	MaxErrorRatio float64
+
+	// MaxQueuedRatio of calls that waited for one of the store plugin's
+	// connections that triggers a decrease: the plugin's own pool is short.
+	MaxQueuedRatio float64
 
 	// MaxDecrease is the smallest multiplicative factor applied in one
 	// decision (0.5 = at most halve). DeliveryBackoff is the fraction of
@@ -93,6 +101,7 @@ func DefaultEnvelope(staticRPS float64) Envelope {
 		LatencyCeiling:  750 * time.Millisecond,
 		LatencyFloor:    2 * time.Millisecond,
 		MaxErrorRatio:   0.01,
+		MaxQueuedRatio:  0.25,
 		MaxDecrease:     0.5,
 		DeliveryBackoff: 0.9,
 		IncreaseFrac:    0.05,
@@ -108,9 +117,15 @@ type Signals struct {
 	Now        time.Time
 	P99        time.Duration // over the most recent signal window only
 	ErrorRatio float64       // unhealthy errors / requests over the same window
-	Throughput float64       // successful completions per second over the same window
+	Throughput float64       // completions per second the store delivered over the same window
 	Samples    int
 	Binding    bool // the limiter rejected requests since the previous Step
+
+	// FactsReported is set when the store's plugin reports facts. The controller
+	// then relies on them and on timeouts, and runs the latency law only in shadow.
+	FactsReported  bool
+	ThrottledRatio float64 // calls the store reported as throttled / requests
+	QueuedRatio    float64 // calls that waited for a plugin connection / requests
 }
 
 // Reason explains a decision; emit it as a metric tag, as matching does for
@@ -118,13 +133,15 @@ type Signals struct {
 type Reason string
 
 const (
-	ReasonOff      Reason = "off"
-	ReasonNoData   Reason = "no-data"
-	ReasonErrors   Reason = "errors"
-	ReasonLatency  Reason = "latency"
-	ReasonCooldown Reason = "cooldown"
-	ReasonIdle     Reason = "idle" // healthy but not binding: hold (anti-windup)
-	ReasonProbe    Reason = "probe"
+	ReasonOff       Reason = "off"
+	ReasonNoData    Reason = "no-data"
+	ReasonErrors    Reason = "errors"
+	ReasonThrottled Reason = "throttled"
+	ReasonQueued    Reason = "queued"
+	ReasonLatency   Reason = "latency"
+	ReasonCooldown  Reason = "cooldown"
+	ReasonIdle      Reason = "idle" // healthy but not binding: hold (anti-windup)
+	ReasonProbe     Reason = "probe"
 )
 
 // Decision is the controller's output for one Step.
@@ -134,6 +151,9 @@ type Decision struct {
 	Target   time.Duration
 	Baseline time.Duration
 	Reason   Reason
+	// LatencyShadow is set when the store reports facts and the latency law would
+	// have cut. The controller didn't; it reports it so the two can be compared.
+	LatencyShadow bool
 }
 
 // Controller holds the learned state. It is not safe for concurrent use; the
@@ -169,22 +189,36 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 		d.Baseline, d.Target = base, target
 
 		errorsHigh := s.ErrorRatio > env.MaxErrorRatio
+		throttledHigh := !errorsHigh && s.ThrottledRatio > 0 && s.ErrorRatio+s.ThrottledRatio > env.MaxErrorRatio
+		queuedHigh := env.MaxQueuedRatio > 0 && s.QueuedRatio > env.MaxQueuedRatio
+		factsHigh := errorsHigh || throttledHigh || queuedHigh
 		latencyHigh := s.P99 > target
+		if s.FactsReported {
+			// The store says what it did, so latency runs only in shadow.
+			d.LatencyShadow = latencyHigh && !factsHigh
+			latencyHigh = false
+		}
 		switch {
-		case errorsHigh || latencyHigh:
+		case factsHigh || latencyHigh:
 			if !c.lastDecrease.IsZero() && s.Now.Sub(c.lastDecrease) < env.Cooldown {
 				d.Reason = ReasonCooldown
 				break
 			}
-			d.Reason = ReasonLatency
-			if errorsHigh {
+			switch {
+			case errorsHigh:
 				d.Reason = ReasonErrors
+			case throttledHigh:
+				d.Reason = ReasonThrottled
+			case queuedHigh:
+				d.Reason = ReasonQueued
+			default:
+				d.Reason = ReasonLatency
 			}
 			// Prefer the measured delivery rate; fall back to a latency gradient.
 			next := c.rate * math.Max(env.MaxDecrease, float64(target)/float64(s.P99))
 			if s.Throughput > 0 {
 				next = s.Throughput * env.DeliveryBackoff
-			} else if errorsHigh {
+			} else if factsHigh {
 				next = c.rate * env.MaxDecrease
 			}
 			c.lastBadRate = c.rate
