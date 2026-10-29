@@ -25,6 +25,7 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 | [CI](ci.md) | Dagger module, Buildkite pipeline on Namespace agents, and live tests on throwaway AWS resources |
 | [Adaptive Behaviour](adaptive-behaviour.md) | Design for turning capacity settings into bounded controllers, starting with persistence capacity |
 | [Store Facts](adaptive-store-facts.md) | The DSQL plugin's throttling, contention, limits and pool pressure as typed facts for the capacity controller |
+| [Adaptive Upstream Changes](adaptive-upstream-changes.md) | The `adaptive-behaviour` branch's changes to upstream code, on top of main's patch set |
 
 ## Quick Reference
 
