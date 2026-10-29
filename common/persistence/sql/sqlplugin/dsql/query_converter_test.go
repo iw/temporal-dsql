@@ -135,14 +135,28 @@ func TestQueryConverter_ConvertTextComparisonExpr(t *testing.T) {
 			operator: sqlparser.EqualStr,
 			col:      textCol,
 			value:    query.NewUnsafeSQLString("foo bar"),
-			out:      "Text01 @@ 'foo | bar'::tsquery",
+			out:      "(Text01 like '% foo %' escape '!' or Text01 like '% bar %' escape '!')",
 		},
 		{
 			name:     "valid not equal expression",
 			operator: sqlparser.NotEqualStr,
 			col:      textCol,
 			value:    query.NewUnsafeSQLString("foo bar"),
-			out:      "not Text01 @@ 'foo | bar'::tsquery",
+			out:      "not (Text01 like '% foo %' escape '!' or Text01 like '% bar %' escape '!')",
+		},
+		{
+			name:     "single word",
+			operator: sqlparser.EqualStr,
+			col:      textCol,
+			value:    query.NewUnsafeSQLString("  foo  "),
+			out:      "(Text01 like '% foo %' escape '!')",
+		},
+		{
+			name:     "wildcards and the escape character are literal",
+			operator: sqlparser.EqualStr,
+			col:      textCol,
+			value:    query.NewUnsafeSQLString("50%_off! it''s"),
+			out:      "(Text01 like '% 50!%!_off!! %' escape '!' or Text01 like '% it''s %' escape '!')",
 		},
 		{
 			name:     "invalid value type",
@@ -206,7 +220,7 @@ func TestQueryConverter_BuildSelectStmt(t *testing.T) {
 			name:     "empty",
 			pageSize: 10,
 			stmt: fmt.Sprintf(
-				"SELECT %s FROM executions_visibility ORDER BY coalesce(close_time, '9999-12-31 23:59:59') DESC, start_time DESC, run_id LIMIT ?",
+				"SELECT %s FROM executions_visibility ORDER BY coalesce(close_time, '9999-12-31 23:59:59') DESC, start_time DESC, run_id DESC LIMIT ?",
 				strings.Join(sqlplugin.DbFields, ", "),
 			),
 			queryArgs: []any{10},
@@ -220,7 +234,7 @@ func TestQueryConverter_BuildSelectStmt(t *testing.T) {
 			},
 			pageSize: 20,
 			stmt: fmt.Sprintf(
-				"SELECT %s FROM executions_visibility WHERE Keyword01 = 'foo' ORDER BY coalesce(close_time, '9999-12-31 23:59:59') DESC, start_time DESC, run_id LIMIT ?",
+				"SELECT %s FROM executions_visibility WHERE Keyword01 = 'foo' ORDER BY coalesce(close_time, '9999-12-31 23:59:59') DESC, start_time DESC, run_id DESC LIMIT ?",
 				strings.Join(sqlplugin.DbFields, ", "),
 			),
 			queryArgs: []any{20},
@@ -239,18 +253,10 @@ func TestQueryConverter_BuildSelectStmt(t *testing.T) {
 				RunID:     runID,
 			},
 			stmt: fmt.Sprintf(
-				"SELECT %s FROM executions_visibility WHERE Keyword01 = 'foo' AND ((coalesce(close_time, '9999-12-31 23:59:59') = ? AND start_time = ? AND run_id > ?) OR (coalesce(close_time, '9999-12-31 23:59:59') = ? AND start_time < ?) OR coalesce(close_time, '9999-12-31 23:59:59') < ?) ORDER BY coalesce(close_time, '9999-12-31 23:59:59') DESC, start_time DESC, run_id LIMIT ?",
+				"SELECT %s FROM executions_visibility WHERE Keyword01 = 'foo' AND coalesce(close_time, '9999-12-31 23:59:59') <= ? AND (coalesce(close_time, '9999-12-31 23:59:59'), start_time, run_id) < (?, ?, ?) ORDER BY coalesce(close_time, '9999-12-31 23:59:59') DESC, start_time DESC, run_id DESC LIMIT ?",
 				strings.Join(sqlplugin.DbFields, ", "),
 			),
-			queryArgs: []any{
-				closeTime,
-				startTime,
-				runID,
-				closeTime,
-				startTime,
-				closeTime,
-				20,
-			},
+			queryArgs: []any{closeTime, closeTime, startTime, runID, 20},
 		},
 	}
 

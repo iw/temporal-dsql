@@ -1,6 +1,6 @@
 # DSQL connection pool
 
-The persistence plugin uses pgx v5.7.2's `pgxpool` behind `database/sql` and sqlx. A single pool owns the physical connections and the acquisition queue. Visibility continues to use its separately configured store.
+The persistence plugin uses pgx v5.7.2's `pgxpool` behind `database/sql` and sqlx. A single pool owns the physical connections and the acquisition queue. A DSQL visibility datastore has a pool of its own, built the same way.
 
 ## Size and startup
 

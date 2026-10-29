@@ -2,7 +2,6 @@ package dsql
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -79,7 +78,7 @@ func (p *plugin) CreateDB(
 	metricsHandler metrics.Handler,
 ) (sqlplugin.GenericDB, error) {
 	if dbKind == sqlplugin.DbKindVisibility {
-		return nil, errors.New("DSQL does not support visibility; configure a separate visibility store")
+		cfg = withVisibilitySearchPath(cfg)
 	}
 	var resolved settings
 	if cfg.Connect == nil {

@@ -49,7 +49,7 @@ common/persistence/sql/sqlplugin/dsql/
 ├── uuid.go                        # UUID string conversion utilities
 ├── typeconv.go                    # DateTime conversion
 ├── types.go                       # Shared type definitions
-├── query_converter.go             # Query parameter conversion
+├── query_converter.go             # Visibility query dialect
 ├── admin.go                       # Admin operations
 ├── cluster_metadata.go            # Cluster metadata operations
 ├── namespace.go                   # Namespace operations
@@ -62,7 +62,7 @@ common/persistence/sql/sqlplugin/dsql/
 ├── task_queues.go                 # Task queue operations
 ├── task_queue_id.go               # Task queue ID handling
 ├── task_user_data.go              # Task queue user data
-├── visibility.go                  # Visibility operations (stub — visibility uses separate store)
+├── visibility.go                  # Visibility store, adapted from the PostgreSQL plugin
 ├── driver/
 │   ├── interface.go               # Driver interface abstraction
 │   └── pgx.go                     # pgx driver backend
@@ -261,7 +261,7 @@ See [deployment](deployment.md#5-distributed-coordination-multi-service) for set
 
 ## Connection Pool
 
-`CreateDB` rejects visibility databases with instructions to configure a separate store. It supports the `cfg.Connect` test hook for persistence databases. Otherwise it resolves settings before creating the handle, removes plugin attributes from a copy of the config, builds a DSN with `session.BuildDSN`, parses a pgxpool config, creates a pool and pings once with a 30-second timeout. Default database names are tried in order. A failed ping closes the new pool. There is no startup sleep or wait for the background fill.
+For a visibility database, `CreateDB` sets `search_path` to `temporal_visibility` unless the datastore's `connectAttributes` set it. It supports the `cfg.Connect` test hook. Otherwise it resolves settings before creating the handle, removes plugin attributes from a copy of the config, builds a DSN with `session.BuildDSN`, parses a pgxpool config, creates a pool and pings once with a 30-second timeout. Default database names are tried in order. A failed ping closes the new pool. There is no startup sleep or wait for the background fill.
 
 Service pools use `MinConns == MaxConns == maxConns` (default 100). Ephemeral pools use max 5/min 0. Lifetime is capped at 50 minutes, with four minutes of jitter and one-minute health checks; shorter configured lifetimes apply. No acquire/release hooks are installed. `maxIdleConns` is ignored. The sum of `maxConns` across every Temporal process, including deploy overlap, must fit the cluster connection limit, 10,000 by default, with headroom for ephemeral pools and administration.
 

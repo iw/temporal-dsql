@@ -192,8 +192,10 @@ func (pdb *db) ExpectedVersion() string {
 	switch pdb.dbKind {
 	case sqlplugin.DbKindMain:
 		return dsqlschemaversion.Version
+	case sqlplugin.DbKindVisibility:
+		return dsqlschemaversion.VisibilityVersion
 	default:
-		panic(fmt.Sprintf("unknown db kind %v", pdb.dbKind)) //nolint:forbidigo // CreateDB refuses every kind but the main store
+		panic(fmt.Sprintf("unknown db kind %v", pdb.dbKind)) //nolint:forbidigo // only the main and visibility stores have a schema version
 	}
 }
 

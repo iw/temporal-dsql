@@ -1,6 +1,6 @@
 # Deploying Temporal with Aurora DSQL
 
-This guide covers deploying Temporal with Aurora DSQL as the persistence layer, using pgxpool for connection management.
+This guide covers deploying Temporal with Aurora DSQL as the persistence layer, and optionally as the visibility store, using pgxpool for connection management.
 
 > **Experimental: not recommended for production.**
 
@@ -64,6 +64,22 @@ For filesystem input, use `--schema-file schema/dsql/temporal/schema.sql` with t
 command. Both paths create the same tables and record version 1.2.
 
 
+### Visibility schema
+
+To keep visibility on DSQL too, set up its schema on the same cluster or on another one:
+
+```bash
+./temporal-dsql-tool \
+    --endpoint "$schema_endpoint" \
+    --region "$schema_region" \
+    --user admin \
+    setup-schema \
+    --schema-name "dsql/visibility" \
+    --version 1.0
+```
+
+The tool creates the PostgreSQL schema `temporal_visibility` if it's missing and sets the store up in it at version 1.0, waiting for each of its 19 index builds, which takes a few minutes. `--search-path` names another schema; the visibility datastore's `search_path` connect attribute must then name the same one. A schema name is one unquoted, lowercase PostgreSQL identifier. [Visibility](visibility.md) describes the table, its indexes, the query dialect and its limits.
+
 ### Least-privilege role
 
 After schema setup, connect as `admin` and run these statements individually to create a runtime role and map it to the Temporal hosts' IAM role:
@@ -76,6 +92,15 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO temporal;
 
 No schema grant is needed: every role already has `USAGE` on `public`, and DSQL rejects `GRANT ... ON SCHEMA public` because `public` is a system schema.
 
+For a visibility store on DSQL, also grant the role its schema and tables:
+
+```sql
+GRANT USAGE ON SCHEMA temporal_visibility TO temporal;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA temporal_visibility TO temporal;
+```
+
+DSQL applies grant changes to existing connections within the connection lifetime, so grant before starting Temporal.
+
 Configure `sql.user: temporal`. Each Temporal host's IAM identity needs `dsql:DbConnect` on the cluster ARN instead of `dsql:DbConnectAdmin`. Schema operations run as `admin` (`temporal-dsql-tool --user admin`) with the administrative IAM permission. Tables created later need the table grant again after schema creation.
 
 An empty `sql.user` defaults to `admin`. The plugin ignores `sql.password`, because it uses IAM tokens, and warns once if a password is configured.
@@ -85,7 +110,7 @@ An empty `sql.user` defaults to `admin`. The plugin ignores `sql.password`, beca
 ```yaml
 persistence:
   defaultStore: dsql-default
-  visibilityStore: visibility
+  visibilityStore: dsql-visibility
   datastores:
     dsql-default:
       sql:
@@ -100,16 +125,21 @@ persistence:
           connection_burst_limit: "100"
         maxConns: 50
         maxConnLifetime: "50m"
-    visibility: # a separate, durable store; DSQL doesn't support visibility
+    dsql-visibility:
       sql:
-        pluginName: "postgres12"
-        databaseName: "temporal_visibility"
-        connectAddr: "${VISIBILITY_ENDPOINT}:5432"
-        user: "temporal"
-        password: "${VISIBILITY_PASSWORD}"
+        pluginName: "dsql"
+        user: "admin" # Or temporal, with the visibility grants above
+        databaseName: "postgres"
+        connectAddr: "your-cluster.dsql.us-east-1.on.aws:5432"
+        connectAttributes:
+          search_path: "temporal_visibility" # the default for a visibility datastore
+        maxConns: 10
+        maxConnLifetime: "50m"
 ```
 
-Visibility can use any store Temporal supports except DSQL, such as Elasticsearch, OpenSearch, PostgreSQL or MySQL, configured as for upstream Temporal. The in-memory SQLite visibility in [`config/development-dsql.yaml`](../../config/development-dsql.yaml) loses its data on restart, so use it only for trying things out.
+The visibility datastore can point at the persistence cluster or at another one. Without `search_path`, a DSQL visibility datastore uses `temporal_visibility`. See [visibility](visibility.md#limits) for the namespace sizes it suits.
+
+Visibility can also use any other store Temporal supports, such as Elasticsearch, OpenSearch, PostgreSQL or MySQL, configured as for upstream Temporal. The in-memory SQLite visibility in [`config/development-dsql.yaml`](../../config/development-dsql.yaml) loses its data on restart, so use it only for trying things out.
 
 `maxIdleConns` is ignored. Service pools open and keep `maxConns` connections in the background (100 if unset). `maxConnLifetime` is capped at 50 minutes; shorter positive values apply. The pool uses four minutes of lifetime jitter and one-minute health checks. See [connection pool](connection-pool.md) for lifecycle details and limitations.
 
@@ -117,7 +147,7 @@ Pool sizing can also use `TEMPORAL_SQL_MAX_CONNS` where the deployment template 
 
 ### Datastore settings
 
-Put plugin settings under `persistence.datastores.<store>.sql.connectAttributes`, with string values. They are resolved once when a datastore pool is created. The resolver filters plugin keys from a copy before building the PostgreSQL DSN; other attributes, including `sslmode`, pass through. The caller's config is unchanged. Visibility configuration is unaffected.
+Put plugin settings under `persistence.datastores.<store>.sql.connectAttributes`, with string values. They are resolved once when a datastore pool is created. The resolver filters plugin keys from a copy before building the PostgreSQL DSN; other attributes, including `sslmode` and `search_path`, pass through. The caller's config is unchanged. The same attributes apply to a DSQL visibility datastore.
 
 | Attribute | Default | Meaning |
 |---|---|---|
@@ -276,7 +306,7 @@ persistence:
           token_bucket_capacity: "1000"
 ```
 
-Merge this datastore with the separate visibility configuration from section 2.
+Merge this datastore with the visibility configuration from section 2, and count the visibility pool in the connection budget too.
 
 ### Per-Service Pool Sizing
 

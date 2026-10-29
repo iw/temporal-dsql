@@ -1,9 +1,14 @@
 package dsql
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
+	"strings"
 
+	"github.com/blang/semver/v4"
 	"github.com/urfave/cli"
 	"go.temporal.io/server/common/headers"
 	"go.temporal.io/server/common/log"
@@ -11,6 +16,13 @@ import (
 	dbschemas "go.temporal.io/server/schema"
 	dsqlschema "go.temporal.io/server/schema/dsql"
 	"go.temporal.io/server/tools/common/schema"
+)
+
+const (
+	cliFlagSearchPath = "search-path"
+
+	// visibilitySchemaName is the embedded visibility schema, which defaults to its own PostgreSQL schema.
+	visibilitySchemaName = "dsql/visibility"
 )
 
 // RunTool runs the temporal-dsql-tool command line tool
@@ -72,6 +84,11 @@ func BuildCLIOptions() *cli.App {
 			Name:  "sslmode",
 			Value: "verify-full",
 			Usage: "PostgreSQL TLS mode (verify-full verifies the server certificate and hostname)",
+		},
+		cli.StringFlag{
+			Name: cliFlagSearchPath,
+			Usage: fmt.Sprintf("PostgreSQL schema for the store, created if missing; match the datastore's search_path "+
+				"(default: %s for %s, otherwise the cluster's default schema)", dsqlschema.VisibilitySchema, visibilitySchemaName),
 		},
 		cli.BoolFlag{
 			Name:  schema.CLIFlagQuiet,
@@ -160,12 +177,64 @@ func updateSchema(c *cli.Context, logger log.Logger) error {
 }
 
 func updateSchemaDB(c *cli.Context, db schema.DB, logger log.Logger) error {
+	baseline, err := baselineVersion(c)
+	if err != nil {
+		return err
+	}
 	version, err := db.ReadSchemaVersion()
 	if err != nil {
 		return err
 	}
-	if version != "0.0" && version != dsqlschema.Version {
-		return fmt.Errorf("unsupported DSQL schema version %q; create a fresh schema at version %s", version, dsqlschema.Version)
+	if version != "0.0" && version != baseline {
+		return fmt.Errorf("unsupported DSQL schema version %q; create a fresh schema at version %s", version, baseline)
 	}
 	return schema.Update(c, db, logger)
+}
+
+// baselineVersion returns the oldest version in the versioned schema the command
+// names. Each DSQL store starts from a single baseline, so a store at any other
+// version predates it.
+func baselineVersion(c *cli.Context) (string, error) {
+	var fsys fs.FS
+	var dir string
+	switch {
+	case c.String(schema.CLIOptSchemaName) != "":
+		fsys, dir = dbschemas.Assets(), path.Join(c.String(schema.CLIOptSchemaName), "versioned")
+	case c.String(schema.CLIOptSchemaDir) != "":
+		fsys, dir = os.DirFS(c.String(schema.CLIOptSchemaDir)), "."
+	default:
+		return "", fmt.Errorf("set --%s or --%s", schema.CLIOptSchemaName, schema.CLIOptSchemaDir)
+	}
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return "", err
+	}
+	var baseline string
+	var oldest semver.Version
+	for _, entry := range entries {
+		version, found := strings.CutPrefix(entry.Name(), "v")
+		parsed, err := semver.ParseTolerant(version)
+		if !entry.IsDir() || !found || err != nil {
+			continue
+		}
+		if baseline == "" || parsed.LT(oldest) {
+			baseline, oldest = version, parsed
+		}
+	}
+	if baseline == "" {
+		return "", errors.New("no versioned schema found")
+	}
+	return baseline, nil
+}
+
+// schemaSearchPath is the PostgreSQL schema the command works in, or empty for the
+// cluster's default.
+func schemaSearchPath(c *cli.Context) string {
+	if searchPath := strings.TrimSpace(c.GlobalString(cliFlagSearchPath)); searchPath != "" {
+		return searchPath
+	}
+	if path.Clean(c.String(schema.CLIOptSchemaName)) == visibilitySchemaName {
+		return dsqlschema.VisibilitySchema
+	}
+	return ""
 }

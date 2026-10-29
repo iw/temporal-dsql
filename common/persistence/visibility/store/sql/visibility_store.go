@@ -22,6 +22,7 @@ import (
 	"go.temporal.io/server/common/persistence/serialization"
 	persistencesql "go.temporal.io/server/common/persistence/sql"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
+	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql"
 	"go.temporal.io/server/common/persistence/visibility/manager"
 	"go.temporal.io/server/common/persistence/visibility/store"
 	"go.temporal.io/server/common/persistence/visibility/store/query"
@@ -73,6 +74,10 @@ func NewSQLVisibilityStore(
 	db, err := refDbConn.Get()
 	if err != nil {
 		return nil, err
+	}
+	if cfg.PluginName == dsql.PluginName {
+		// DSQL has a dialect for the unified query converter only.
+		enableUnifiedQueryConverter = dynamicconfig.GetBoolPropertyFn(true)
 	}
 	return &VisibilityStore{
 		sqlStore:                       persistencesql.NewSQLStore(db, logger, serializer),

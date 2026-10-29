@@ -1,13 +1,13 @@
 # AGENTS
 
 ## Mission
-- Enable Temporal to run with Amazon Aurora DSQL as the **persistence** database while keeping the existing visibility store unchanged.
+- Enable Temporal to run with Amazon Aurora DSQL as the **persistence** database, and optionally as the **visibility** store.
 - Maintain Temporal feature parity, operational reliability, and performance envelopes established for the current persistence backends.
 - Deliver incremental milestones that unblock experimentation without destabilizing the primary Temporal development branch.
 
 ## Scope & Non‑Goals
-- **In scope:** schema compatibility, persistence layer wiring, config surfaces, tooling/tests for Aurora DSQL, schema setup, observability.
-- **Not in scope:** changes to visibility DB, unrelated feature work, adopting new third‑party libraries unless usage already exists in `go.mod`.
+- **In scope:** schema compatibility, persistence layer wiring, the DSQL visibility store, config surfaces, tooling/tests for Aurora DSQL, schema setup, observability.
+- **Not in scope:** changes to other visibility backends, unrelated feature work, adopting new third‑party libraries unless usage already exists in `go.mod`.
 - Avoid speculative refactors; tie every change to Aurora DSQL enablement or required hygiene uncovered along the way.
 
 ## Architecture Touchpoints
@@ -73,6 +73,12 @@
 - FOR UPDATE queries use single tables
 - Shard read lock uses FOR KEY SHARE, so a range renewal fails the commit of an in-flight write that read the old range
 
+#### Visibility
+- DSQL visibility store in its own PostgreSQL schema, `temporal_visibility` by default, with schema baseline 1.0 (`schema/dsql/visibility/schema.sql`)
+- A query dialect for DSQL: newest-first order, keyset paging that index scans can start from, and whole-word Text matching
+- 19 indexes within DSQL's 24 per table; Text, KeywordList and most custom attributes are unindexed
+- First pages over most of a namespace read the namespace's rows, which DSQL's planner prefers to an index scan, so it suits namespaces of tens of thousands of retained executions
+
 #### IAM Authentication
 - pgxpool BeforeConnect hook obtains IAM tokens from the existing cache
 - Token cache reads each token's expiry from the signed token and refreshes it before it expires
@@ -94,6 +100,7 @@
 - `docs/dsql/deployment.md` - Deployment and configuration
 - `docs/dsql/implementation.md` - Technical implementation details
 - `docs/dsql/connection-pool.md` - Pool architecture, sizing and lifecycle
+- `docs/dsql/visibility.md` - The DSQL visibility store
 - `docs/dsql/metrics.md` - Metrics reference
 - `docs/dsql/ci.md` - CI: the Dagger module, the Buildkite pipeline and the live tests
 
@@ -142,6 +149,7 @@ Plugin settings come only from datastore `connectAttributes` or defaults. Region
 | `docs/dsql/deployment.md` | Deployment and configuration |
 | `docs/dsql/implementation.md` | Technical implementation details |
 | `docs/dsql/connection-pool.md` | Pool architecture, sizing and lifecycle |
+| `docs/dsql/visibility.md` | The DSQL visibility store: schema, indexes, query dialect and limits |
 | `docs/dsql/metrics.md` | Metrics reference |
 | `docs/dsql/ci.md` | CI: the Dagger module, the Buildkite pipeline and the live tests |
 | `tools/poolsim/README.md` | Pool simulator documentation |

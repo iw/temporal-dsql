@@ -170,15 +170,6 @@ func TestResolveSettingsUnusedWarning(t *testing.T) {
 	}
 }
 
-func TestCreateDBRejectsVisibility(t *testing.T) {
-	p := &plugin{}
-	db, err := p.CreateDB(sqlplugin.DbKindVisibility, nil, nil, log.NewNoopLogger(), metrics.NoopMetricsHandler)
-	require.Nil(t, db)
-	require.ErrorContains(t, err, "configure a separate visibility store")
-	require.Nil(t, p.tokenCache)
-	require.Nil(t, p.rateLimiter)
-}
-
 func TestSettingsDSNFiltering(t *testing.T) {
 	cfg := settingsConfig()
 	cfg.DatabaseName, cfg.User, cfg.Password = "postgres", "test-user", "ignored"

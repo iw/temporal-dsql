@@ -2,9 +2,8 @@
 
 The DSQL plugin, schemas, schema tool and documentation live in fork-owned
 directories. A small set of changes remains in upstream packages to support
-transaction retries, execution reads, pool sizing and bounded deletes. This
-document records those changes and their path forward. Visibility continues to
-use a separate, existing backend.
+transaction retries, execution reads, pool sizing, bounded deletes and the DSQL
+visibility store. This document records those changes and their path forward.
 
 Upstream is unlikely to accept the DSQL plugin, so these changes stay in this
 repository as a small patch set, rebased onto each upstream release tag. The
@@ -96,6 +95,25 @@ boundary.
 Path forward: keep it, with its regression tests, in the patch set, like
 the history deletes.
 
+## Visibility store
+
+Two changes let upstream's SQL visibility store use the DSQL plugin:
+
+- `common/persistence/visibility/defs.go` lists `dsql` among the SQL plugins in
+  `AllowListForValidation`, so a search attribute's value can't be a list, as
+  for the other SQL stores. Each attribute has a generated column of its own
+  type, which a list wouldn't fit.
+- `common/persistence/visibility/store/sql/visibility_store.go` uses the unified
+  query converter for DSQL whatever `system.visibilityEnableUnifiedQueryConverter`
+  says. The legacy converter has no DSQL dialect, and its factory returns no
+  converter for a plugin it doesn't know.
+
+The schema, the dialect and the store's methods live in the fork's own
+directories; see [visibility](visibility.md). Path forward: keep both changes
+in the patch set until a release includes upstream's refactored visibility
+stores (temporalio/temporal#12297). The store then moves to them, and the
+legacy converter may no longer exist.
+
 ## Registration, dependencies and build support
 
 | Files | Change and reason | Path forward |
@@ -152,7 +170,9 @@ series of commits:
    modules with `go get`, then run `go mod tidy`.
 5. Build, then run the ci module's `test`, its `lint` with the whole change as
    `--patch`, so the fork's code meets the new tag's lint rules, and the live
-   tests.
+   tests. If `TestVisibilityColumnsMatchPostgreSQL` fails, the tag added a
+   visibility column. DSQL can't add a generated column to a table, so the
+   visibility schema needs a new baseline.
 6. Merge `main` into the branch with `git merge -s ours main`, then open a pull
    request into `main`. The branch already carries everything on `main`, so the
    merge keeps `main`'s history without changing the branch's files, and the

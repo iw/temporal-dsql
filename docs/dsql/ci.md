@@ -25,7 +25,7 @@ The module never sees Buildkite or Namespace. Its constructor takes the reposito
 |---|---|
 | `build [--platform]` | Compiles `temporal-server`, `temporal-dsql-tool` and `temporal-elasticsearch-tool`, and returns them as a directory |
 | `lint [--base] [--patch]` | Runs golangci-lint v2.9.0 on the lines a change adds, and the errortype vet check, as `make lint-code` does |
-| `test [--packages] [--run]` | Runs `go test -race -shuffle=on` on `common/persistence/sql/...`, `schema/...`, `tools/dsql/...` and `tools/poolsim/...` |
+| `test [--packages] [--run]` | Runs `go test -race -shuffle=on` on `common/persistence/sql/...`, `common/persistence/visibility/...`, `schema/...`, `tools/dsql/...` and `tools/poolsim/...` |
 
 `--platform` defaults to the engine's own platform. Go cross-compiles, so `build` can target any platform from any engine.
 
@@ -67,11 +67,11 @@ Edit `.dagger/modules/ci/src/lib.rs` or `Cargo.toml`, run `dagger generate`, and
 `.dagger/live` runs the plugin's integration tests (`-tags integration`) against real AWS resources:
 
 1. It creates an Aurora DSQL cluster and a DynamoDB table in the profile's region. Both are tagged `purpose=temporal-dsql-ci`, and the table is named `temporal-dsql-ci-<run>`.
-2. In the Dagger engine, it sets up the schema with `temporal-dsql-tool setup-schema --version 1.2`, which waits for the index builds.
+2. In the Dagger engine, it sets up the persistence schema at version 1.2 and the visibility schema at version 1.0 with `temporal-dsql-tool setup-schema`, which waits for the index builds.
 3. Also in the engine, it runs `go test -tags integration ./common/persistence/sql/sqlplugin/dsql/...` against them.
 4. It deletes the cluster and the table, whether the tests passed or not, and also when you stop it with Ctrl-C.
 
-Each run first deletes CI-tagged clusters and `temporal-dsql-ci-` tables that are more than three hours old, which runs that were killed outright left behind. A run takes a few minutes, most of it waiting for the schema's index builds. Run it before merging a change to the plugin, the schema or `temporal-dsql-tool`:
+Each run first deletes CI-tagged clusters and `temporal-dsql-ci-` tables that are more than three hours old, which runs that were killed outright left behind. A run takes about ten minutes, most of it waiting for the schemas' index builds. Run it before merging a change to the plugin, the schema or `temporal-dsql-tool`:
 
 ```bash
 eval "$(.dagger/engine.sh)"

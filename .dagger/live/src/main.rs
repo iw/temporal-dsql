@@ -249,8 +249,8 @@ async fn session_credentials(config: &SdkConfig, aws: &Aws) -> Result<SessionCre
     })
 }
 
-/// Sets up the schema and runs the plugin's integration tests, in the golang image the
-/// ci module's test function uses.
+/// Sets up the persistence and visibility schemas and runs the plugin's integration
+/// tests, in the golang image the ci module's test function uses.
 async fn go_steps(
     dag: &Query,
     credentials: &SessionCredentials,
@@ -310,8 +310,8 @@ async fn go_steps(
         .with_secret_variable("DSQL_TEST_ENDPOINT", endpoint)
         .with_env_variable("DSQL_TEST_DDB_TABLE", &run.table);
 
-    println!("--- setting up the schema");
-    let schema = runner.with_exec(vec![
+    println!("--- setting up the persistence schema");
+    let persistence = runner.with_exec(vec![
         "go",
         "run",
         "./cmd/tools/dsql",
@@ -320,6 +320,19 @@ async fn go_steps(
         "dsql/temporal",
         "--version",
         "1.2",
+    ]);
+    print_step(&persistence, masker).await?;
+
+    println!("--- setting up the visibility schema");
+    let schema = persistence.with_exec(vec![
+        "go",
+        "run",
+        "./cmd/tools/dsql",
+        "setup-schema",
+        "--schema-name",
+        "dsql/visibility",
+        "--version",
+        "1.0",
     ]);
     print_step(&schema, masker).await?;
 
