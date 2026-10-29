@@ -9,7 +9,10 @@ import (
 
 const FastRetryPluginName = "dsql-fast-retry-test"
 
-const RangeDeleteTaskQuery = rangeDeleteTaskQry
+const (
+	RangeDeleteTaskQuery   = rangeDeleteTaskQry
+	RangeDeleteTaskV2Query = rangeDeleteTaskV2Qry
+)
 
 func init() {
 	cfg := DefaultRetryConfig()

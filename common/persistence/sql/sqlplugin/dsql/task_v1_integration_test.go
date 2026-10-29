@@ -55,17 +55,7 @@ func TestDSQLTaskRangeDeleteIntegration(t *testing.T) {
 	}
 	insertTasks(neighbourID, 1, 10)
 
-	// The plan must not depend on the queue's row estimate: no join, so no subquery reruns.
-	var plan string
-	require.NoError(t, conn.GetContext(ctx, &plan, "EXPLAIN (FORMAT JSON) "+dsql.RangeDeleteTaskQuery,
-		rangeHash, dsql.TaskQueueIDToUUIDString(queueID), int64(1001), 100))
-	var explained []struct{ Plan planNode }
-	require.NoError(t, json.Unmarshal([]byte(plan), &explained))
-	require.Len(t, explained, 1)
-	for _, nodeType := range explained[0].Plan.nodeTypes() {
-		require.NotContains(t, nodeType, "Join", plan)
-		require.NotEqual(t, "Nested Loop", nodeType, plan)
-	}
+	requireNoJoin(t, conn, dsql.RangeDeleteTaskQuery, rangeHash, dsql.TaskQueueIDToUUIDString(queueID), int64(1001), 100)
 
 	deleteBatch := func(exclusiveMaxTaskID int64, limit int) int64 {
 		result, err := db.DeleteFromTasks(ctx, sqlplugin.TasksFilter{
@@ -104,6 +94,21 @@ func TestDSQLTaskRangeDeleteIntegration(t *testing.T) {
 	count, minTaskID = remaining(neighbourID)
 	require.EqualValues(t, 10, count)
 	require.EqualValues(t, 1, minTaskID)
+}
+
+// requireNoJoin checks that a statement's plan has no join, so it doesn't depend on the
+// queue's row estimate and can't rerun a subquery for every row in the queue.
+func requireNoJoin(t *testing.T, conn sqlplugin.Conn, query string, args ...any) {
+	t.Helper()
+	var plan string
+	require.NoError(t, conn.GetContext(t.Context(), &plan, "EXPLAIN (FORMAT JSON) "+query, args...))
+	var explained []struct{ Plan planNode }
+	require.NoError(t, json.Unmarshal([]byte(plan), &explained))
+	require.Len(t, explained, 1)
+	for _, nodeType := range explained[0].Plan.nodeTypes() {
+		require.NotContains(t, nodeType, "Join", plan)
+		require.NotEqual(t, "Nested Loop", nodeType, plan)
+	}
 }
 
 type planNode struct {
