@@ -24,7 +24,7 @@ The fork also changes some upstream code to work within DSQL's limits, such as t
 | | |
 |---|---|
 | Temporal base | Upstream release `v1.32.1` |
-| DSQL schema version | 1.2 |
+| DSQL schema version | 1.3, and 1.0 for visibility |
 | Go | 1.26 |
 
 ## Quick start
@@ -41,10 +41,10 @@ You need an Aurora DSQL cluster, AWS credentials that can call `dsql:DbConnectAd
 
    ```bash
    ./temporal-dsql-tool --endpoint <cluster-id>.dsql.us-east-1.on.aws --region us-east-1 \
-     setup-schema --schema-name dsql/temporal --version 1.2
+     setup-schema --schema-name dsql/temporal --version 1.3
    ```
 
-   Create a fresh schema at version 1.2. Both schema setup paths are documented in the [deployment guide](../docs/dsql/deployment.md#1-schema-setup).
+   Create a fresh schema at version 1.3. Both schema setup paths are documented in the [deployment guide](../docs/dsql/deployment.md#1-schema-setup).
 
    To keep visibility on DSQL as well, also run `setup-schema --schema-name dsql/visibility --version 1.0`. The deployment guide covers its [schema](../docs/dsql/deployment.md#visibility-schema) and datastore.
 

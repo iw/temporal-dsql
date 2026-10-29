@@ -60,7 +60,8 @@
 ### ✅ Implemented
 
 #### Schema Compatibility
-- DSQL-compatible schema baseline 1.2 (`schema/dsql/temporal/schema.sql`)
+- DSQL-compatible schema baseline 1.3 (`schema/dsql/temporal/schema.sql`)
+- `chasm_path` has upstream MySQL's width of 1,536, within DSQL's 2,000-byte key, and the plugin stores NUL bytes in it escaped
 - UUID identifiers in composite primary keys
 - BIGINT `buffered_events` IDs allocated per run inside the transaction
 - CHECK constraints omitted; the application validates values

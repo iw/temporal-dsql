@@ -26,7 +26,7 @@ Aurora DSQL is Amazon's serverless, PostgreSQL-compatible distributed SQL databa
 
 ## Quick Reference
 
-**Schema versions:** persistence 1.2, visibility 1.0
+**Schema versions:** persistence 1.3, visibility 1.0
 
 **How the plugin handles DSQL differences:**
 
