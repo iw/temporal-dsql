@@ -1,6 +1,7 @@
 package persistence
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,10 @@ type (
 	HealthSignalAggregator interface {
 		StoreFacts
 		Record(callerSegment int32, latency time.Duration, err error)
+		// RecordCall records a call like Record. A call that failed after its own
+		// deadline passed also counts as a timeout in the windows RecentSnapshot reads,
+		// whatever error the store wrapped the timeout in.
+		RecordCall(ctx context.Context, callerSegment int32, latency time.Duration, err error)
 		AverageLatency() float64
 		LatencyQuantile(quantile float64) float64
 		ErrorRatio() float64
@@ -143,6 +148,16 @@ func (s *healthSignalAggregatorImpl) Stop() {
 }
 
 func (s *healthSignalAggregatorImpl) Record(callerSegment int32, latency time.Duration, err error) {
+	s.record(callerSegment, latency, err, false)
+}
+
+func (s *healthSignalAggregatorImpl) RecordCall(ctx context.Context, callerSegment int32, latency time.Duration, err error) {
+	// SQL stores return a timed-out query as Unavailable, with the deadline only in its
+	// message, so the call's own context is what shows it timed out.
+	s.record(callerSegment, latency, err, err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded))
+}
+
+func (s *healthSignalAggregatorImpl) record(callerSegment int32, latency time.Duration, err error, deadlinePassed bool) {
 	if s.aggregationEnabled {
 		s.latencyAverage.Record(latency.Milliseconds())
 
@@ -153,7 +168,7 @@ func (s *healthSignalAggregatorImpl) Record(callerSegment int32, latency time.Du
 		if s.percentilesEnabled() && s.latencyDistribution != nil && !isPersistenceLimitRejection(err) {
 			now := time.Now()
 			s.latencyDistribution.Record(float64(latency.Milliseconds()), now)
-			s.counters.record(now, unhealthy)
+			s.counters.record(now, unhealthy || deadlinePassed)
 		}
 
 		if unhealthy {
