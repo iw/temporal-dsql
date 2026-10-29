@@ -1,7 +1,7 @@
 package dsql
 
 // Version is the DSQL persistence schema version.
-const Version = "1.2"
+const Version = "1.3"
 
 // VisibilityVersion is the DSQL visibility schema version.
 const VisibilityVersion = "1.0"

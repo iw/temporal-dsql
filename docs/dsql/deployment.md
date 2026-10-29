@@ -14,7 +14,7 @@ This guide covers deploying Temporal with Aurora DSQL as the persistence layer, 
 
 ## 1. Schema Setup
 
-**Current schema version: 1.2**
+**Current schema version: 1.3**
 
 ```bash
 schema_endpoint="your-cluster.dsql.us-east-1.on.aws"
@@ -27,7 +27,7 @@ schema_region="us-east-1"
     --user admin \
     setup-schema \
     --schema-name "dsql/temporal" \
-    --version 1.2
+    --version 1.3
 
 # Full reset (drops and recreates — use with caution)
 ./temporal-dsql-tool \
@@ -36,7 +36,7 @@ schema_region="us-east-1"
     --user admin \
     setup-schema \
     --schema-name "dsql/temporal" \
-    --version 1.2 \
+    --version 1.3 \
     --overwrite
 ```
 
@@ -48,7 +48,7 @@ finishes, DSQL marks the index active in its catalog, and transactions using the
 schema at that moment fail with OC001. Because of the wait, the schema is settled
 when the tool returns, and the server can start straight away.
 
-The schema is one full baseline at version 1.2. The server requires that version;
+The schema is one full baseline at version 1.3. The server requires that version;
 a cluster that fails the version check needs a fresh schema. The region comes
 from `--region` or the endpoint's host name.
 
@@ -60,8 +60,8 @@ Alternatively, initialize only the version tables at 0.0, then apply the baselin
 ```
 
 For filesystem input, use `--schema-file schema/dsql/temporal/schema.sql` with the
-1.2 setup command, or `--schema-dir schema/dsql/temporal/versioned` with the update
-command. Both paths create the same tables and record version 1.2.
+1.3 setup command, or `--schema-dir schema/dsql/temporal/versioned` with the update
+command. Both paths create the same tables and record version 1.3.
 
 
 ### Visibility schema

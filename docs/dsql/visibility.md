@@ -59,7 +59,7 @@ These come from `EXPLAIN ANALYZE` on a cluster holding about 22,000 executions i
 - **Selective filters use their index.** A filter on an indexed column that matches a small part of the namespace, such as a workflow ID, a workflow type or a keyword value, reads only its matches. So do later pages once the rows left before the token are few.
 - **Counts read every matching row.** Unindexed filters read the rows the other filters select, so on a large namespace they're slow and cost DPUs.
 - **Memory:** a query can use at most 128 MiB.
-- **Value sizes:** the memo and the search attributes are each limited to 1 MiB, and an index key to 1 KiB, which a long multi-byte workflow ID or keyword value can reach.
+- **Value sizes:** the memo and the search attributes are each limited to 1 MiB.
 - **Connections:** the visibility pool counts towards the cluster's connection limit, and shares the process-wide connection rate limiter with the persistence pools.
 
 ## Tests

@@ -319,7 +319,7 @@ async fn go_steps(
         "--schema-name",
         "dsql/temporal",
         "--version",
-        "1.2",
+        "1.3",
     ]);
     print_step(&persistence, masker).await?;
 

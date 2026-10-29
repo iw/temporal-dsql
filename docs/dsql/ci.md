@@ -67,7 +67,7 @@ Edit `.dagger/modules/ci/src/lib.rs` or `Cargo.toml`, run `dagger generate`, and
 `.dagger/live` runs the plugin's integration tests (`-tags integration`) against real AWS resources:
 
 1. It creates an Aurora DSQL cluster and a DynamoDB table in the profile's region. Both are tagged `purpose=temporal-dsql-ci`, and the table is named `temporal-dsql-ci-<run>`.
-2. In the Dagger engine, it sets up the persistence schema at version 1.2 and the visibility schema at version 1.0 with `temporal-dsql-tool setup-schema`, which waits for the index builds.
+2. In the Dagger engine, it sets up the persistence schema at version 1.3 and the visibility schema at version 1.0 with `temporal-dsql-tool setup-schema`, which waits for the index builds.
 3. Also in the engine, it runs `go test -tags integration ./common/persistence/sql/sqlplugin/dsql/...` against them.
 4. It deletes the cluster and the table, whether the tests passed or not, and also when you stop it with Ctrl-C.
 

@@ -283,7 +283,9 @@ CREATE TABLE chasm_node_maps (
   namespace_id UUID NOT NULL,
   workflow_id VARCHAR(255) NOT NULL,
   run_id UUID NOT NULL,
-  chasm_path VARCHAR(255) NOT NULL,
+  -- Upstream uses BYTEA, which DSQL can't index. This is upstream MySQL's width, and it
+  -- fits DSQL's 2,000-byte key. The plugin stores NUL bytes escaped.
+  chasm_path VARCHAR(1536) NOT NULL,
 --
   metadata BYTEA NOT NULL,
   metadata_encoding VARCHAR(16),

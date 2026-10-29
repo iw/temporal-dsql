@@ -73,8 +73,8 @@ tools/poolsim/                     # pgxpool and DSQL simulation
 
 schema/dsql/temporal/
 ├── schema.sql                     # Full baseline
-└── versioned/v1.2/
-    ├── manifest.json              # Applies the full baseline at 1.2
+└── versioned/v1.3/
+    ├── manifest.json              # Applies the full baseline at 1.3
     └── schema.sql                 # Same schema for the update path
 ```
 
@@ -101,22 +101,23 @@ runIDStr := row.RunID.String()
 
 ### CHASM path limits
 
-`chasm_node_maps.chasm_path` uses `VARCHAR(255)` instead of upstream's `BYTEA`
-because DSQL cannot index `BYTEA` and the path is part of the primary key. The
-**encoded path must be at most 255 characters and contain no NUL characters**.
-The default CHASM path encoder prefixes `\`, `$`, and characters up to `#` with a
-backslash, retaining the original character. Escaping therefore increases the
-length and does not remove NUL characters, which text columns reject.
+`chasm_node_maps.chasm_path` is `VARCHAR(1536)` rather than upstream's `BYTEA`,
+because DSQL can't index `BYTEA` and the path is part of the primary key. 1,536
+is the width of upstream's MySQL column.
 
-A write outside these limits returns DSQL's own error. Core wraps errors from
-this writer as `Unavailable`, so Temporal retries the write. A plugin-side check
-alone would not make the failure final.
-
-DSQL has no `ALTER COLUMN ... TYPE` operation and caps the total primary key size
-across all columns at 1 KiB. Widening the path would require a separate design
-decision, rebuilding the table and copying rows in batches of fewer than 3,000;
-it cannot be done by widening the column in place. These limits remain tracked in
-[#47](https://github.com/iw/temporal-dsql/issues/47).
+- **NUL bytes:** the default CHASM path encoder prefixes `\`, `$`, and characters
+  up to `#` with a backslash, keeping the original character, so a NUL in a
+  node's key stays in its path. Text columns can't hold NUL, so the plugin stores
+  0x00 as 0x01 0x01 and 0x01 as 0x01 0x02, and reverses this when it reads.
+  Stored paths keep the encoder's byte order and prefixes.
+- **Key size:** DSQL limits a key to 2,000 bytes. When a table is created, it
+  adds up the declared widths of the key's columns, so beside the shard ID, the
+  two UUIDs and a `VARCHAR(255)` workflow ID, the path could be at most
+  `VARCHAR(1709)`. When a row is written, it checks the actual bytes. A path of
+  1,536 ASCII characters fits even beside a 255-character workflow ID, but a
+  path of multi-byte characters can be too long. That write fails with SQLSTATE
+  54000, which the plugin reports as a `TransactionSizeLimitError`. Core wraps
+  any error from this write as `Unavailable`, so Temporal retries it.
 
 ### Buffered Event IDs
 
