@@ -73,8 +73,19 @@ func NewPriorityRateLimiter(
 	hostRateFn := func() float64 { return float64(hostMaxQPS()) }
 
 	return quotas.NewMultiRequestRateLimiter(
-		// host-level dynamic rate limiter
-		newPriorityDynamicRateLimiter(
+		// host-level dynamic rate limiter: the existing per-priority health
+		// limiter, or the capacity controller when Capacity.Mode is "enabled"
+		newCapacityAwareRateLimiter(
+			newPriorityDynamicRateLimiter(
+				hostRateFn,
+				requestPriorityFn,
+				operatorRPSRatio,
+				burstRatio,
+				healthSignals,
+				dynamicParams,
+				metricsHandler,
+				logger,
+			),
 			hostRateFn,
 			requestPriorityFn,
 			operatorRPSRatio,
@@ -86,7 +97,7 @@ func NewPriorityRateLimiter(
 		),
 		// basic host-level rate limiter
 		newPriorityRateLimiter(
-			hostRateFn,
+			capacityCeilingFn(hostRateFn, dynamicParams),
 			requestPriorityFn,
 			operatorRPSRatio,
 			burstRatio,

@@ -153,8 +153,12 @@ impl Ci {
         }
         args.extend(packages.unwrap_or_else(|| {
             strings(&[
+                "./common/adaptive/...",
+                "./common/persistence",
+                "./common/persistence/client/...",
                 "./common/persistence/sql/...",
                 "./common/persistence/visibility/...",
+                "./common/stats/...",
                 "./schema/...",
                 "./tools/dsql/...",
                 "./tools/poolsim/...",

@@ -77,6 +77,54 @@ type DynamicRateLimitingParams struct {
 	RateMultiMin float64
 	// RateMultiMax is the maximum the rate limit multiplier can be increased to.
 	RateMultiMax float64
+	// Capacity configures the single per-host capacity controller. When
+	// Capacity.Mode is "disabled" (the default) behaviour is exactly as before.
+	Capacity CapacityControllerParams
+}
+
+// CapacityControllerParams is the envelope for the per-host persistence
+// capacity controller (common/adaptive/capacity). It replaces the per-priority
+// step controller above when Mode is "enabled". Note there is no latency
+// threshold in milliseconds: the target is learned from a p99 baseline.
+//
+// Requires system.persistenceHealthSignalPercentilesEnabled=true; without
+// latency samples the controller holds the static rate. A latency window of 1s
+// (system.persistenceHealthSignalLatencyWindowSize) is recommended so that
+// SignalWindows=3 gives a 3s signal; the effective cooldown is never shorter
+// than twice the signal span.
+type CapacityControllerParams struct {
+	// Mode is "disabled", "shadow" (run and report, apply the existing limiter)
+	// or "enabled". Requires Enabled=true on the parent struct.
+	Mode string
+	// MinMultiplier and MaxMultiplier bound the admitted rate relative to the
+	// static persistence MaxQPS. MaxMultiplier > 1 lets the controller use
+	// database headroom; the basic static limiter is raised to the same ceiling.
+	MinMultiplier float64
+	MaxMultiplier float64
+	// Tolerance: target p99 = learned baseline p99 x Tolerance, capped at
+	// LatencyCeiling (guards slow baseline drift), floored at LatencyFloor.
+	Tolerance      float64
+	LatencyCeiling time.Duration
+	LatencyFloor   time.Duration
+	// MaxErrorRatio of unhealthy errors that forces a decrease.
+	MaxErrorRatio float64
+	// On overload: cut to DeliveryBackoff x delivered throughput, never below
+	// MaxDecrease x current rate in one step, at most once per Cooldown.
+	MaxDecrease     float64
+	DeliveryBackoff float64
+	Cooldown        time.Duration
+	// While healthy and binding: grow by IncreaseFrac per step; near the last
+	// overload point the step ramps up from 10% to 100% over ProbeRamp.
+	IncreaseFrac float64
+	ProbeRamp    time.Duration
+	// BaselineWindow is how long the learned latency minimum is remembered.
+	BaselineWindow time.Duration
+	// StepInterval is the control period; SignalWindows is how many of the
+	// newest health signal latency windows form the signal.
+	StepInterval  time.Duration
+	SignalWindows int
+	// MinSamples below which the controller holds.
+	MinSamples int
 }
 
 var DefaultDynamicRateLimitingParams = DynamicRateLimitingParams{
@@ -88,6 +136,24 @@ var DefaultDynamicRateLimitingParams = DynamicRateLimitingParams{
 	RateIncreaseStepSize: 0.1,
 	RateMultiMin:         0.8,
 	RateMultiMax:         1.0,
+	Capacity: CapacityControllerParams{
+		Mode:            "disabled",
+		MinMultiplier:   0.05,
+		MaxMultiplier:   3.0,
+		Tolerance:       2.0,
+		LatencyCeiling:  750 * time.Millisecond,
+		LatencyFloor:    2 * time.Millisecond,
+		MaxErrorRatio:   0.01,
+		MaxDecrease:     0.5,
+		DeliveryBackoff: 0.9,
+		Cooldown:        6 * time.Second,
+		IncreaseFrac:    0.05,
+		ProbeRamp:       30 * time.Second,
+		BaselineWindow:  10 * time.Minute,
+		StepInterval:    time.Second,
+		SignalWindows:   3,
+		MinSamples:      50,
+	},
 }
 
 // ScheduleInvariantsScannerParams configures the schedule-invariants scanners. The three
