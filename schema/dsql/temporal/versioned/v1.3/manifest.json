@@ -1,6 +1,6 @@
 {
-  "CurrVersion": "1.2",
-  "MinCompatibleVersion": "1.2",
+  "CurrVersion": "1.3",
+  "MinCompatibleVersion": "1.3",
   "Description": "DSQL persistence baseline",
   "SchemaUpdateCqlFiles": ["schema.sql"]
 }

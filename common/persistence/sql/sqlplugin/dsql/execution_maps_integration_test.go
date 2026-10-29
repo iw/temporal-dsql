@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/persistence"
 	persistencesql "go.temporal.io/server/common/persistence/sql"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql"
@@ -102,6 +104,57 @@ func TestDSQLExecutionMapsIntegration(t *testing.T) {
 			require.ElementsMatch(t, nodes, gotNodes)
 		})
 	}
+}
+
+// CHASM paths can carry a NUL from a node's key and run to upstream MySQL's 1,536 bytes.
+// Both must survive a write, a read and a delete by path.
+func TestDSQLChasmPathsIntegration(t *testing.T) {
+	db, _ := newBehaviorIntegrationDB(t)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	shardID := int32(1_000_000_001) + rand.Int32N(999_999_999)
+	namespaceID, runID := primitives.NewUUID(), primitives.NewUUID()
+	workflowID := "chasm-path-test-" + primitives.NewUUID().String()
+	all := sqlplugin.ChasmNodeMapsAllFilter{ShardID: shardID, NamespaceID: namespaceID, WorkflowID: workflowID, RunID: runID}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+		defer cancel()
+		_, err := db.DeleteAllFromChasmNodeMaps(ctx, all)
+		require.NoError(t, err)
+	})
+	node := func(path string) sqlplugin.ChasmNodeMapsRow {
+		return sqlplugin.ChasmNodeMapsRow{
+			ShardID: shardID, NamespaceID: namespaceID, WorkflowID: workflowID, RunID: runID,
+			ChasmPath: path, Metadata: []byte("metadata"), MetadataEncoding: "Proto3",
+			Data: []byte("data"), DataEncoding: "Proto3",
+		}
+	}
+	nodes := []sqlplugin.ChasmNodeMapsRow{
+		node("Updates$" + strings.Repeat("u", 1528)),
+		node("IncomingSignals#request\\\x00id"),
+		node("IncomingSignals#request\\\x01id"),
+		node("Callbacks"),
+	}
+	_, err := db.ReplaceIntoChasmNodeMaps(ctx, nodes)
+	require.NoError(t, err)
+	got, err := db.SelectAllFromChasmNodeMaps(ctx, all)
+	require.NoError(t, err)
+	require.ElementsMatch(t, nodes, got)
+
+	_, err = db.DeleteFromChasmNodeMaps(ctx, sqlplugin.ChasmNodeMapsFilter{
+		ShardID: shardID, NamespaceID: namespaceID, WorkflowID: workflowID, RunID: runID,
+		ChasmPaths: []string{nodes[1].ChasmPath},
+	})
+	require.NoError(t, err)
+	got, err = db.SelectAllFromChasmNodeMaps(ctx, all)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []sqlplugin.ChasmNodeMapsRow{nodes[0], nodes[2], nodes[3]}, got)
+
+	// DSQL checks a key's actual bytes against its 2,000-byte limit when a row is written,
+	// so a path of multi-byte characters can still be too long.
+	_, err = db.ReplaceIntoChasmNodeMaps(ctx, []sqlplugin.ChasmNodeMapsRow{node(strings.Repeat("é", 1536))})
+	var sizeErr *persistence.TransactionSizeLimitError
+	require.ErrorAs(t, err, &sizeErr)
 }
 
 func newBehaviorIntegrationDB(t *testing.T) (sqlplugin.DB, config.SQL) {

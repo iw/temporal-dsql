@@ -791,6 +791,11 @@ func (pdb *db) SelectAllFromChasmNodeMaps(
 		rows[i].NamespaceID = filter.NamespaceID
 		rows[i].WorkflowID = filter.WorkflowID
 		rows[i].RunID = filter.RunID
+		path, err := decodeChasmPath(rows[i].ChasmPath)
+		if err != nil {
+			return nil, err
+		}
+		rows[i].ChasmPath = path
 	}
 
 	return rows, nil
@@ -822,7 +827,7 @@ func (pdb *db) ReplaceIntoChasmNodeMaps(
 			NamespaceID:      row.NamespaceID.String(),
 			WorkflowID:       row.WorkflowID,
 			RunID:            row.RunID.String(),
-			ChasmPath:        row.ChasmPath,
+			ChasmPath:        encodeChasmPath(row.ChasmPath),
 			Metadata:         row.Metadata,
 			MetadataEncoding: row.MetadataEncoding,
 			Data:             row.Data,
@@ -839,7 +844,7 @@ func (pdb *db) DeleteFromChasmNodeMaps(ctx context.Context, filter sqlplugin.Cha
 		filter.NamespaceID.String(),
 		filter.WorkflowID,
 		filter.RunID.String(),
-		filter.ChasmPaths,
+		encodeChasmPaths(filter.ChasmPaths),
 	)
 	if err != nil {
 		return nil, err
