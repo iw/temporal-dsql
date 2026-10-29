@@ -10,7 +10,45 @@ import (
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/metrics/metricstest"
 )
+
+func TestRecentSnapshotCountsStoreFacts(t *testing.T) {
+	handler := metricstest.NewCaptureHandler()
+	capture := handler.StartCapture()
+	t.Cleanup(func() { handler.StopCapture(capture) })
+	agg := NewHealthSignalAggregator(
+		true,
+		func() bool { return true },
+		time.Minute,
+		1000,
+		handler,
+		log.NewNoopLogger(),
+		time.Second,
+		10,
+	)
+	t.Cleanup(agg.emitMetricsTimer.Stop)
+
+	agg.ReportStoreFact(StoreFactThrottled, 2)
+	agg.ReportStoreFact(StoreFactContention, 1)
+	agg.ReportStoreFact(StoreFactQueued, 5)
+	agg.ReportStoreFact(StoreFactLimit, 0) // nothing to count
+	agg.ReportStoreFact(numStoreFacts, 1)  // not a fact
+	agg.Record(CallerSegmentMissing, 10*time.Millisecond, nil)
+
+	snap := agg.RecentSnapshot(3)
+	require.Equal(t, 2, snap.Throttled)
+	require.Equal(t, 1, snap.Contention)
+	require.Zero(t, snap.Limit)
+	require.Equal(t, 5, snap.Queued)
+	require.Equal(t, 1, snap.Samples)
+
+	recordings := capture.Snapshot()["persistence_store_facts"]
+	require.Len(t, recordings, 3)
+	require.Equal(t, int64(2), recordings[0].Value)
+	require.Equal(t, "throttled", recordings[0].Tags["fact"])
+	require.Equal(t, "queued", recordings[2].Tags["fact"])
+}
 
 func TestRecentSnapshotLeavesOutLimiterRejections(t *testing.T) {
 	agg := NewHealthSignalAggregator(

@@ -101,6 +101,11 @@ func NewFactory(
 		enableDataLossMetrics: dynamicconfig.BoolPropertyFn(enableDataLossMetrics),
 		enableBestEffortDeleteTasksOnWorkflowUpdate: dynamicconfig.BoolPropertyFn(enableBestEffortDeleteTasksOnWorkflowUpdate),
 	}
+	// A plugin that reports what its store did passes its facts to the health signals,
+	// which the persistence capacity controller reads.
+	if receiver, ok := dataStoreFactory.(persistence.StoreFactsReceiver); ok && healthSignals != nil {
+		receiver.SetStoreFacts(healthSignals)
+	}
 	factory.initDependencies()
 	return factory
 }

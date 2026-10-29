@@ -1669,6 +1669,10 @@ var (
 	)
 	PersistenceShardRPS                    = NewDimensionlessHistogramDef("persistence_shard_rps")
 	PersistenceErrResourceExhaustedCounter = NewCounterDef("persistence_errors_resource_exhausted")
+	PersistenceStoreFacts                  = NewCounterDef(
+		"persistence_store_facts",
+		WithDescription("Typed facts persistence plugins report about their stores, keyed by `fact`: throttled, contention, limit or queued"),
+	)
 	VisibilityPersistenceRequests          = NewCounterDef("visibility_persistence_requests")
 	VisibilityPersistenceErrorWithType     = NewCounterDef("visibility_persistence_error_with_type")
 	VisibilityPersistenceFailures          = NewCounterDef("visibility_persistence_errors")
