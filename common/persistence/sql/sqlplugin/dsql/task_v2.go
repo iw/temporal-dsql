@@ -22,10 +22,19 @@ const (
 		`tasks_v2 ( range_hash,  task_queue_id,  task_id,       pass,  data,  data_encoding) ` +
 		`VALUES   (:range_hash, :task_queue_id, :task_id, :task_pass, :data, :data_encoding)`
 
-	rangeDeleteTaskV2Qry = `DELETE FROM tasks_v2 ` +
-		`WHERE range_hash = $1 AND task_queue_id = $2 AND task_id IN (SELECT task_id FROM ` +
-		`tasks_v2 WHERE range_hash = $1 AND task_queue_id = $2 AND (pass, task_id) < ($3, $4) ` +
-		`ORDER BY task_queue_id,pass,task_id LIMIT $5 )`
+	// As for tasks, the delete reads only the key range of the batch it removes. DSQL
+	// applies row comparisons as filters, so plain bounds on pass limit both scans.
+	rangeDeleteTaskV2Qry = `WITH batch AS (` +
+		`SELECT pass, task_id FROM tasks_v2 ` +
+		`WHERE range_hash = $1 AND task_queue_id = $2 AND pass <= $3 AND (pass, task_id) < ($3, $4) ` +
+		`ORDER BY pass, task_id LIMIT $5), ` +
+		`first_task AS (SELECT pass, task_id FROM batch ORDER BY pass, task_id LIMIT 1), ` +
+		`last_task AS (SELECT pass, task_id FROM batch ORDER BY pass DESC, task_id DESC LIMIT 1) ` +
+		`DELETE FROM tasks_v2 ` +
+		`WHERE range_hash = $1 AND task_queue_id = $2 ` +
+		`AND pass >= (SELECT pass FROM first_task) AND pass <= (SELECT pass FROM last_task) ` +
+		`AND (pass, task_id) >= (SELECT pass, task_id FROM first_task) ` +
+		`AND (pass, task_id) <= (SELECT pass, task_id FROM last_task)`
 )
 
 type tasksV2InsertRow struct {

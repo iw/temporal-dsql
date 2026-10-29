@@ -223,6 +223,8 @@ V1 queue deletion preserves an exclusive lower and inclusive upper bound. V2 inc
 
 Matching's task cleanup deletes one batch per call: core passes an exclusive upper `task_id` and a limit, `matching.maxTaskDeleteBatchSize` (100 by default), under a 5-second timeout. The statement reads the batch's lowest and highest `task_id` with one limited scan, then deletes that key range, so its plan has no join. With upstream's `task_id IN (subquery)` form, DSQL can plan a nested loop that reruns the subquery for every row in the queue. It does so while a queue is missing from the table statistics, as a new worker's sticky queue is. Each rerun is a storage round trip, and a 100-row cleanup on a 5,000-row queue took 8 seconds.
 
+Fair queues, in `tasks_v2` when `matching.enableFairness` is on, order tasks by `(pass, task_id)`. Their cleanup finds the batch's first and last task in the same way and deletes the tasks between them. DSQL applies row comparisons as filters, so plain bounds on `pass` limit both scans. The delete reads and skips any later tasks that share the batch's last pass.
+
 ## IAM Authentication
 
 ### BeforeConnect
