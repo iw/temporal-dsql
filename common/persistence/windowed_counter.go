@@ -5,9 +5,10 @@ import (
 	"time"
 )
 
-// windowedCounter counts requests, unhealthy errors and store facts in fixed time
-// windows aligned with the latency t-digest windows, so error ratio, throughput and
-// facts can be read over exactly the same span as the latency quantile.
+// windowedCounter counts requests, unhealthy errors, the persistence rate limiter's
+// rejections and store facts in fixed time windows aligned with the latency t-digest
+// windows, so error ratio, throughput and facts can be read over exactly the same span
+// as the latency quantile.
 type windowedCounter struct {
 	mu      sync.Mutex
 	size    time.Duration
@@ -21,8 +22,8 @@ type counterBucket struct {
 
 // windowCounts are the counts in one window, or summed over several.
 type windowCounts struct {
-	total, errors uint64
-	facts         [numStoreFacts]uint64
+	total, errors, rejected uint64
+	facts                   [numStoreFacts]uint64
 }
 
 func newWindowedCounter(size time.Duration, count int) *windowedCounter {
@@ -37,6 +38,12 @@ func (c *windowedCounter) record(now time.Time, unhealthy bool) {
 	if unhealthy {
 		b.errors++
 	}
+}
+
+func (c *windowedCounter) recordRejected(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bucket(now).rejected++
 }
 
 func (c *windowedCounter) recordFact(now time.Time, fact StoreFact, count uint64) {
@@ -67,6 +74,7 @@ func (c *windowedCounter) sum(now time.Time, n int) (counts windowCounts, span t
 		if b := c.buckets[w%int64(len(c.buckets))]; b.window == w {
 			counts.total += b.total
 			counts.errors += b.errors
+			counts.rejected += b.rejected
 			for fact, count := range b.facts {
 				counts.facts[fact] += count
 			}

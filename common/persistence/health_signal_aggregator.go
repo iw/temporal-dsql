@@ -61,6 +61,9 @@ type (
 		// host's schedulers over the same span, and ScheduleSamples how many it covers.
 		ScheduleP90     time.Duration
 		ScheduleSamples int
+		// Rejected counts the calls the persistence rate limiter rejected over the same
+		// span. They're left out of the other fields.
+		Rejected int
 	}
 
 	healthSignalAggregatorImpl struct {
@@ -181,10 +184,14 @@ func (s *healthSignalAggregatorImpl) record(callerSegment int32, latency time.Du
 		// The rate limiter's own rejections never reach the store. Counted here, they
 		// would read as fast, delivered work exactly when the capacity controller's
 		// limit binds, so the windows its snapshot reads leave them out.
-		if s.percentilesEnabled() && s.latencyDistribution != nil && !isPersistenceLimitRejection(err) {
+		if s.percentilesEnabled() && s.latencyDistribution != nil {
 			now := time.Now()
-			s.latencyDistribution.Record(float64(latency.Milliseconds()), now)
-			s.counters.record(now, unhealthy || deadlinePassed)
+			if isPersistenceLimitRejection(err) {
+				s.counters.recordRejected(now)
+			} else {
+				s.latencyDistribution.Record(float64(latency.Milliseconds()), now)
+				s.counters.record(now, unhealthy || deadlinePassed)
+			}
 		}
 
 		if unhealthy {
@@ -246,6 +253,7 @@ func (s *healthSignalAggregatorImpl) RecentSnapshot(windows int) HealthSnapshot 
 		Limit:             int(counts.facts[StoreFactLimit]),
 		Queued:            int(counts.facts[StoreFactQueued]),
 		Acquired:          int(counts.facts[StoreFactAcquired]),
+		Rejected:          int(counts.rejected),
 	}
 	if counts.total > 0 {
 		snap.ErrorRatio = float64(counts.errors) / float64(counts.total)

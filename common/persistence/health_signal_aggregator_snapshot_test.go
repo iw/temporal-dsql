@@ -144,6 +144,7 @@ func TestRecentSnapshotLeavesOutLimiterRejections(t *testing.T) {
 	require.Equal(t, 100, snap.Samples)
 	require.InDelta(t, float64(20*time.Millisecond), float64(snap.P99), float64(time.Millisecond))
 	require.Zero(t, snap.ErrorRatio)
+	require.Equal(t, 300, snap.Rejected, "counted apart")
 
 	// The per-priority health limiters still see every call.
 	require.InDelta(t, 5.0, agg.AverageLatency(), 0.001)
