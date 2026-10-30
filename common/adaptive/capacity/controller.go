@@ -63,8 +63,9 @@ type Envelope struct {
 	// the store reports as throttled, that triggers a decrease regardless of latency.
 	MaxErrorRatio float64
 
-	// MaxQueuedRatio of calls that waited for one of the store plugin's
-	// connections that triggers a decrease: the plugin's own pool is short.
+	// MaxQueuedRatio of the store plugin's connection acquires that had to wait
+	// for a free connection, which triggers a decrease: the plugin's own pool is
+	// short.
 	MaxQueuedRatio float64
 
 	// MaxDecrease is the smallest multiplicative factor applied in one
@@ -125,7 +126,7 @@ type Signals struct {
 	// then relies on them and on timeouts, and runs the latency law only in shadow.
 	FactsReported  bool
 	ThrottledRatio float64 // calls the store reported as throttled / requests
-	QueuedRatio    float64 // calls that waited for a plugin connection / requests
+	QueuedRatio    float64 // plugin connection acquires that waited / all acquires
 }
 
 // Reason explains a decision; emit it as a metric tag, as matching does for

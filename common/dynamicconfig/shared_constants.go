@@ -109,9 +109,9 @@ type CapacityControllerParams struct {
 	// MaxErrorRatio of unhealthy errors, plus calls the store reports as
 	// throttled, that forces a decrease.
 	MaxErrorRatio float64
-	// MaxQueuedRatio of calls that waited for one of the store plugin's
-	// connections that forces a decrease. It applies only to stores whose plugins
-	// report queued facts.
+	// MaxQueuedRatio of the store plugin's connection acquires that had to wait
+	// for a free connection, which forces a decrease. It applies only to stores
+	// whose plugins report queued facts.
 	MaxQueuedRatio float64
 	// On overload: cut to DeliveryBackoff x delivered throughput, never below
 	// MaxDecrease x current rate in one step, at most once per Cooldown.

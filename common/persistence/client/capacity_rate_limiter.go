@@ -162,8 +162,8 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 		Samples:        snap.Samples,
 		Binding:        l.denied.Swap(false),
 		FactsReported:  snap.StoreReportsFacts,
-		ThrottledRatio: perRequest(snap.Throttled, snap.Samples),
-		QueuedRatio:    perRequest(snap.Queued, snap.Samples),
+		ThrottledRatio: ratio(snap.Throttled, snap.Samples),
+		QueuedRatio:    ratio(snap.Queued, snap.Acquired),
 	})
 
 	if mode == capacityModeEnabled {
@@ -205,6 +205,7 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 			tag.Float64("errorRatio", snap.ErrorRatio),
 			tag.NewInt("throttled", snap.Throttled),
 			tag.NewInt("queued", snap.Queued),
+			tag.NewInt("acquired", snap.Acquired),
 		)
 	}
 	if d.LatencyShadow && !l.lastShadow {
@@ -231,12 +232,12 @@ func isDecrease(reason capacity.Reason) bool {
 	}
 }
 
-// perRequest is count per request recorded over the same span.
-func perRequest(count, requests int) float64 {
-	if requests <= 0 {
+// ratio is count / total, both recorded over the same span, or 0 without a total.
+func ratio(count, total int) float64 {
+	if total <= 0 {
 		return 0
 	}
-	return float64(count) / float64(requests)
+	return float64(count) / float64(total)
 }
 
 func (l *capacityAwareRateLimiter) priorityFactor(priority int) float64 {

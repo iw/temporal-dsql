@@ -15,6 +15,10 @@ const (
 	StoreFactLimit
 	// StoreFactQueued means a caller waited for one of the plugin's connections.
 	StoreFactQueued
+	// StoreFactAcquired means a caller took one of the plugin's connections, whether or
+	// not it waited. A plugin that reports queued facts reports these too, and core reads
+	// queued facts as a share of them.
+	StoreFactAcquired
 
 	numStoreFacts
 )
@@ -45,6 +49,8 @@ func (f StoreFact) String() string {
 		return "limit"
 	case StoreFactQueued:
 		return "queued"
+	case StoreFactAcquired:
+		return "acquired"
 	default:
 		return "unknown"
 	}

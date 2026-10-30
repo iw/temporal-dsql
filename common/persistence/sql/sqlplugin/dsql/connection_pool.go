@@ -34,10 +34,10 @@ const (
 	poolHealthCheckPeriod     = time.Minute
 	connectionAttemptLimit    = 8
 	// EphemeralPoolSize bounds short-lived startup pools.
-	EphemeralPoolSize   = 5
-	poolPingTimeout     = 30 * time.Second
-	poolMetricsInterval = 15 * time.Second
-	queuedFactsInterval = time.Second
+	EphemeralPoolSize    = 5
+	poolPingTimeout      = 30 * time.Second
+	poolMetricsInterval  = 15 * time.Second
+	acquireFactsInterval = time.Second
 )
 
 var (
@@ -154,17 +154,21 @@ func (c *poolConnector) Close() error {
 	return nil
 }
 
-// reportQueuedFacts samples the pool's empty acquires for queued facts until the
+// reportAcquireFacts samples the pool's acquires for acquired and queued facts until the
 // connector closes.
-func (c *poolConnector) reportQueuedFacts(facts *storeFacts) {
+func (c *poolConnector) reportAcquireFacts(facts *storeFacts) {
 	if facts == nil {
 		return
 	}
 	c.factsDone = make(chan struct{})
-	start := c.pool.Stat().EmptyAcquireCount()
+	sample := func() acquireCounts {
+		stat := c.pool.Stat()
+		return acquireCounts{acquired: stat.AcquireCount(), queued: stat.EmptyAcquireCount()}
+	}
+	start := sample()
 	go func() {
 		defer close(c.factsDone)
-		reportQueuedFacts(c.ctx, facts, queuedFactsInterval, start, func() int64 { return c.pool.Stat().EmptyAcquireCount() })
+		reportAcquireFacts(c.ctx, facts, acquireFactsInterval, start, sample)
 	}()
 }
 

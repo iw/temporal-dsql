@@ -110,25 +110,33 @@ func TestStoreFactsWithoutASink(t *testing.T) {
 	require.Error(t, pdb.maybeConvertError(&pgconn.PgError{Code: "53400"}))
 }
 
-func TestReportQueuedFactsReportsNewEmptyAcquires(t *testing.T) {
+func TestReportAcquireFactsReportsNewAcquires(t *testing.T) {
 	facts := &storeFacts{}
 	recorded := &recordedFacts{}
 	facts.set(recorded)
-	var emptyAcquires atomic.Int64
-	emptyAcquires.Store(5) // waits before sampling started aren't reported
+	// Acquires before sampling started aren't reported.
+	start := acquireCounts{acquired: 9, queued: 5}
+	var acquired, queued atomic.Int64
+	acquired.Store(start.acquired)
+	queued.Store(start.queued)
+	sample := func() acquireCounts {
+		return acquireCounts{acquired: acquired.Load(), queued: queued.Load()}
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		reportQueuedFacts(ctx, facts, time.Millisecond, 5, emptyAcquires.Load)
+		reportAcquireFacts(ctx, facts, time.Millisecond, start, sample)
 	}()
-	emptyAcquires.Add(3)
+	acquired.Add(10)
+	queued.Add(3)
+	want := map[persistence.StoreFact]int64{persistence.StoreFactAcquired: 10, persistence.StoreFactQueued: 3}
 	await.RequireTrue(t, func() bool {
-		return recorded.snapshot()[persistence.StoreFactQueued] == 3
+		return maps.Equal(recorded.snapshot(), want)
 	}, 5*time.Second, time.Millisecond)
 
 	cancel()
 	<-done
-	require.Equal(t, map[persistence.StoreFact]int64{persistence.StoreFactQueued: 3}, recorded.snapshot())
+	require.Equal(t, want, recorded.snapshot())
 }

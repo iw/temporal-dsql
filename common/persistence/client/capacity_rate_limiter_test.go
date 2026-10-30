@@ -221,6 +221,28 @@ func TestCapacityLimiterActsOnStoreFacts(t *testing.T) {
 	require.Equal(t, []string{"idle", "throttled"}, f.decisions())
 }
 
+func TestCapacityLimiterReadsQueuedFactsAsAShareOfAcquires(t *testing.T) {
+	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f.signals.snapshot.StoreReportsFacts = true
+	f.allowAfter(0)
+
+	// 400 queued facts against 1000 calls, but the calls took 4000 connections, so a
+	// tenth of the acquires waited.
+	f.signals.snapshot = persistence.HealthSnapshot{
+		P99: 10 * time.Millisecond, Samples: 1000, Throughput: 600, StoreReportsFacts: true,
+		Queued: 400, Acquired: 4000,
+	}
+	f.allowAfter(time.Second)
+	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+
+	// Three tenths of the acquires waited.
+	f.signals.snapshot.Queued = 1200
+	f.allowAfter(time.Second)
+
+	require.InDelta(t, 540, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+	require.Equal(t, []string{"idle", "idle", "queued"}, f.decisions())
+}
+
 func TestCapacityLimiterRunsLatencyInShadowForStoresWithFacts(t *testing.T) {
 	f := newCapacityLimiterFixture(t, capacityModeEnabled)
 	f.signals.snapshot.StoreReportsFacts = true
