@@ -66,6 +66,10 @@ This applies to any store.
 
 The class names belong to Temporal, not DSQL, so another store's plugin can report the same classes.
 
+**Timeouts are recognised by the call's deadline.** SQL stores return a query that its deadline interrupted as `Unavailable`, with the deadline only in the message, for example `GetWorkflowExecution: failed to get timer info. Error: timeout: context deadline exceeded`. So the type of the error doesn't show the timeout.
+- The persistence metrics client records each call with its own context, through `RecordCall`. A call that fails after its deadline has passed counts as a timeout in the controller's windows, whatever error the store returned.
+- The average and error ratio that the per-priority health limiters and the deep health check read still go by the error itself.
+
 ### 3. Report facts beside the error
 
 The facts shouldn't change the errors callers see. Today `ResourceExhausted` drives client backoff and history's task rescheduling, and a new type or cause would change both.
@@ -118,6 +122,11 @@ The plugin reports each failed call once, where it already converts the error. I
 `txExecute` is core code from the fork's patch set, and its retry policy belongs to the plugin. The plugin reports contention where its retries run out.
 
 AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection rate and 53300 for the connection count. Its other codes are fixed limits. Nothing throttles query throughput, so on DSQL these facts and Temporal's timeouts cover every documented constraint.
+
+**The plugin's own pacing shows up as queued facts.** The first row rarely fires. pgx's pool (puddle) builds a new connection in a goroutine whose context the caller's deadline doesn't cancel. So `beforeConnect` waits on the pacing without that deadline.
+- A caller whose deadline passes gives up on the pool and counts as queued, or as a timeout.
+- The pacing wait fails only if the pool closes during it, at shutdown.
+- On DSQL, throttled facts come from DSQL's own refusals.
 
 ### 5. How the controller uses the facts
 
