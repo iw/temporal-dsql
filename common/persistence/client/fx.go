@@ -6,6 +6,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 	"go.temporal.io/api/serviceerror"
+	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/cluster"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -35,6 +36,7 @@ type (
 
 	EnableDataLossMetrics                       dynamicconfig.BoolPropertyFn
 	EnableBestEffortDeleteTasksOnWorkflowUpdate dynamicconfig.BoolPropertyFn
+	AdaptiveFrozen                              dynamicconfig.BoolPropertyFn
 
 	ClusterName string
 
@@ -55,6 +57,7 @@ type (
 		Logger                                      log.Logger
 		HealthSignals                               persistence.HealthSignalAggregator
 		DynamicRateLimitingParams                   DynamicRateLimitingParams
+		AdaptiveFrozen                              AdaptiveFrozen
 		EnableDataLossMetrics                       EnableDataLossMetrics
 		EnableBestEffortDeleteTasksOnWorkflowUpdate EnableBestEffortDeleteTasksOnWorkflowUpdate
 		Serializer                                  serialization.Serializer
@@ -82,6 +85,7 @@ var Module = fx.Options(
 	fx.Provide(EventBlobCacheProvider),
 	fx.Provide(EnableDataLossMetricsProvider),
 	fx.Provide(EnableBestEffortDeleteTasksOnWorkflowUpdateProvider),
+	fx.Provide(AdaptiveFrozenProvider),
 )
 
 func ClusterNameProvider(config *cluster.Config) ClusterName {
@@ -112,6 +116,12 @@ func EnableBestEffortDeleteTasksOnWorkflowUpdateProvider(
 	return EnableBestEffortDeleteTasksOnWorkflowUpdate(dynamicconfig.EnableBestEffortDeleteTasksOnWorkflowUpdate.Get(dc))
 }
 
+func AdaptiveFrozenProvider(
+	dc *dynamicconfig.Collection,
+) AdaptiveFrozen {
+	return AdaptiveFrozen(adaptive.Frozen.Get(dc))
+}
+
 func FactoryProvider(
 	params NewFactoryParams,
 ) Factory {
@@ -124,6 +134,7 @@ func FactoryProvider(
 			params.PersistenceBurstRatio,
 			params.HealthSignals,
 			params.DynamicRateLimitingParams,
+			params.AdaptiveFrozen,
 			params.MetricsHandler,
 			params.Logger,
 		)

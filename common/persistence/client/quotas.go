@@ -1,6 +1,7 @@
 package client
 
 import (
+	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/headers"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/metrics"
@@ -67,11 +68,12 @@ func NewPriorityRateLimiter(
 	burstRatio PersistenceBurstRatio,
 	healthSignals p.HealthSignalAggregator,
 	dynamicParams DynamicRateLimitingParams,
+	frozen AdaptiveFrozen,
 	metricsHandler metrics.Handler,
 	logger log.Logger,
 ) quotas.RequestRateLimiter {
 	hostRateFn := func() float64 { return float64(hostMaxQPS()) }
-	rolloutKey := hostRolloutKey()
+	rolloutKey := adaptive.HostKey()
 
 	return quotas.NewMultiRequestRateLimiter(
 		// host-level dynamic rate limiter: the existing per-priority health
@@ -93,6 +95,7 @@ func NewPriorityRateLimiter(
 			burstRatio,
 			healthSignals,
 			dynamicParams,
+			frozen,
 			metricsHandler,
 			logger,
 			rolloutKey,
