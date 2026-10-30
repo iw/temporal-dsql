@@ -286,7 +286,7 @@ With one default config, the proposed controller kept simulated API errors at 0.
 
 ![simulation runs, adaptive-persistence-sim · 6 scenarios × 4 limiters](adaptive-behaviour/simulation-api-errors.svg)
 
-Oracle-tuned legacy won only on trace B with the fast 3 ms database. Legacy with default settings matches static on trace A, because its 20% maximum cut cannot reach 1,800 ops/s, a 40% cut from the 3,000 static limit. A threshold that suits one database breaks another: 10 ms works on the 3 ms database but throttles the 15 and 60 ms databases to 10% of static, giving 79% API errors.
+Oracle-tuned legacy won only on trace B with the fast 3 ms database. Legacy with default settings matches static on trace A, because its 20% maximum cut cannot reach 1,800 ops/s, a 40% cut from the 3,000 static limit. A threshold that suits one database breaks another: 10 ms works on the 3 ms database but throttles the 15 and 60 ms databases to 10% of static, giving 79% API errors. The legacy points leave the limiter's own rejections out of its average, though v1.32.1 records them. With them recorded, the proposed controller is lower in all six scenarios ([Store facts](adaptive-store-facts.md#simulator-runs)).
 
 ![simulation run, trace A, 15 ms DB · 1,200 s in 20 s means](adaptive-behaviour/simulation-trace-a-goodput.svg)
 

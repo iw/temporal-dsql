@@ -32,7 +32,7 @@ This has two consequences:
 
 - **Cuts that don't take effect.** On overload, the controller cuts to 90% of delivered throughput, and never above its current rate.
   - While the limit binds, delivered throughput includes the limiter's own rejections, so 90% of it can exceed the current rate, and the cut does nothing.
-  - The simulator assumed rejections aren't recorded, so it doesn't show this.
+  - The original simulator runs assumed rejections aren't recorded, so they don't show this. With rejections recorded, the six scenarios' API errors rise from 0.5–3.4% to 18–29% ([Simulator runs](#simulator-runs)).
 - **Inference instead of facts.** On DSQL, latency is the controller's only overload signal. So it infers the store's health from latency, while the plugin, which knows DSQL's rules, stays silent.
 
 ## The principle
@@ -158,9 +158,10 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
   - the aggregator's fact counts per window;
   - the controller cutting on throttled facts but not on contention.
 - **Plugin tests:** each DSQL path reports its fact once, using the overlay and fake-driver technique from the October review.
-- **Simulator:**
-  - Without facts, the controller's simulator results match the original controller byte for byte.
-  - The simulator doesn't yet model the host recording the limiter's rejections, or a source of throttled facts. Once it does, rerun the six scenarios.
+- **Simulator:** rerun on 30 October 2026, in [Simulator runs](#simulator-runs).
+  - Without facts, the branch's controller reproduces the original outputs byte for byte, built as they were, without fused multiply-add. Go fuses multiply-adds on arm64, which moves trace A's proposed runs late in the run, for both controllers.
+  - The simulator now models the host recording the limiter's rejections, a store that throttles, and the plugin's pool with its queued and acquired facts.
+  - The figures in [adaptive-behaviour.md](adaptive-behaviour.md#evidence-from-the-phase-1-prototype): the proposed controller's and static's points hold. The legacy points would change, because v1.32.1's legacy limiters read the limiter's rejections too.
 - **Live:** run in shadow mode on a throwaway cluster, with `maxConns` and the connection rate set low enough to cause throttling. The decisions it logs show whether the controller hears DSQL.
 
 ## Shadow runs
@@ -196,7 +197,58 @@ In October 2026 the controller ran in shadow mode three times: it made and recor
 
 **What they show:** queued facts catch a short pool within seconds, where the latency law can miss it. With a healthy pool, the facts made no cuts.
 
-**What they don't cover:** store-side overload. From a laptop, history's shard writes reach their limit long before DSQL does, so throttled facts have no live evidence yet. Whether the latency law can go for stores that report facts, as [section 5](#5-how-the-controller-uses-the-facts) proposes, waits on the simulator testing them.
+**What they don't cover:** store-side overload. From a laptop, history's shard writes reach their limit long before DSQL does, so throttled facts have no live evidence yet. Whether the latency law can go for stores that report facts, as [section 5](#5-how-the-controller-uses-the-facts) proposes, is what the [simulator runs](#simulator-runs) test.
+
+## Simulator runs
+
+On 30 October 2026 the controller's simulator was rerun with the branch's controller. The simulator is the fluid model of one history host behind [adaptive-behaviour.md's figures](adaptive-behaviour.md#evidence-from-the-phase-1-prototype), and is kept outside this repository. It now also models:
+- the host recording the persistence limiter's rejections as fast, completed calls, as before fix 1, or leaving them out of the controller's windows, as after it;
+- a store that throttles. It accepts calls up to the trace's capacity and refuses the rest at once, whatever their priority. It serves 1.25 times that rate, so its latency stays flat;
+- the plugin's pool. Each call holds a connection for its time in the store, over 1.7 acquires, so a store that slows down fills the pool. The plugin samples acquired and queued facts once a second;
+- a plugin that declares facts. The controller holds throttled facts and timeouts to `MaxErrorRatio` and the queued share to `MaxQueuedRatio`, and runs the latency law in shadow.
+
+API errors as a share of API calls, across the six scenarios, or across the three store latencies of each other case:
+
+| Case | Without facts | With facts |
+|---|---|---|
+| Six scenarios, before fix 1 | 18–29% | |
+| Six scenarios, nothing to report | 0.5–3.4% | 3.0–7.4% |
+| Six scenarios, a pool with 1.25 or 2 times the connections the store's capacity needs | 0.5–3.4% | 0.7–3.5% |
+| Six scenarios, a pool with 5 times the connections it needs | 0.5–3.4% | 0.55–5.1% |
+| A store that throttles | 19–20%, static 9.5–11.7% | 0.4–0.9% |
+| A pool that carries 90% of the load at rest | 0%, static 99% | 0% |
+| A pool that's short only during the burst | 0% | 0% |
+
+**What they show:**
+- **Fix 1 lets cuts take effect.** Before it, a binding limit's rejections count as delivered throughput, so a cut leaves the rate where it is. The original simulator runs assumed fix 1.
+- **Throttled facts are worth acting on.** A store that throttles keeps its latency, so without facts the controller hears nothing.
+  - It raises its limit, and background retries crowd API calls out of a store that doesn't know their priority, so API errors are above static's.
+  - With facts, it cuts 1 s after a drop and stays below the store's limit, so the limiter's priorities decide what waits. Goodput is 3,114–3,122 calls a second, against static's 2,649–2,713.
+- **Queued facts track a store that slows down, and how early depends on the pool.**
+  - With pools 1.25 or 2 times what the store needs, queued facts tripped before the latency law: at 80–88% of the store's capacity, against 89–91%, at 15 ms. API errors stayed close, and bursts drained more slowly: trace B's in 800–1,080 s, against 235–780 s.
+  - With pools 5 times that, they tripped after it, at 94–99%. On trace B at 60 ms, a pool of 1,509 connections didn't fill on the low plateau, so timeouts did the cutting there, and API errors were 5.1%.
+  - With nothing to report, timeouts alone cut later than the latency law did.
+- **A short pool.** With the pool short from the start, queued facts cut 1 s into the load and the latency law 3–5 s, and no API call failed either way.
+  - The queued share reaches 0.25 well before a pool is full. By Erlang C that's at 70% utilisation for 9 connections and 93% for 189.
+  - So with facts, the host got 67–89% of the pool's capacity, against 91–97% with the latency law.
+- **When each law would cut.** On trace A's drop, the latency law's condition held 1 s after it, timeouts 1–3 s and queued facts 2 s, since the plugin samples its pool once a second. With facts declared, the latency law would have cut:
+  - on 72–880 steps with nothing to report;
+  - on 0–26 with the smaller pools, and 74–260 with the larger ones;
+  - on none on the throttling store, and at most one on a short pool.
+
+**What they don't cover:**
+- The load is open loop, so a short pool's queue grows and latency rises with it. In the shadow run with 20 connections, latency held steady and the latency law never fired.
+- Background work that's rejected or throttled is offered again each tick, up to its drain cap. That overstates retries before fix 1, and on the throttling store without facts.
+- The throttling store throttles before it queues. A store that did both would show in latency too.
+- `MaxQueuedRatio` counts acquires that waited at all, however briefly. pgx also reports `EmptyAcquireWaitTime`, which would weigh waits by their length. Whether that suits small pools better is open.
+
+**The figures in [adaptive-behaviour.md](adaptive-behaviour.md#evidence-from-the-phase-1-prototype):**
+- The proposed controller's and static's points still hold, byte for byte.
+- The legacy points assumed that the per-priority limiters' average leaves out the limiter's own rejections. v1.32.1 records them, as fast and healthy calls, and fix 1 leaves that as it is. With them recorded:
+  - legacy with default settings moves by under a point;
+  - oracle-tuned legacy gives 2.2, 5.2 and 9.9% on trace A, against 7.95, 14.21 and 16.57%, and 3.7, 7.3 and 7.9% on trace B, against 1.00, 3.78 and 6.92%;
+  - the proposed controller is lower in all six scenarios, where the figure has it lower in five.
+- Neither figure has been regenerated.
 
 ## Decisions
 
