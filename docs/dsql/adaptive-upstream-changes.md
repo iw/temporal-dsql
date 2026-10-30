@@ -8,8 +8,8 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 
 | File | Change and reason |
 | --- | --- |
-| `common/dynamicconfig/shared_constants.go` | `DynamicRateLimitingParams` gains `Capacity`, the controller's envelope. Its `Mode` is disabled by default. |
-| `common/persistence/client/quotas.go` | `NewPriorityRateLimiter` wraps the per-priority health limiters in the capacity-aware limiter. The basic limiter's rate comes from `capacityCeilingFn`. |
+| `common/dynamicconfig/shared_constants.go` | `DynamicRateLimitingParams` gains `Capacity`, the controller's envelope. Its `Mode` is disabled by default, and its `RolloutPercent`, 100 by default, is the share of hosts that apply an enabled `Mode`. |
+| `common/persistence/client/quotas.go` | `NewPriorityRateLimiter` wraps the per-priority health limiters in the capacity-aware limiter. The basic limiter's rate comes from `capacityCeilingFn`. Both take the host's rollout key, its hostname. |
 | `common/persistence/client/factory.go` | `NewFactory` hands the health signal aggregator to a data store factory that accepts store facts. |
 | `common/persistence/health_signal_aggregator.go` | The aggregator gains `RecentSnapshot`, `RecordCall` and `RecordScheduleLatency`, and implements `StoreFacts`. The snapshot leaves out the persistence limiter's own rejections, counts a call that failed after its deadline as a timeout, and leaves calls the store reports as throttled out of delivered throughput. It also reports the p90 of how long history task attempts waited in their schedulers. |
 | `common/persistence/noop_health_signal_aggregator.go` | The no-op aggregator implements the new methods. |

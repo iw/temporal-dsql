@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -69,6 +70,7 @@ func newCapacityLimiterFixture(t *testing.T, mode string) *capacityLimiterFixtur
 		func() dynamicconfig.DynamicRateLimitingParams { return f.params },
 		handler,
 		log.NewNoopLogger(),
+		[]byte("test-host"),
 	)
 	return f
 }
@@ -187,20 +189,25 @@ func TestCapacityCeiling(t *testing.T) {
 		enabled       bool
 		mode          string
 		maxMultiplier float64
+		outsideCohort bool
 		want          float64
 	}{
-		"default":                  {mode: capacityModeDisabled, maxMultiplier: 3, want: testHostRPS},
-		"shadow":                   {enabled: true, mode: capacityModeShadow, maxMultiplier: 3, want: testHostRPS},
-		"enabled":                  {enabled: true, mode: capacityModeEnabled, maxMultiplier: 3, want: 3 * testHostRPS},
-		"enabled, no headroom":     {enabled: true, mode: capacityModeEnabled, maxMultiplier: 0.5, want: testHostRPS},
-		"capacity without Enabled": {mode: capacityModeEnabled, maxMultiplier: 3, want: testHostRPS},
+		"default":                     {mode: capacityModeDisabled, maxMultiplier: 3, want: testHostRPS},
+		"shadow":                      {enabled: true, mode: capacityModeShadow, maxMultiplier: 3, want: testHostRPS},
+		"enabled":                     {enabled: true, mode: capacityModeEnabled, maxMultiplier: 3, want: 3 * testHostRPS},
+		"enabled, no headroom":        {enabled: true, mode: capacityModeEnabled, maxMultiplier: 0.5, want: testHostRPS},
+		"capacity without Enabled":    {mode: capacityModeEnabled, maxMultiplier: 3, want: testHostRPS},
+		"enabled, outside the cohort": {enabled: true, mode: capacityModeEnabled, maxMultiplier: 3, outsideCohort: true, want: testHostRPS},
 	} {
 		t.Run(name, func(t *testing.T) {
 			params := dynamicconfig.DefaultDynamicRateLimitingParams
 			params.Enabled = tc.enabled
 			params.Capacity.Mode = tc.mode
 			params.Capacity.MaxMultiplier = tc.maxMultiplier
-			ceiling := capacityCeilingFn(hostRateFn, func() dynamicconfig.DynamicRateLimitingParams { return params })
+			if tc.outsideCohort {
+				params.Capacity.RolloutPercent = 0
+			}
+			ceiling := capacityCeilingFn(hostRateFn, func() dynamicconfig.DynamicRateLimitingParams { return params }, []byte("test-host"))
 			require.InDelta(t, tc.want, ceiling(), 0.001)
 		})
 	}
@@ -241,6 +248,49 @@ func TestCapacityLimiterReadsQueuedFactsAsAShareOfAcquires(t *testing.T) {
 
 	require.InDelta(t, 540, f.bucketRPS(headers.CallerTypeAPI), 0.001)
 	require.Equal(t, []string{"idle", "idle", "queued"}, f.decisions())
+}
+
+// rolloutKeys returns a host key that RolloutAccepts places in a 50% cohort, and one it
+// leaves out.
+func rolloutKeys(t *testing.T) (in, out []byte) {
+	t.Helper()
+	for i := 0; in == nil || out == nil; i++ {
+		key := fmt.Appendf(nil, "history-%d", i)
+		if dynamicconfig.RolloutAccepts(key, 50) {
+			if in == nil {
+				in = key
+			}
+		} else if out == nil {
+			out = key
+		}
+	}
+	return in, out
+}
+
+func TestCapacityLimiterRollsOutToACohortOfHosts(t *testing.T) {
+	in, out := rolloutKeys(t)
+	overload := persistence.HealthSnapshot{P99: 200 * time.Millisecond, Throughput: 600, Samples: 1000}
+
+	// A host in the cohort applies the controller.
+	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f.limiter.rolloutKey = in
+	f.params.Capacity.RolloutPercent = 50
+	f.allowAfter(0)
+	f.signals.snapshot = overload
+	f.allowAfter(time.Second)
+	require.InDelta(t, 540, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+	require.Zero(t, f.legacy.calls)
+
+	// A host outside it runs the controller in shadow, and the existing limiter stays in charge.
+	f = newCapacityLimiterFixture(t, capacityModeEnabled)
+	f.limiter.rolloutKey = out
+	f.params.Capacity.RolloutPercent = 50
+	f.allowAfter(0)
+	f.signals.snapshot = overload
+	f.allowAfter(time.Second)
+	require.InDelta(t, 540, f.limiter.ctrl.Rate(), 0.001)
+	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+	require.Equal(t, 2, f.legacy.calls)
 }
 
 func TestCapacityLimiterRunsLatencyInShadowForStoresWithFacts(t *testing.T) {

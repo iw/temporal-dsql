@@ -96,6 +96,10 @@ type CapacityControllerParams struct {
 	// Mode is "disabled", "shadow" (run and report, apply the existing limiter)
 	// or "enabled". Requires Enabled=true on the parent struct.
 	Mode string
+	// RolloutPercent is the share of hosts, picked by hostname, that apply an
+	// "enabled" Mode; the others run it in shadow. Raising it keeps the hosts
+	// already in, so the cohort grows steadily.
+	RolloutPercent int
 	// MinMultiplier and MaxMultiplier bound the admitted rate relative to the
 	// static persistence MaxQPS. MaxMultiplier > 1 lets the controller use
 	// database headroom; the basic static limiter is raised to the same ceiling.
@@ -143,6 +147,7 @@ var DefaultDynamicRateLimitingParams = DynamicRateLimitingParams{
 	RateMultiMax:         1.0,
 	Capacity: CapacityControllerParams{
 		Mode:            "disabled",
+		RolloutPercent:  100,
 		MinMultiplier:   0.05,
 		MaxMultiplier:   3.0,
 		Tolerance:       2.0,

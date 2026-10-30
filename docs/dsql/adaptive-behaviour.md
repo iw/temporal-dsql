@@ -174,6 +174,7 @@ history.persistenceDynamicRateLimitingParams:
       Enabled: true
       Capacity:
         Mode: shadow   # disabled | shadow | enabled
+        RolloutPercent: 100   # with Mode: enabled, the share of hosts that apply it
 ```
 
 **Couple the task scheduler to it next.** `QueueSchedulerRateLimiterProvider` should derive the scheduler's host rate from the controller's admitted rate divided by measured persistence calls per task, instead of a static fallback. Tasks then wait in the scheduler, which is cheap, instead of failing mid-execution and bouncing through the rescheduler.
@@ -231,7 +232,7 @@ Every controller ships disabled, is proven in shadow, and stays inside bounds an
 
 - **Three modes.** Disabled returns the static value exactly. Shadow runs the controller and reports proposals while the static value applies. Enabled applies the output, clamped. Shadow is open-loop: proposals never feel their own effect, so they show direction and timing, not a settled value.
 - **Bounds and step limits.** Every output is clamped to a minimum and maximum and to a largest change per tick.
-- **Staged rollout.** `RolloutAccepts` keyed on host or shard ID enables a controller on a stable, growing cohort.
+- **Staged rollout.** `RolloutAccepts` keyed on host or shard ID enables a controller on a stable, growing cohort. On this branch, the persistence controller has it as `Capacity.RolloutPercent`, keyed on the hostname.
 - **One freeze key.** An `adaptive.frozen` setting holds every controller at its current value during an incident.
 - **Explainable decisions.** Each decision carries a reason (latency, errors, cooldown, idle, probe), emitted as a metric tag and logged on decreases, as matching already does for poller scaling.
 

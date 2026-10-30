@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,7 @@ type capacityAwareRateLimiter struct {
 	healthSignals persistence.HealthSignalAggregator
 	metrics       metrics.Handler
 	logger        log.Logger
+	rolloutKey    []byte // this host's key for Capacity.RolloutPercent
 
 	legacy   quotas.RequestRateLimiter
 	shared   quotas.RequestRateLimiter // priority cascade over buckets
@@ -70,6 +72,7 @@ func newCapacityAwareRateLimiter(
 	params DynamicRateLimitingParams,
 	metricsHandler metrics.Handler,
 	logger log.Logger,
+	rolloutKey []byte,
 ) *capacityAwareRateLimiter {
 	initial := hostRateFn()
 	l := &capacityAwareRateLimiter{
@@ -80,6 +83,7 @@ func newCapacityAwareRateLimiter(
 		healthSignals: healthSignals,
 		metrics:       metricsHandler,
 		logger:        logger,
+		rolloutKey:    rolloutKey,
 		legacy:        legacy,
 		buckets:       make(map[int]*quotas.RateLimiterImpl, len(RequestPrioritiesOrdered)),
 		ctrl:          capacity.New(initial),
@@ -144,10 +148,7 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	mode := p.Capacity.Mode
-	if !p.Enabled || (mode != capacityModeShadow && mode != capacityModeEnabled) {
-		mode = capacityModeDisabled
-	}
+	mode := capacityMode(p, l.rolloutKey)
 	static := l.hostRateFn()
 
 	var snap persistence.HealthSnapshot
@@ -180,7 +181,8 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 			l.delegate.SetRateLimiter(l.legacy)
 		}
 		l.logger.Info("Persistence capacity controller mode changed.",
-			tag.NewStringTag("from", l.mode), tag.NewStringTag("to", mode))
+			tag.NewStringTag("from", l.mode), tag.NewStringTag("to", mode),
+			tag.NewInt("rolloutPercent", p.Capacity.RolloutPercent))
 		l.mode = mode
 	}
 	if mode == capacityModeDisabled {
@@ -252,17 +254,39 @@ func (l *capacityAwareRateLimiter) burst(rps float64) int {
 }
 
 // capacityCeilingFn is the basic host-level limiter's rate. While the capacity
-// controller is enabled it becomes a safety ceiling at Capacity.MaxMultiplier x
-// hostMaxQPS, so the controller can use database headroom; otherwise it is
-// hostMaxQPS, as before. The basic limiter refreshes its rate once a minute.
-func capacityCeilingFn(hostRateFn quotas.RateFn, dynamicParams DynamicRateLimitingParams) quotas.RateFn {
+// controller is enabled on this host it becomes a safety ceiling at
+// Capacity.MaxMultiplier x hostMaxQPS, so the controller can use database headroom;
+// otherwise it is hostMaxQPS, as before. The basic limiter refreshes its rate once
+// a minute.
+func capacityCeilingFn(hostRateFn quotas.RateFn, dynamicParams DynamicRateLimitingParams, rolloutKey []byte) quotas.RateFn {
 	return func() float64 {
 		params := dynamicParams()
-		if params.Enabled && params.Capacity.Mode == capacityModeEnabled && params.Capacity.MaxMultiplier > 1 {
+		if capacityMode(params, rolloutKey) == capacityModeEnabled && params.Capacity.MaxMultiplier > 1 {
 			return params.Capacity.MaxMultiplier * hostRateFn()
 		}
 		return hostRateFn()
 	}
+}
+
+// capacityMode is the mode this host applies. Outside Capacity.RolloutPercent's
+// cohort, which rolloutKey places it in or out of, an enabled controller runs in
+// shadow.
+func capacityMode(p dynamicconfig.DynamicRateLimitingParams, rolloutKey []byte) string {
+	mode := p.Capacity.Mode
+	if !p.Enabled || (mode != capacityModeShadow && mode != capacityModeEnabled) {
+		return capacityModeDisabled
+	}
+	if mode == capacityModeEnabled && !dynamicconfig.RolloutAccepts(rolloutKey, p.Capacity.RolloutPercent) {
+		return capacityModeShadow
+	}
+	return mode
+}
+
+// hostRolloutKey is this host's key for Capacity.RolloutPercent: its hostname, so a
+// host keeps its place in or out of the cohort across restarts.
+func hostRolloutKey() []byte {
+	hostname, _ := os.Hostname()
+	return []byte(hostname)
 }
 
 // capacityEnvelope converts dynamic config into a controller envelope. The
