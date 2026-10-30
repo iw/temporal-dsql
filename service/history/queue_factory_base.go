@@ -57,6 +57,7 @@ type (
 		RemoteHistoryFetcher eventhandler.HistoryPaginatedFetcher
 		ChasmEngine          chasm.Engine
 		ChasmRegistry        *chasm.Registry
+		HealthSignals        persistence.HealthSignalAggregator
 	}
 
 	QueueFactoryBase struct {

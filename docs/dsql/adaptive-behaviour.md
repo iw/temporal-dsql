@@ -142,7 +142,7 @@ Generalise `persistence.HealthSignalAggregator` into a `common/signals` package 
 | Source | Where it comes from | Change needed |
 |---|---|---|
 | Persistence latency, errors, throughput | `persistence_metric_clients.go` already calls `Record` per request | Recent-window quantile and per-window counters (done in the Phase 1 patch) |
-| Task queueing delay | `scheduleLatency` in `executable.go:257` | One `Record` call beside the metric at line 357 |
+| Task queueing delay | `scheduleLatency` in `executable.go:257` | One `Record` call beside the metric at line 357 (done on this branch, as `RecordScheduleLatency`) |
 | RPC handler latency | `rpc/interceptor/health_check.go` | Feed the existing aggregator into the plane |
 | Go scheduler and heap | `runtime/metrics`: `/sched/latencies:seconds`, `/gc/heap/goal:bytes` | New source |
 | Memory limit | cgroup `memory.max`, `GOMEMLIMIT` | New source |

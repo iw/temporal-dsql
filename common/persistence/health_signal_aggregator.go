@@ -30,6 +30,9 @@ type (
 		// deadline passed also counts as a timeout in the windows RecentSnapshot reads,
 		// whatever error the store wrapped the timeout in.
 		RecordCall(ctx context.Context, callerSegment int32, latency time.Duration, err error)
+		// RecordScheduleLatency records how long a history task attempt waited in its
+		// scheduler, for the queueing delay that RecentSnapshot reports.
+		RecordScheduleLatency(latency time.Duration)
 		AverageLatency() float64
 		LatencyQuantile(quantile float64) float64
 		ErrorRatio() float64
@@ -54,6 +57,10 @@ type (
 		// facts. The counts are its facts over the same span.
 		StoreReportsFacts                              bool
 		Throttled, Contention, Limit, Queued, Acquired int
+		// ScheduleP90 is the 90th percentile of how long task attempts waited in the
+		// host's schedulers over the same span, and ScheduleSamples how many it covers.
+		ScheduleP90     time.Duration
+		ScheduleSamples int
 	}
 
 	healthSignalAggregatorImpl struct {
@@ -69,7 +76,8 @@ type (
 
 		latencyAverage      aggregate.MovingWindowAverage
 		latencyDistribution stats.TimeWindowedStats
-		counters            *windowedCounter // aligned with latencyDistribution windows
+		counters            *windowedCounter        // aligned with latencyDistribution windows
+		scheduleLatency     stats.TimeWindowedStats // aligned with counters' windows
 		errorRatio          aggregate.MovingWindowAverage
 		factsDeclared       atomic.Bool
 
@@ -107,6 +115,13 @@ func NewHealthSignalAggregator(
 	if latencyWindowSize <= 50*time.Millisecond || latencyWindowCount <= 0 {
 		latencyWindowSize, latencyWindowCount = 5*time.Second, 10
 	}
+	scheduleLatency, err := stats.NewWindowedTDigest(stats.WindowConfig{
+		WindowSize:  latencyWindowSize,
+		WindowCount: latencyWindowCount,
+	})
+	if err != nil {
+		logger.Error("failed to create schedule latency distribution helper", tag.Error(err))
+	}
 
 	ret := &healthSignalAggregatorImpl{
 		status:              common.DaemonStatusInitialized,
@@ -119,6 +134,7 @@ func NewHealthSignalAggregator(
 		percentilesEnabled:  percentilesEnabled,
 		latencyDistribution: latencyDistribution,
 		counters:            newWindowedCounter(latencyWindowSize, latencyWindowCount),
+		scheduleLatency:     scheduleLatency,
 	}
 
 	if aggregationEnabled {
@@ -183,6 +199,12 @@ func (s *healthSignalAggregatorImpl) record(callerSegment int32, latency time.Du
 	}
 }
 
+func (s *healthSignalAggregatorImpl) RecordScheduleLatency(latency time.Duration) {
+	if s.aggregationEnabled && s.percentilesEnabled() && s.scheduleLatency != nil {
+		s.scheduleLatency.Record(float64(latency.Milliseconds()), time.Now())
+	}
+}
+
 func (s *healthSignalAggregatorImpl) AverageLatency() float64 {
 	return s.latencyAverage.Average()
 }
@@ -233,6 +255,11 @@ func (s *healthSignalAggregatorImpl) RecentSnapshot(windows int) HealthSnapshot 
 		delivered := counts.total - counts.errors
 		delivered -= min(delivered, counts.facts[StoreFactThrottled])
 		snap.Throughput = float64(delivered) / span.Seconds()
+	}
+	if sq, ok := s.scheduleLatency.(stats.RecentQuantiler); ok {
+		p90ms, samples := sq.QuantileRecent(0.90, windows, now)
+		snap.ScheduleP90 = time.Duration(p90ms * float64(time.Millisecond))
+		snap.ScheduleSamples = int(samples)
 	}
 	return snap
 }

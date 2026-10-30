@@ -143,6 +143,7 @@ type (
 		maxUnexpectedErrorAttempts dynamicconfig.IntPropertyFn
 		dlqInternalErrors          dynamicconfig.BoolPropertyFn
 		dlqErrorPattern            dynamicconfig.StringPropertyFn
+		scheduleLatencyRecorder    ScheduleLatencyRecorder
 	}
 	ExecutableParams struct {
 		DLQEnabled                 dynamicconfig.BoolPropertyFn
@@ -150,8 +151,16 @@ type (
 		MaxUnexpectedErrorAttempts dynamicconfig.IntPropertyFn
 		DLQInternalErrors          dynamicconfig.BoolPropertyFn
 		DLQErrorPattern            dynamicconfig.StringPropertyFn
+		ScheduleLatencyRecorder    ScheduleLatencyRecorder
 	}
 	ExecutableOption func(*ExecutableParams)
+
+	// ScheduleLatencyRecorder receives how long each task attempt waited in its scheduler,
+	// so the host's controllers can read queueing delay as a signal. The persistence
+	// health signal aggregator implements it.
+	ScheduleLatencyRecorder interface {
+		RecordScheduleLatency(latency time.Duration)
+	}
 
 	TaskTypeTagProvider func(t tasks.Task, isActive bool, chasmRegistry *chasm.Registry) string
 )
@@ -239,6 +248,7 @@ func NewExecutable(
 		maxUnexpectedErrorAttempts: params.MaxUnexpectedErrorAttempts,
 		dlqInternalErrors:          params.DLQInternalErrors,
 		dlqErrorPattern:            params.DLQErrorPattern,
+		scheduleLatencyRecorder:    params.ScheduleLatencyRecorder,
 	}
 	e.refreshMetricsHandlers(nil)
 	e.attempt.Store(1)
@@ -355,6 +365,9 @@ func (e *executableImpl) Execute() (retErr error) {
 		priorityTaggedProvider := e.chasmMetricsHandler.WithTags(metrics.TaskPriorityTag(e.priority.String()))
 		metrics.TaskRequests.With(priorityTaggedProvider).Record(1)
 		metrics.TaskScheduleLatency.With(priorityTaggedProvider).Record(e.scheduleLatency)
+		if e.scheduleLatencyRecorder != nil {
+			e.scheduleLatencyRecorder.RecordScheduleLatency(e.scheduleLatency)
+		}
 		metrics.OperationCounter.With(e.defaultMetricsHandler).Record(1)
 
 		if retErr == nil {

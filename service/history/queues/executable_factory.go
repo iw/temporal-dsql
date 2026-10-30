@@ -38,6 +38,7 @@ type (
 		attemptsBeforeSendingToDlq dynamicconfig.IntPropertyFn
 		dlqInternalErrors          dynamicconfig.BoolPropertyFn
 		dlqErrorPattern            dynamicconfig.StringPropertyFn
+		scheduleLatencyRecorder    ScheduleLatencyRecorder
 	}
 )
 
@@ -63,6 +64,7 @@ func NewExecutableFactory(
 	attemptsBeforeSendingToDlq dynamicconfig.IntPropertyFn,
 	dlqInternalErrors dynamicconfig.BoolPropertyFn,
 	dlqErrorPattern dynamicconfig.StringPropertyFn,
+	scheduleLatencyRecorder ScheduleLatencyRecorder,
 ) *executableFactoryImpl {
 	return &executableFactoryImpl{
 		executor:                   executor,
@@ -82,6 +84,7 @@ func NewExecutableFactory(
 		attemptsBeforeSendingToDlq: attemptsBeforeSendingToDlq,
 		dlqInternalErrors:          dlqInternalErrors,
 		dlqErrorPattern:            dlqErrorPattern,
+		scheduleLatencyRecorder:    scheduleLatencyRecorder,
 	}
 }
 
@@ -107,6 +110,7 @@ func (f *executableFactoryImpl) NewExecutable(task tasks.Task, readerID int64) E
 			params.MaxUnexpectedErrorAttempts = f.attemptsBeforeSendingToDlq
 			params.DLQInternalErrors = f.dlqInternalErrors
 			params.DLQErrorPattern = f.dlqErrorPattern
+			params.ScheduleLatencyRecorder = f.scheduleLatencyRecorder
 		},
 	)
 }
