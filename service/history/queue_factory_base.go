@@ -5,6 +5,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 	"go.temporal.io/server/chasm"
+	"go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/clock"
 	"go.temporal.io/server/common/cluster"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -57,7 +58,7 @@ type (
 		RemoteHistoryFetcher eventhandler.HistoryPaginatedFetcher
 		ChasmEngine          chasm.Engine
 		ChasmRegistry        *chasm.Registry
-		HealthSignals        persistence.HealthSignalAggregator
+		HistoryQueues        *workers.HistoryQueues `optional:"true"` // nil leaves worker counts static
 	}
 
 	QueueFactoryBase struct {

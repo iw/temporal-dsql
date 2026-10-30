@@ -17,9 +17,8 @@ import (
 	"go.temporal.io/server/common/quotas"
 )
 
-// capacityController names the persistence capacity controller in adaptive's decision
-// metric.
-const capacityController = "persistence_capacity"
+// capacityController names the persistence capacity controller in its decisions.
+const capacityController = capacity.Name
 
 // capacityAwareRateLimiter is the host-level dynamic persistence limiter.
 //

@@ -41,7 +41,7 @@ func NewVisibilityQueueFactory(
 			HostScheduler: queues.NewScheduler(
 				params.ClusterMetadata.GetCurrentClusterName(),
 				queues.SchedulerOptions{
-					WorkerCount:                    params.Config.VisibilityProcessorSchedulerWorkerCount,
+					WorkerCount:                    params.HistoryQueues.WorkerCount(tasks.CategoryVisibility.Name(), params.Config.VisibilityProcessorSchedulerWorkerCount),
 					ActiveNamespaceWeights:         params.Config.VisibilityProcessorSchedulerActiveRoundRobinWeights,
 					StandbyNamespaceWeights:        params.Config.VisibilityProcessorSchedulerStandbyRoundRobinWeights,
 					InactiveNamespaceDeletionDelay: params.Config.TaskSchedulerInactiveChannelDeletionDelay,
@@ -136,7 +136,7 @@ func (f *visibilityQueueFactory) CreateQueue(
 		f.Config.TaskDLQUnexpectedErrorAttempts,
 		f.Config.TaskDLQInternalErrors,
 		f.Config.TaskDLQErrorPattern,
-		f.HealthSignals,
+		f.HistoryQueues.ScheduleLatencyRecorder(tasks.CategoryVisibility.Name()),
 	)
 	return queues.NewImmediateQueue(
 		shard,

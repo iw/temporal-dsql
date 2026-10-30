@@ -45,7 +45,7 @@ func NewTimerQueueFactory(
 			HostScheduler: queues.NewScheduler(
 				params.ClusterMetadata.GetCurrentClusterName(),
 				queues.SchedulerOptions{
-					WorkerCount:                    params.Config.TimerProcessorSchedulerWorkerCount,
+					WorkerCount:                    params.HistoryQueues.WorkerCount(tasks.CategoryTimer.Name(), params.Config.TimerProcessorSchedulerWorkerCount),
 					ActiveNamespaceWeights:         params.Config.TimerProcessorSchedulerActiveRoundRobinWeights,
 					StandbyNamespaceWeights:        params.Config.TimerProcessorSchedulerStandbyRoundRobinWeights,
 					InactiveNamespaceDeletionDelay: params.Config.TaskSchedulerInactiveChannelDeletionDelay,
@@ -173,7 +173,7 @@ func (f *timerQueueFactory) CreateQueue(
 		f.Config.TaskDLQUnexpectedErrorAttempts,
 		f.Config.TaskDLQInternalErrors,
 		f.Config.TaskDLQErrorPattern,
-		f.HealthSignals,
+		f.HistoryQueues.ScheduleLatencyRecorder(tasks.CategoryTimer.Name()),
 	)
 	return queues.NewScheduledQueue(
 		shardContext,

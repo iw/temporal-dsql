@@ -52,7 +52,7 @@ func NewTransferQueueFactory(
 			HostScheduler: queues.NewScheduler(
 				params.ClusterMetadata.GetCurrentClusterName(),
 				queues.SchedulerOptions{
-					WorkerCount:                    params.Config.TransferProcessorSchedulerWorkerCount,
+					WorkerCount:                    params.HistoryQueues.WorkerCount(tasks.CategoryTransfer.Name(), params.Config.TransferProcessorSchedulerWorkerCount),
 					ActiveNamespaceWeights:         params.Config.TransferProcessorSchedulerActiveRoundRobinWeights,
 					StandbyNamespaceWeights:        params.Config.TransferProcessorSchedulerStandbyRoundRobinWeights,
 					InactiveNamespaceDeletionDelay: params.Config.TaskSchedulerInactiveChannelDeletionDelay,
@@ -173,7 +173,7 @@ func (f *transferQueueFactory) CreateQueue(
 		f.Config.TaskDLQUnexpectedErrorAttempts,
 		f.Config.TaskDLQInternalErrors,
 		f.Config.TaskDLQErrorPattern,
-		f.HealthSignals,
+		f.HistoryQueues.ScheduleLatencyRecorder(tasks.CategoryTransfer.Name()),
 	)
 	return queues.NewImmediateQueue(
 		shardContext,

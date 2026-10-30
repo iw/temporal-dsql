@@ -129,6 +129,9 @@ type Signals struct {
 	QueuedRatio    float64 // plugin connection acquires that waited / all acquires
 }
 
+// Name is the controller's name in its decisions and their metric.
+const Name = "persistence_capacity"
+
 // Reason explains a decision; emit it as a metric tag, as matching does for
 // poller scaling decisions.
 type Reason string
@@ -144,6 +147,17 @@ const (
 	ReasonIdle      Reason = "idle" // healthy but not binding: hold (anti-windup)
 	ReasonProbe     Reason = "probe"
 )
+
+// Overloaded reports whether a step with this reason found the store overloaded: it
+// cut the rate, or would have but for the cooldown.
+func (r Reason) Overloaded() bool {
+	switch r {
+	case ReasonErrors, ReasonThrottled, ReasonQueued, ReasonLatency, ReasonCooldown:
+		return true
+	default:
+		return false
+	}
+}
 
 // Decision is the controller's output for one Step.
 type Decision struct {
