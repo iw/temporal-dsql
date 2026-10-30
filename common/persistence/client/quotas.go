@@ -71,6 +71,7 @@ func NewPriorityRateLimiter(
 	logger log.Logger,
 ) quotas.RequestRateLimiter {
 	hostRateFn := func() float64 { return float64(hostMaxQPS()) }
+	rolloutKey := hostRolloutKey()
 
 	return quotas.NewMultiRequestRateLimiter(
 		// host-level dynamic rate limiter: the existing per-priority health
@@ -94,10 +95,11 @@ func NewPriorityRateLimiter(
 			dynamicParams,
 			metricsHandler,
 			logger,
+			rolloutKey,
 		),
 		// basic host-level rate limiter
 		newPriorityRateLimiter(
-			capacityCeilingFn(hostRateFn, dynamicParams),
+			capacityCeilingFn(hostRateFn, dynamicParams, rolloutKey),
 			requestPriorityFn,
 			operatorRPSRatio,
 			burstRatio,
