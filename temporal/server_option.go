@@ -20,6 +20,7 @@ import (
 	"go.temporal.io/server/common/rpc/encryption"
 	"go.temporal.io/server/common/searchattribute"
 	"go.temporal.io/server/common/testing/testhooks"
+	"go.temporal.io/server/service/matching"
 	"google.golang.org/grpc"
 )
 
@@ -224,6 +225,14 @@ func WithAdditionalStreamInterceptors(interceptors ...grpc.StreamServerIntercept
 func WithTokenProvider(tp auth.TokenProvider) ServerOption {
 	return applyFunc(func(s *serverOptions) {
 		s.tokenProvider = tp
+	})
+}
+
+// WithPartitionScalerFactory sets the factory that matching uses to scale task queue
+// partitions, in place of the one that the matching.partitionScaler setting configures.
+func WithPartitionScalerFactory(factory matching.PartitionScalerFactory) ServerOption {
+	return applyFunc(func(s *serverOptions) {
+		s.partitionScalerFactory = factory
 	})
 }
 

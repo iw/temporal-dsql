@@ -121,6 +121,7 @@ type (
 		ClaimMapper                  authorization.ClaimMapper
 		AudienceGetter               authorization.JWTAudienceMapper
 		TokenProvider                auth.TokenProvider
+		PartitionScalerFactory       matching.PartitionScalerFactory
 		ServiceHosts                 map[primitives.ServiceName]static.Hosts
 
 		// below are things that could be over write by server options or may have default if not supplied by serverOptions.
@@ -333,6 +334,7 @@ func ServerOptionsProvider(opts []ServerOption) (serverOptionsProvider, error) {
 		ClaimMapper:                  so.claimMapper,
 		AudienceGetter:               so.audienceGetter,
 		TokenProvider:                so.tokenProvider,
+		PartitionScalerFactory:       so.partitionScalerFactory,
 
 		Logger:                     logger,
 		ClientFactoryProvider:      clientFactoryProvider,
@@ -403,6 +405,7 @@ type (
 		Authorizer                      authorization.Authorizer
 		ClaimMapper                     authorization.ClaimMapper
 		TokenProvider                   auth.TokenProvider
+		PartitionScalerFactory          matching.PartitionScalerFactory
 		DataStoreFactory                persistenceClient.AbstractDataStoreFactory
 		VisibilityStoreFactory          visibility.VisibilityStoreFactory
 		CustomHistoryArchiverFactory    provider.CustomHistoryArchiverFactory
@@ -567,6 +570,12 @@ func MatchingServiceProvider(
 	app := fx.New(
 		params.GetCommonServiceOptions(serviceName),
 		matching.Module,
+		fx.Decorate(func(factory matching.PartitionScalerFactory) matching.PartitionScalerFactory {
+			if params.PartitionScalerFactory != nil {
+				return params.PartitionScalerFactory
+			}
+			return factory
+		}),
 	)
 
 	return NewService(app, serviceName, params.Logger), app.Err()

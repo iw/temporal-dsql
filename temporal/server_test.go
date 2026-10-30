@@ -68,7 +68,7 @@ func TestNewServerWithJSONEncoding(t *testing.T) {
 	runAndTestServer(t)
 }
 
-func runAndTestServer(t *testing.T) {
+func runAndTestServer(t *testing.T, opts ...temporal.ServerOption) {
 	t.Helper()
 	cfg := loadConfig(t)
 
@@ -82,13 +82,13 @@ func runAndTestServer(t *testing.T) {
 		dynamicconfig.MatchingNumTaskqueueReadPartitions.Key():  1,
 	}
 
-	server, err := temporal.NewServer(
+	server, err := temporal.NewServer(append([]temporal.ServerOption{
 		temporal.ForServices(temporal.DefaultServices),
 		temporal.WithConfig(cfg),
 		temporal.WithLogger(logDetector),
 		temporal.WithChainedFrontendGrpcInterceptors(getFrontendInterceptors()),
 		temporal.WithDynamicConfigClient(dcClient),
-	)
+	}, opts...)...)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
