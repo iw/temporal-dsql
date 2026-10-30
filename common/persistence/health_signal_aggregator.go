@@ -52,8 +52,8 @@ type (
 		Span       time.Duration // wall-clock span the snapshot covers
 		// StoreReportsFacts is set once the store's plugin declares that it reports
 		// facts. The counts are its facts over the same span.
-		StoreReportsFacts                    bool
-		Throttled, Contention, Limit, Queued int
+		StoreReportsFacts                              bool
+		Throttled, Contention, Limit, Queued, Acquired int
 	}
 
 	healthSignalAggregatorImpl struct {
@@ -223,6 +223,7 @@ func (s *healthSignalAggregatorImpl) RecentSnapshot(windows int) HealthSnapshot 
 		Contention:        int(counts.facts[StoreFactContention]),
 		Limit:             int(counts.facts[StoreFactLimit]),
 		Queued:            int(counts.facts[StoreFactQueued]),
+		Acquired:          int(counts.facts[StoreFactAcquired]),
 	}
 	if counts.total > 0 {
 		snap.ErrorRatio = float64(counts.errors) / float64(counts.total)

@@ -55,15 +55,23 @@ func (pdb *db) TxRetryBackoff(operation string, attempt int, err error) (time.Du
 	return delay, retry
 }
 
-// reportQueuedFacts reports, every interval until ctx ends, how many acquires found no
-// idle connection since the last sample, starting from start. The pool collector's 15
-// seconds is too coarse for the capacity controller's windows.
-func reportQueuedFacts(
+// acquireCounts are the pool's cumulative acquires, and those among them that found no
+// idle connection.
+type acquireCounts struct {
+	acquired, queued int64
+}
+
+// reportAcquireFacts reports, every interval until ctx ends, the acquires since the last
+// sample as acquired facts and those that found no idle connection as queued facts,
+// starting from start. Core reads queued facts as a share of acquired ones, because one
+// store request can take several connections in turn. The pool collector's 15 seconds
+// is too coarse for the capacity controller's windows.
+func reportAcquireFacts(
 	ctx context.Context,
 	facts *storeFacts,
 	interval time.Duration,
-	start int64,
-	emptyAcquires func() int64,
+	start acquireCounts,
+	sample func() acquireCounts,
 ) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -73,8 +81,9 @@ func reportQueuedFacts(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			current := emptyAcquires()
-			facts.report(persistence.StoreFactQueued, current-last)
+			current := sample()
+			facts.report(persistence.StoreFactQueued, current.queued-last.queued)
+			facts.report(persistence.StoreFactAcquired, current.acquired-last.acquired)
 			last = current
 		}
 	}

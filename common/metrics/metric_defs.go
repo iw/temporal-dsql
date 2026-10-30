@@ -1671,7 +1671,7 @@ var (
 	PersistenceErrResourceExhaustedCounter = NewCounterDef("persistence_errors_resource_exhausted")
 	PersistenceStoreFacts                  = NewCounterDef(
 		"persistence_store_facts",
-		WithDescription("Typed facts persistence plugins report about their stores, keyed by `fact`: throttled, contention, limit or queued"),
+		WithDescription("Typed facts persistence plugins report about their stores, keyed by `fact`: throttled, contention, limit, queued or acquired"),
 	)
 	PersistenceCapacityDecisions = NewCounterDef(
 		"persistence_capacity_decisions",

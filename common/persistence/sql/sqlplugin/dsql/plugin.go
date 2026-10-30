@@ -154,7 +154,7 @@ func (p *plugin) createDSQLConnectionWithAuth(
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping DSQL: %w", err)
 	}
-	connector.reportQueuedFacts(facts)
+	connector.reportAcquireFacts(facts)
 	return db, nil
 }
 

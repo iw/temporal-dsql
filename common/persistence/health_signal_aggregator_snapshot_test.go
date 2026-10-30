@@ -32,6 +32,7 @@ func TestRecentSnapshotCountsStoreFacts(t *testing.T) {
 	agg.ReportStoreFact(StoreFactThrottled, 2)
 	agg.ReportStoreFact(StoreFactContention, 1)
 	agg.ReportStoreFact(StoreFactQueued, 5)
+	agg.ReportStoreFact(StoreFactAcquired, 20)
 	agg.ReportStoreFact(StoreFactLimit, 0) // nothing to count
 	agg.ReportStoreFact(numStoreFacts, 1)  // not a fact
 	agg.Record(CallerSegmentMissing, 10*time.Millisecond, nil)
@@ -41,13 +42,15 @@ func TestRecentSnapshotCountsStoreFacts(t *testing.T) {
 	require.Equal(t, 1, snap.Contention)
 	require.Zero(t, snap.Limit)
 	require.Equal(t, 5, snap.Queued)
+	require.Equal(t, 20, snap.Acquired)
 	require.Equal(t, 1, snap.Samples)
 
 	recordings := capture.Snapshot()["persistence_store_facts"]
-	require.Len(t, recordings, 3)
+	require.Len(t, recordings, 4)
 	require.Equal(t, int64(2), recordings[0].Value)
 	require.Equal(t, "throttled", recordings[0].Tags["fact"])
 	require.Equal(t, "queued", recordings[2].Tags["fact"])
+	require.Equal(t, "acquired", recordings[3].Tags["fact"])
 }
 
 func TestRecentSnapshotDeclaredFactsAndThrottledThroughput(t *testing.T) {
