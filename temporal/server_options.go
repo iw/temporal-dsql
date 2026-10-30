@@ -23,6 +23,7 @@ import (
 	"go.temporal.io/server/common/rpc/encryption"
 	"go.temporal.io/server/common/searchattribute"
 	"go.temporal.io/server/common/testing/testhooks"
+	"go.temporal.io/server/service/matching"
 	"google.golang.org/grpc"
 )
 
@@ -65,6 +66,7 @@ type (
 		metricHandler                   metrics.Handler
 		eventLoggerProvider             otellog.LoggerProvider
 		tokenProvider                   auth.TokenProvider
+		partitionScalerFactory          matching.PartitionScalerFactory
 		testHooks                       *testhooks.TestHooks
 	}
 )

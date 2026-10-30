@@ -213,7 +213,7 @@ Three changes close the gap:
 
 1. **Enrich the input.** Add sync-match ratio, backlog age, and add rate against dispatch rate. Matching already computes these for poller scaling via `GetPhysicalQueueAdjustedStats`. Add the owning host's persistence latency from the signal plane.
 2. **Learn capacity per partition.** When add rate exceeds dispatch rate and backlog age grows while the host is healthy, record the observed dispatch rate as the partition's capacity in the `anypb` `PrivateState`, which exists for exactly this. Target partitions = add rate ÷ learned capacity, with headroom.
-3. **Expose the factory.** `PartitionScalerFactory` is provided through fx (`matching/fx.go:268`) but absent from `temporal/server_option.go`. A `WithPartitionScalerFactory` option lets operators experiment without forking.
+3. **Expose the factory.** `PartitionScalerFactory` is provided through fx (`matching/fx.go:268`) but absent from `temporal/server_option.go`. A `WithPartitionScalerFactory` option lets operators experiment without forking (done on this branch).
 
 The proto already reserves room for more learned state: `task_queues.proto:147` reads "For future use: description, rate limits, manual partition control, etc."
 
