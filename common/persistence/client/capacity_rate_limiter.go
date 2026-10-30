@@ -44,6 +44,7 @@ type capacityAwareRateLimiter struct {
 	logger        log.Logger
 	rolloutKey    []byte // this host's key for Capacity.RolloutPercent
 	frozen        func() bool
+	decisions     adaptive.DecisionSink
 
 	legacy   quotas.RequestRateLimiter
 	shared   quotas.RequestRateLimiter // priority cascade over buckets
@@ -71,6 +72,7 @@ func newCapacityAwareRateLimiter(
 	healthSignals persistence.HealthSignalAggregator,
 	params DynamicRateLimitingParams,
 	frozen AdaptiveFrozen,
+	decisions adaptive.DecisionSink,
 	metricsHandler metrics.Handler,
 	logger log.Logger,
 	rolloutKey []byte,
@@ -86,6 +88,7 @@ func newCapacityAwareRateLimiter(
 		logger:        logger,
 		rolloutKey:    rolloutKey,
 		frozen:        frozen,
+		decisions:     decisions,
 		legacy:        legacy,
 		buckets:       make(map[int]*quotas.RateLimiterImpl, len(RequestPrioritiesOrdered)),
 		ctrl:          capacity.New(initial),
@@ -163,7 +166,20 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 		}
 		l.setMode(mode, p)
 		l.denied.Store(false)
-		adaptive.RecordDecision(l.metrics, capacityController, adaptive.ReasonFrozen)
+		static := l.hostRateFn()
+		applied := static
+		if mode == adaptive.ModeOn {
+			applied = l.ctrl.Rate()
+		}
+		adaptive.Report(l.metrics, l.decisions, adaptive.Decision{
+			Controller: capacityController,
+			Time:       now,
+			Mode:       mode,
+			Reason:     adaptive.ReasonFrozen,
+			Static:     static,
+			Proposed:   l.ctrl.Rate(),
+			Applied:    applied,
+		})
 		return
 	}
 	static := l.hostRateFn()
@@ -172,7 +188,8 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 	if mode != adaptive.ModeOff {
 		snap = l.healthSignals.RecentSnapshot(p.Capacity.SignalWindows)
 	}
-	d := l.ctrl.Step(capacityEnvelope(p.Capacity, mode, static, snap.Span), static, capacity.Signals{
+	env := capacityEnvelope(p.Capacity, mode, static, snap.Span)
+	inputs := capacity.Signals{
 		Now:            now,
 		P99:            snap.P99,
 		ErrorRatio:     snap.ErrorRatio,
@@ -182,7 +199,8 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 		FactsReported:  snap.StoreReportsFacts,
 		ThrottledRatio: ratio(snap.Throttled, snap.Samples),
 		QueuedRatio:    ratio(snap.Queued, snap.Acquired),
-	})
+	}
+	d := l.ctrl.Step(env, static, inputs)
 
 	if mode == adaptive.ModeOn {
 		l.applyRate(d.RPS)
@@ -195,7 +213,16 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 	if static > 0 {
 		metrics.DynamicRateLimiterMultiplier.With(l.metrics).Record(d.Proposed / static)
 	}
-	adaptive.RecordDecision(l.metrics, capacityController, adaptive.Reason(d.Reason))
+	adaptive.Report(l.metrics, l.decisions, adaptive.Decision{
+		Controller: capacityController,
+		Time:       now,
+		Mode:       mode,
+		Reason:     adaptive.Reason(d.Reason),
+		Static:     static,
+		Proposed:   d.Proposed,
+		Applied:    d.RPS,
+		Detail:     capacityStep{Envelope: env, Signals: inputs, Decision: d},
+	})
 	if d.LatencyShadow {
 		adaptive.RecordDecision(l.metrics, capacityController, capacityReasonLatencyShadow)
 	}
@@ -248,6 +275,14 @@ func (l *capacityAwareRateLimiter) setMode(mode adaptive.Mode, p dynamicconfig.D
 		tag.NewStringTag("from", l.mode.String()), tag.NewStringTag("to", mode.String()),
 		tag.NewInt("rolloutPercent", p.Capacity.RolloutPercent))
 	l.mode = mode
+}
+
+// capacityStep is a step of the capacity controller, as its decision's Detail: what
+// capacity.Controller.Step took and returned, so a trace can replay it.
+type capacityStep struct {
+	Envelope capacity.Envelope
+	Signals  capacity.Signals
+	Decision capacity.Decision
 }
 
 // capacityReasonLatencyShadow tags a step where the latency law would have cut a

@@ -158,6 +158,7 @@ impl Ci {
                 "./common/persistence/client/...",
                 "./common/persistence/sql/...",
                 "./common/persistence/visibility/...",
+                "./common/signals/...",
                 "./common/stats/...",
                 "./schema/...",
                 "./tools/dsql/...",

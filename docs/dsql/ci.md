@@ -25,7 +25,7 @@ The module never sees Buildkite or Namespace. Its constructor takes the reposito
 |---|---|
 | `build [--platform]` | Compiles `temporal-server`, `temporal-dsql-tool` and `temporal-elasticsearch-tool`, and returns them as a directory |
 | `lint [--base] [--patch]` | Runs golangci-lint v2.9.0 on the lines a change adds, and the errortype vet check, as `make lint-code` does |
-| `test [--packages] [--run]` | Runs `go test -race -shuffle=on` on `common/adaptive/...`, `common/persistence`, `common/persistence/client/...`, `common/persistence/sql/...`, `common/persistence/visibility/...`, `common/stats/...`, `schema/...`, `tools/dsql/...` and `tools/poolsim/...` |
+| `test [--packages] [--run]` | Runs `go test -race -shuffle=on` on `common/adaptive/...`, `common/persistence`, `common/persistence/client/...`, `common/persistence/sql/...`, `common/persistence/visibility/...`, `common/signals/...`, `common/stats/...`, `schema/...`, `tools/dsql/...` and `tools/poolsim/...` |
 
 `--platform` defaults to the engine's own platform. Go cross-compiles, so `build` can target any platform from any engine.
 

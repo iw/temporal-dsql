@@ -1,6 +1,6 @@
 # Adaptive behaviour: changes to upstream code
 
-The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller) and its [store facts](adaptive-store-facts.md), the task queueing delay that [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane) adds to the host's signals, and the partition scaler option from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity).
+The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller) and its [store facts](adaptive-store-facts.md), the signal plane from [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane), with the task queueing delay it reads, and the partition scaler option from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity).
 
 The branch takes main's changes by merge or rebase, and reaches a new release tag through main. When that happens, check the files below against the new tag first.
 
@@ -9,8 +9,9 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 | File | Change and reason |
 | --- | --- |
 | `common/dynamicconfig/shared_constants.go` | `DynamicRateLimitingParams` gains `Capacity`, the controller's envelope. Its `Mode` is disabled by default, and its `RolloutPercent`, 100 by default, is the share of hosts that apply an enabled `Mode`. |
-| `common/persistence/client/quotas.go` | `NewPriorityRateLimiter` wraps the per-priority health limiters in the capacity-aware limiter, which also takes the `adaptive.frozen` setting. The basic limiter's rate comes from `capacityCeilingFn`. Both take the host's rollout key, its hostname. |
-| `common/persistence/client/fx.go` | `Module` provides `AdaptiveFrozen`, the `adaptive.frozen` setting, and `FactoryProvider` passes it to `NewPriorityRateLimiter`. |
+| `common/persistence/client/quotas.go` | `NewPriorityRateLimiter` wraps the per-priority health limiters in the capacity-aware limiter, which also takes the `adaptive.frozen` setting and the sink for its decisions. The basic limiter's rate comes from `capacityCeilingFn`. Both take the host's rollout key, its hostname. |
+| `common/persistence/client/fx.go` | `Module` provides `AdaptiveFrozen`, the `adaptive.frozen` setting. `NewFactoryParams` takes the `adaptive.DecisionSink`, and `FactoryProvider` passes both to `NewPriorityRateLimiter`. |
+| `common/resource/fx.go` | `Module` includes `signals.Module`, which gives each service its signal plane, provided as the services' `adaptive.DecisionSink` too. |
 | `common/persistence/client/factory.go` | `NewFactory` hands the health signal aggregator to a data store factory that accepts store facts. |
 | `common/persistence/health_signal_aggregator.go` | The aggregator gains `RecentSnapshot`, `RecordCall` and `RecordScheduleLatency`, and implements `StoreFacts`. The snapshot leaves out the persistence limiter's own rejections, counts a call that failed after its deadline as a timeout, and leaves calls the store reports as throttled out of delivered throughput. It also reports the p90 of how long history task attempts waited in their schedulers. |
 | `common/persistence/noop_health_signal_aggregator.go` | The no-op aggregator implements the new methods. |
@@ -33,8 +34,9 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 
 These files extend existing packages without editing upstream files:
 
-- `common/adaptive`: the shared core, with the modes, rollout, the envelope, the `adaptive.frozen` setting and the `adaptive_controller_decisions` metric.
+- `common/adaptive`: the shared core, with the modes, rollout, the envelope, the `adaptive.frozen` setting, and decisions with their `adaptive_controller_decisions` metric.
 - `common/adaptive/capacity/controller.go`: the controller.
+- `common/signals`: the signal plane, its sources and its trace.
 - `common/persistence/client/capacity_rate_limiter.go`: the capacity-aware limiter.
 - `common/persistence/store_facts.go`: the store-facts types.
 - `common/persistence/windowed_counter.go`: request, error and fact counts aligned with the latency windows.

@@ -58,6 +58,7 @@ type (
 		HealthSignals                               persistence.HealthSignalAggregator
 		DynamicRateLimitingParams                   DynamicRateLimitingParams
 		AdaptiveFrozen                              AdaptiveFrozen
+		DecisionSink                                adaptive.DecisionSink
 		EnableDataLossMetrics                       EnableDataLossMetrics
 		EnableBestEffortDeleteTasksOnWorkflowUpdate EnableBestEffortDeleteTasksOnWorkflowUpdate
 		Serializer                                  serialization.Serializer
@@ -135,6 +136,7 @@ func FactoryProvider(
 			params.HealthSignals,
 			params.DynamicRateLimitingParams,
 			params.AdaptiveFrozen,
+			params.DecisionSink,
 			params.MetricsHandler,
 			params.Logger,
 		)

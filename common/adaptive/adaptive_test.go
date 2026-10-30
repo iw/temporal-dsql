@@ -1,8 +1,10 @@
 package adaptive_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/adaptive"
@@ -99,4 +101,36 @@ func TestFrozenIsOffByDefault(t *testing.T) {
 
 	dc = dynamicconfig.NewCollection(dynamicconfig.StaticClient{adaptive.Frozen.Key(): true}, log.NewNoopLogger())
 	require.True(t, adaptive.Frozen.Get(dc)())
+}
+
+type decisionLog []adaptive.Decision
+
+func (l *decisionLog) RecordDecision(d adaptive.Decision) { *l = append(*l, d) }
+
+func TestReportCountsAndForwardsADecision(t *testing.T) {
+	handler := metricstest.NewCaptureHandler()
+	capture := handler.StartCapture()
+	t.Cleanup(func() { handler.StopCapture(capture) })
+
+	var sink decisionLog
+	d := adaptive.Decision{Controller: "worker_count", Mode: adaptive.ModeShadow, Reason: "grow", Static: 8, Proposed: 10, Applied: 8}
+	adaptive.Report(handler, &sink, d)
+	adaptive.Report(handler, nil, d)
+
+	require.Equal(t, decisionLog{d}, sink)
+	recordings := capture.Snapshot()["adaptive_controller_decisions"]
+	require.Len(t, recordings, 2)
+	require.Equal(t, "worker_count", recordings[0].Tags["controller"])
+	require.Equal(t, "grow", recordings[0].Tags["reason"])
+}
+
+func TestDecisionsEncodeModesByName(t *testing.T) {
+	d := adaptive.Decision{Controller: "persistence_capacity", Time: time.Unix(1_700_000_000, 0).UTC(), Mode: adaptive.ModeOn, Reason: "idle"}
+	data, err := json.Marshal(d)
+	require.NoError(t, err)
+	require.Contains(t, string(data), `"Mode":"enabled"`)
+
+	var decoded adaptive.Decision
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Equal(t, d, decoded)
 }

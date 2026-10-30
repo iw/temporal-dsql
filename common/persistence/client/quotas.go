@@ -69,6 +69,7 @@ func NewPriorityRateLimiter(
 	healthSignals p.HealthSignalAggregator,
 	dynamicParams DynamicRateLimitingParams,
 	frozen AdaptiveFrozen,
+	decisions adaptive.DecisionSink,
 	metricsHandler metrics.Handler,
 	logger log.Logger,
 ) quotas.RequestRateLimiter {
@@ -96,6 +97,7 @@ func NewPriorityRateLimiter(
 			healthSignals,
 			dynamicParams,
 			frozen,
+			decisions,
 			metricsHandler,
 			logger,
 			rolloutKey,
