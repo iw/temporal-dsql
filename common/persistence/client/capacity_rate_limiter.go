@@ -2,11 +2,11 @@ package client
 
 import (
 	"context"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/capacity"
 	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/headers"
@@ -17,11 +17,9 @@ import (
 	"go.temporal.io/server/common/quotas"
 )
 
-const (
-	capacityModeDisabled = "disabled"
-	capacityModeShadow   = "shadow"
-	capacityModeEnabled  = "enabled"
-)
+// capacityController names the persistence capacity controller in adaptive's decision
+// metric.
+const capacityController = "persistence_capacity"
 
 // capacityAwareRateLimiter is the host-level dynamic persistence limiter.
 //
@@ -31,7 +29,8 @@ const (
 // driven by a single per-host capacity controller, which resolves the TODO in
 // newPriorityDynamicRateLimiter about making dynamic adjustment global across
 // priorities. With "shadow" the controller runs and reports what it would do
-// while the existing limiter stays in charge.
+// while the existing limiter stays in charge. While adaptive.frozen is set, it
+// holds the controller's rate where it is.
 //
 // Like HealthRequestRateLimiterImpl it steps lazily from the request path, so
 // it needs no goroutine or lifecycle hooks.
@@ -44,6 +43,7 @@ type capacityAwareRateLimiter struct {
 	metrics       metrics.Handler
 	logger        log.Logger
 	rolloutKey    []byte // this host's key for Capacity.RolloutPercent
+	frozen        func() bool
 
 	legacy   quotas.RequestRateLimiter
 	shared   quotas.RequestRateLimiter // priority cascade over buckets
@@ -55,7 +55,7 @@ type capacityAwareRateLimiter struct {
 
 	mu         sync.Mutex // guards the fields below
 	ctrl       *capacity.Controller
-	mode       string
+	mode       adaptive.Mode
 	lastReason capacity.Reason
 	lastShadow bool
 }
@@ -70,6 +70,7 @@ func newCapacityAwareRateLimiter(
 	burstRatio PersistenceBurstRatio,
 	healthSignals persistence.HealthSignalAggregator,
 	params DynamicRateLimitingParams,
+	frozen AdaptiveFrozen,
 	metricsHandler metrics.Handler,
 	logger log.Logger,
 	rolloutKey []byte,
@@ -84,10 +85,14 @@ func newCapacityAwareRateLimiter(
 		metrics:       metricsHandler,
 		logger:        logger,
 		rolloutKey:    rolloutKey,
+		frozen:        frozen,
 		legacy:        legacy,
 		buckets:       make(map[int]*quotas.RateLimiterImpl, len(RequestPrioritiesOrdered)),
 		ctrl:          capacity.New(initial),
-		mode:          capacityModeDisabled,
+		mode:          adaptive.ModeOff,
+	}
+	if l.frozen == nil {
+		l.frozen = func() bool { return false }
 	}
 	rateLimiters := make(map[int]quotas.RequestRateLimiter, len(RequestPrioritiesOrdered))
 	for _, priority := range RequestPrioritiesOrdered {
@@ -149,10 +154,22 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 	defer l.mu.Unlock()
 
 	mode := capacityMode(p, l.rolloutKey)
+	if mode != adaptive.ModeOff && l.frozen() {
+		// The freeze holds the rate where it is, but a change of mode still applies, so
+		// the controller can be disabled during an incident. A host that starts applying
+		// it takes the controller's rate, not what the buckets kept from an earlier run.
+		if mode == adaptive.ModeOn && l.mode != adaptive.ModeOn {
+			l.applyRate(l.ctrl.Rate())
+		}
+		l.setMode(mode, p)
+		l.denied.Store(false)
+		adaptive.RecordDecision(l.metrics, capacityController, adaptive.ReasonFrozen)
+		return
+	}
 	static := l.hostRateFn()
 
 	var snap persistence.HealthSnapshot
-	if mode != capacityModeDisabled {
+	if mode != adaptive.ModeOff {
 		snap = l.healthSignals.RecentSnapshot(p.Capacity.SignalWindows)
 	}
 	d := l.ctrl.Step(capacityEnvelope(p.Capacity, mode, static, snap.Span), static, capacity.Signals{
@@ -167,38 +184,24 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 		QueuedRatio:    ratio(snap.Queued, snap.Acquired),
 	})
 
-	if mode == capacityModeEnabled {
-		for priority, bucket := range l.buckets {
-			rps := d.RPS * l.priorityFactor(priority)
-			bucket.SetRPS(rps)
-			bucket.SetBurst(l.burst(rps))
-		}
+	if mode == adaptive.ModeOn {
+		l.applyRate(d.RPS)
 	}
-	if mode != l.mode {
-		if mode == capacityModeEnabled {
-			l.delegate.SetRateLimiter(l.shared)
-		} else {
-			l.delegate.SetRateLimiter(l.legacy)
-		}
-		l.logger.Info("Persistence capacity controller mode changed.",
-			tag.NewStringTag("from", l.mode), tag.NewStringTag("to", mode),
-			tag.NewInt("rolloutPercent", p.Capacity.RolloutPercent))
-		l.mode = mode
-	}
-	if mode == capacityModeDisabled {
+	l.setMode(mode, p)
+	if mode == adaptive.ModeOff {
 		return
 	}
 
 	if static > 0 {
 		metrics.DynamicRateLimiterMultiplier.With(l.metrics).Record(d.Proposed / static)
 	}
-	metrics.PersistenceCapacityDecisions.With(l.metrics).Record(1, metrics.StringTag("reason", string(d.Reason)))
+	adaptive.RecordDecision(l.metrics, capacityController, adaptive.Reason(d.Reason))
 	if d.LatencyShadow {
-		metrics.PersistenceCapacityDecisions.With(l.metrics).Record(1, metrics.StringTag("reason", capacityReasonLatencyShadow))
+		adaptive.RecordDecision(l.metrics, capacityController, capacityReasonLatencyShadow)
 	}
 	if d.Reason != l.lastReason && isDecrease(d.Reason) {
 		l.logger.Info("Persistence capacity controller decreased rate.",
-			tag.NewStringTag("mode", mode),
+			tag.NewStringTag("mode", mode.String()),
 			tag.NewStringTag("reason", string(d.Reason)),
 			tag.Float64("proposedRPS", d.Proposed),
 			tag.Float64("staticRPS", static),
@@ -212,7 +215,7 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 	}
 	if d.LatencyShadow && !l.lastShadow {
 		l.logger.Info("Persistence capacity controller's latency law would have decreased rate; the store reports facts, so it ran in shadow.",
-			tag.NewStringTag("mode", mode),
+			tag.NewStringTag("mode", mode.String()),
 			tag.NewDurationTag("p99", snap.P99),
 			tag.NewDurationTag("target", d.Target),
 		)
@@ -221,9 +224,35 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 	l.lastShadow = d.LatencyShadow
 }
 
+// applyRate sets the shared buckets to the controller's rate, scaled for each priority.
+func (l *capacityAwareRateLimiter) applyRate(rps float64) {
+	for priority, bucket := range l.buckets {
+		priorityRPS := rps * l.priorityFactor(priority)
+		bucket.SetRPS(priorityRPS)
+		bucket.SetBurst(l.burst(priorityRPS))
+	}
+}
+
+// setMode switches between the shared buckets and the existing limiter when the host's
+// mode changes.
+func (l *capacityAwareRateLimiter) setMode(mode adaptive.Mode, p dynamicconfig.DynamicRateLimitingParams) {
+	if mode == l.mode {
+		return
+	}
+	if mode == adaptive.ModeOn {
+		l.delegate.SetRateLimiter(l.shared)
+	} else {
+		l.delegate.SetRateLimiter(l.legacy)
+	}
+	l.logger.Info("Persistence capacity controller mode changed.",
+		tag.NewStringTag("from", l.mode.String()), tag.NewStringTag("to", mode.String()),
+		tag.NewInt("rolloutPercent", p.Capacity.RolloutPercent))
+	l.mode = mode
+}
+
 // capacityReasonLatencyShadow tags a step where the latency law would have cut a
 // store that reports facts, so shadow runs can compare the two.
-const capacityReasonLatencyShadow = "latency-shadow"
+const capacityReasonLatencyShadow adaptive.Reason = "latency-shadow"
 
 func isDecrease(reason capacity.Reason) bool {
 	switch reason {
@@ -261,32 +290,20 @@ func (l *capacityAwareRateLimiter) burst(rps float64) int {
 func capacityCeilingFn(hostRateFn quotas.RateFn, dynamicParams DynamicRateLimitingParams, rolloutKey []byte) quotas.RateFn {
 	return func() float64 {
 		params := dynamicParams()
-		if capacityMode(params, rolloutKey) == capacityModeEnabled && params.Capacity.MaxMultiplier > 1 {
+		if capacityMode(params, rolloutKey) == adaptive.ModeOn && params.Capacity.MaxMultiplier > 1 {
 			return params.Capacity.MaxMultiplier * hostRateFn()
 		}
 		return hostRateFn()
 	}
 }
 
-// capacityMode is the mode this host applies. Outside Capacity.RolloutPercent's
-// cohort, which rolloutKey places it in or out of, an enabled controller runs in
-// shadow.
-func capacityMode(p dynamicconfig.DynamicRateLimitingParams, rolloutKey []byte) string {
-	mode := p.Capacity.Mode
-	if !p.Enabled || (mode != capacityModeShadow && mode != capacityModeEnabled) {
-		return capacityModeDisabled
+// capacityMode is the mode this host applies: off unless Enabled is set and, outside
+// Capacity.RolloutPercent's cohort, shadow for an enabled controller.
+func capacityMode(p dynamicconfig.DynamicRateLimitingParams, rolloutKey []byte) adaptive.Mode {
+	if !p.Enabled {
+		return adaptive.ModeOff
 	}
-	if mode == capacityModeEnabled && !dynamicconfig.RolloutAccepts(rolloutKey, p.Capacity.RolloutPercent) {
-		return capacityModeShadow
-	}
-	return mode
-}
-
-// hostRolloutKey is this host's key for Capacity.RolloutPercent: its hostname, so a
-// host keeps its place in or out of the cohort across restarts.
-func hostRolloutKey() []byte {
-	hostname, _ := os.Hostname()
-	return []byte(hostname)
+	return adaptive.HostMode(p.Capacity.Mode, p.Capacity.RolloutPercent, rolloutKey)
 }
 
 // capacityEnvelope converts dynamic config into a controller envelope. The
@@ -295,15 +312,17 @@ func hostRolloutKey() []byte {
 // windows are configured larger than recommended.
 func capacityEnvelope(
 	p dynamicconfig.CapacityControllerParams,
-	mode string,
+	mode adaptive.Mode,
 	static float64,
 	signalSpan time.Duration,
 ) capacity.Envelope {
+	// The controller keeps its own mode type, so that it stays stdlib-only and the
+	// simulator can copy it as it is.
 	var m capacity.Mode
 	switch mode {
-	case capacityModeShadow:
+	case adaptive.ModeShadow:
 		m = capacity.ModeShadow
-	case capacityModeEnabled:
+	case adaptive.ModeOn:
 		m = capacity.ModeOn
 	default:
 		m = capacity.ModeOff

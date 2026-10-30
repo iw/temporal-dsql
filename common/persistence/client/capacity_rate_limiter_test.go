@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/headers"
 	"go.temporal.io/server/common/log"
@@ -41,6 +42,7 @@ type capacityLimiterFixture struct {
 	legacy  *countingLimiter
 	signals *fakeHealthSignals
 	params  dynamicconfig.DynamicRateLimitingParams
+	frozen  bool
 	now     time.Time
 	metrics *metricstest.Capture
 }
@@ -68,6 +70,7 @@ func newCapacityLimiterFixture(t *testing.T, mode string) *capacityLimiterFixtur
 		func() float64 { return 1 },
 		f.signals,
 		func() dynamicconfig.DynamicRateLimitingParams { return f.params },
+		func() bool { return f.frozen },
 		handler,
 		log.NewNoopLogger(),
 		[]byte("test-host"),
@@ -78,8 +81,10 @@ func newCapacityLimiterFixture(t *testing.T, mode string) *capacityLimiterFixtur
 // decisions lists the reasons the limiter recorded, in order.
 func (f *capacityLimiterFixture) decisions() []string {
 	var reasons []string
-	for _, recording := range f.metrics.Snapshot()["persistence_capacity_decisions"] {
-		reasons = append(reasons, recording.Tags["reason"])
+	for _, recording := range f.metrics.Snapshot()["adaptive_controller_decisions"] {
+		if recording.Tags["controller"] == capacityController {
+			reasons = append(reasons, recording.Tags["reason"])
+		}
 	}
 	return reasons
 }
@@ -108,12 +113,12 @@ func TestCapacityLimiterDisabledDelegatesToLegacy(t *testing.T) {
 		"default params": func(p *dynamicconfig.DynamicRateLimitingParams) {
 			*p = dynamicconfig.DefaultDynamicRateLimitingParams
 		},
-		"mode disabled":           func(p *dynamicconfig.DynamicRateLimitingParams) { p.Capacity.Mode = capacityModeDisabled },
+		"mode disabled":           func(p *dynamicconfig.DynamicRateLimitingParams) { p.Capacity.Mode = adaptive.ModeNameDisabled },
 		"enabled without Enabled": func(p *dynamicconfig.DynamicRateLimitingParams) { p.Enabled = false },
 		"unknown mode":            func(p *dynamicconfig.DynamicRateLimitingParams) { p.Capacity.Mode = "on" },
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newCapacityLimiterFixture(t, capacityModeEnabled)
+			f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 			configure(&f.params)
 			f.signals.snapshot = persistence.HealthSnapshot{P99: time.Second, ErrorRatio: 0.5, Samples: 1000}
 
@@ -122,14 +127,14 @@ func TestCapacityLimiterDisabledDelegatesToLegacy(t *testing.T) {
 				require.Equal(t, f.legacy.allow, f.allowAfter(time.Second))
 			}
 			require.Equal(t, 10, f.legacy.calls)
-			require.Equal(t, capacityModeDisabled, f.limiter.mode)
+			require.Equal(t, adaptive.ModeOff, f.limiter.mode)
 			require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
 		})
 	}
 }
 
 func TestCapacityLimiterEnabledDrivesSharedBuckets(t *testing.T) {
-	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	require.True(t, f.allowAfter(0)) // learns a 10ms baseline
 	require.Zero(t, f.legacy.calls)
 
@@ -143,7 +148,7 @@ func TestCapacityLimiterEnabledDrivesSharedBuckets(t *testing.T) {
 }
 
 func TestCapacityLimiterShadowKeepsLegacyInCharge(t *testing.T) {
-	f := newCapacityLimiterFixture(t, capacityModeShadow)
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameShadow)
 	f.allowAfter(0)
 	f.signals.snapshot = persistence.HealthSnapshot{P99: 200 * time.Millisecond, Throughput: 600, Samples: 1000}
 	f.allowAfter(time.Second)
@@ -154,7 +159,7 @@ func TestCapacityLimiterShadowKeepsLegacyInCharge(t *testing.T) {
 }
 
 func TestCapacityLimiterProbesOnlyWhileBinding(t *testing.T) {
-	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	f.allowAfter(0)
 	f.allowAfter(time.Second)
 	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001, "idle: no probe")
@@ -173,11 +178,11 @@ func TestCapacityLimiterProbesOnlyWhileBinding(t *testing.T) {
 }
 
 func TestCapacityLimiterReturnsToLegacyWhenDisabled(t *testing.T) {
-	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	f.allowAfter(0)
 	require.Zero(t, f.legacy.calls)
 
-	f.params.Capacity.Mode = capacityModeDisabled
+	f.params.Capacity.Mode = adaptive.ModeNameDisabled
 	f.legacy.allow = false
 	require.False(t, f.allowAfter(time.Second))
 	require.Equal(t, 1, f.legacy.calls)
@@ -192,12 +197,12 @@ func TestCapacityCeiling(t *testing.T) {
 		outsideCohort bool
 		want          float64
 	}{
-		"default":                     {mode: capacityModeDisabled, maxMultiplier: 3, want: testHostRPS},
-		"shadow":                      {enabled: true, mode: capacityModeShadow, maxMultiplier: 3, want: testHostRPS},
-		"enabled":                     {enabled: true, mode: capacityModeEnabled, maxMultiplier: 3, want: 3 * testHostRPS},
-		"enabled, no headroom":        {enabled: true, mode: capacityModeEnabled, maxMultiplier: 0.5, want: testHostRPS},
-		"capacity without Enabled":    {mode: capacityModeEnabled, maxMultiplier: 3, want: testHostRPS},
-		"enabled, outside the cohort": {enabled: true, mode: capacityModeEnabled, maxMultiplier: 3, outsideCohort: true, want: testHostRPS},
+		"default":                     {mode: adaptive.ModeNameDisabled, maxMultiplier: 3, want: testHostRPS},
+		"shadow":                      {enabled: true, mode: adaptive.ModeNameShadow, maxMultiplier: 3, want: testHostRPS},
+		"enabled":                     {enabled: true, mode: adaptive.ModeNameEnabled, maxMultiplier: 3, want: 3 * testHostRPS},
+		"enabled, no headroom":        {enabled: true, mode: adaptive.ModeNameEnabled, maxMultiplier: 0.5, want: testHostRPS},
+		"capacity without Enabled":    {mode: adaptive.ModeNameEnabled, maxMultiplier: 3, want: testHostRPS},
+		"enabled, outside the cohort": {enabled: true, mode: adaptive.ModeNameEnabled, maxMultiplier: 3, outsideCohort: true, want: testHostRPS},
 	} {
 		t.Run(name, func(t *testing.T) {
 			params := dynamicconfig.DefaultDynamicRateLimitingParams
@@ -214,7 +219,7 @@ func TestCapacityCeiling(t *testing.T) {
 }
 
 func TestCapacityLimiterActsOnStoreFacts(t *testing.T) {
-	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	f.signals.snapshot.StoreReportsFacts = true
 	f.allowAfter(0) // learns a 10ms baseline
 
@@ -229,7 +234,7 @@ func TestCapacityLimiterActsOnStoreFacts(t *testing.T) {
 }
 
 func TestCapacityLimiterReadsQueuedFactsAsAShareOfAcquires(t *testing.T) {
-	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	f.signals.snapshot.StoreReportsFacts = true
 	f.allowAfter(0)
 
@@ -272,7 +277,7 @@ func TestCapacityLimiterRollsOutToACohortOfHosts(t *testing.T) {
 	overload := persistence.HealthSnapshot{P99: 200 * time.Millisecond, Throughput: 600, Samples: 1000}
 
 	// A host in the cohort applies the controller.
-	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	f.limiter.rolloutKey = in
 	f.params.Capacity.RolloutPercent = 50
 	f.allowAfter(0)
@@ -282,7 +287,7 @@ func TestCapacityLimiterRollsOutToACohortOfHosts(t *testing.T) {
 	require.Zero(t, f.legacy.calls)
 
 	// A host outside it runs the controller in shadow, and the existing limiter stays in charge.
-	f = newCapacityLimiterFixture(t, capacityModeEnabled)
+	f = newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	f.limiter.rolloutKey = out
 	f.params.Capacity.RolloutPercent = 50
 	f.allowAfter(0)
@@ -294,7 +299,7 @@ func TestCapacityLimiterRollsOutToACohortOfHosts(t *testing.T) {
 }
 
 func TestCapacityLimiterRunsLatencyInShadowForStoresWithFacts(t *testing.T) {
-	f := newCapacityLimiterFixture(t, capacityModeEnabled)
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	f.signals.snapshot.StoreReportsFacts = true
 	f.allowAfter(0)
 
@@ -304,12 +309,62 @@ func TestCapacityLimiterRunsLatencyInShadowForStoresWithFacts(t *testing.T) {
 	f.allowAfter(time.Second)
 
 	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
-	require.Equal(t, []string{"idle", "idle", capacityReasonLatencyShadow}, f.decisions())
+	require.Equal(t, []string{"idle", "idle", string(capacityReasonLatencyShadow)}, f.decisions())
 }
 
 func TestCapacityLimiterRecordsNoDecisionsWhenDisabled(t *testing.T) {
-	f := newCapacityLimiterFixture(t, capacityModeDisabled)
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameDisabled)
 	f.allowAfter(0)
 	f.allowAfter(time.Second)
 	require.Empty(t, f.decisions())
+}
+
+func TestCapacityLimiterHoldsItsRateWhileFrozen(t *testing.T) {
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
+	f.allowAfter(0)
+
+	f.frozen = true
+	f.signals.snapshot = persistence.HealthSnapshot{P99: 200 * time.Millisecond, Throughput: 600, Samples: 1000}
+	f.allowAfter(time.Second)
+	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+	require.InDelta(t, testHostRPS, f.limiter.ctrl.Rate(), 0.001)
+	require.Zero(t, f.legacy.calls)
+
+	f.frozen = false
+	f.allowAfter(time.Second)
+	require.InDelta(t, 540, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+	require.Equal(t, []string{"idle", "frozen", "latency"}, f.decisions())
+}
+
+func TestCapacityLimiterCanBeDisabledWhileFrozen(t *testing.T) {
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
+	f.allowAfter(0)
+
+	f.frozen = true
+	f.params.Capacity.Mode = adaptive.ModeNameDisabled
+	f.legacy.allow = false
+	require.False(t, f.allowAfter(time.Second))
+	require.Equal(t, 1, f.legacy.calls)
+	require.Equal(t, adaptive.ModeOff, f.limiter.mode)
+	require.Equal(t, []string{"idle"}, f.decisions())
+}
+
+func TestCapacityLimiterEnabledWhileFrozenStartsAtTheControllersRate(t *testing.T) {
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
+	f.allowAfter(0)
+	f.signals.snapshot = persistence.HealthSnapshot{P99: 200 * time.Millisecond, Throughput: 600, Samples: 1000}
+	f.allowAfter(time.Second)
+	require.InDelta(t, 540, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+
+	// Disabling resets the controller to the static rate; the buckets keep the cut.
+	f.params.Capacity.Mode = adaptive.ModeNameDisabled
+	f.allowAfter(time.Second)
+
+	f.frozen = true
+	f.params.Capacity.Mode = adaptive.ModeNameEnabled
+	f.allowAfter(time.Second)
+	require.Equal(t, adaptive.ModeOn, f.limiter.mode)
+	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+	require.InDelta(t, 0.2*testHostRPS, f.bucketRPS(headers.CallerTypeOperator), 0.001)
+	require.Equal(t, 1, f.legacy.calls)
 }

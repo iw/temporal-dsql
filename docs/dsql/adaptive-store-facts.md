@@ -141,7 +141,7 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
   - Queued facts are read as a share of acquired facts, and that share is held to `MaxQueuedRatio`, 0.25 by default. At 0.25, a quarter of the pool's acquires found no idle connection. A cut reports the reason `queued`.
   - They aren't divided by store requests. One request can take several connections in turn, one for each transaction and one for each query outside a transaction, so that ratio has no fixed scale.
 - **On a store that reports facts, latency isn't a trigger.** The controller relies on facts and Temporal's own timeouts.
-  - The learned p99 law keeps running in shadow for comparison. When it would have cut, the step is logged, and counted as `latency-shadow` in `persistence_capacity_decisions`, which records every step's reason.
+  - The learned p99 law keeps running in shadow for comparison. When it would have cut, the step is logged, and counted as `latency-shadow` in `adaptive_controller_decisions`, which records every step's reason under the controller `persistence_capacity`.
   - If shadow runs show the facts miss nothing it catches, it goes for those stores.
   - Stores whose plugins report no facts keep it.
 
