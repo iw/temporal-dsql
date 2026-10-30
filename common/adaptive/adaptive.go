@@ -53,6 +53,17 @@ func (m Mode) String() string {
 	}
 }
 
+// MarshalText writes a mode by its dynamic config name, as traces record it.
+func (m Mode) MarshalText() ([]byte, error) {
+	return []byte(m.String()), nil
+}
+
+// UnmarshalText reads a mode as ParseMode does.
+func (m *Mode) UnmarshalText(text []byte) error {
+	*m = ParseMode(string(text))
+	return nil
+}
+
 // HostMode is the mode a host applies. An "enabled" mode runs in shadow on hosts outside
 // the cohort of rolloutPercent, which hostKey places the host in or out of. Raising the
 // percentage keeps the hosts already in, so a cohort grows steadily.
