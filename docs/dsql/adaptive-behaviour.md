@@ -153,6 +153,24 @@ The building blocks exist: `stats.NewWindowedTDigest` and `aggregate.MovingWindo
 
 **Keep the plane host-local.** Ringpop labels look like a free gossip channel, but a label change flips `labelsChecksum` and raises a `HostsChanged` membership event (`service_resolver.go:457`). Shard ownership listeners react to that, so churning a load label would churn membership. Cross-host demand belongs in Proposal 7's slower, dedicated exchange.
 
+On this branch, `common/signals` is the plane. Each service has one, off by default. While the `adaptive.signals` setting enables it, it takes a snapshot every `Interval`, 1s by default:
+
+- persistence health over the newest `Windows` latency windows, 3 by default, with the p90 of task queueing delay on history hosts;
+- history's RPC handler latency and error ratio over its health check aggregator's windows: the mean, and the p99 when `system.historyHealthSignalUsePercentiles` is set, which also makes history's deep health check use the p99;
+- the Go scheduler's p99 wait since the previous snapshot, goroutines, live heap and heap goal;
+- the memory limit and use of the process's cgroup, v1 or v2, and `GOMEMLIMIT`.
+
+Controllers report each step to the plane through `adaptive.Report`, and the next snapshot carries each controller's latest decision. The persistence capacity controller reports its steps, with the envelope and signals it stepped on. It still reads the persistence aggregator itself, on its own step.
+
+With `TraceDirectory` set, each service writes its snapshots and decisions to `<service>-<host>-<pid>.jsonl` in that directory, up to `TraceMaxBytes`, 1 GiB by default. Each line is one JSON object: a header that starts the file, a snapshot or a decision. Durations are in nanoseconds. The traces feed the offline replay and the system appreciation.
+
+```yaml
+adaptive.signals:
+  - value:
+      Enabled: true
+      TraceDirectory: /var/tmp/temporal-signals
+```
+
 ## Proposal 3: one persistence capacity controller
 
 Replace the per-priority health limiters with one controller per host that computes an admitted rate C. All seven priority buckets take C (the operator bucket C × `operatorRPSRatio`), so the existing cascade still sheds background work first. When the controller is on, the basic static limiter becomes a safety ceiling at `MaxMultiplier × hostMaxQPS`, which removes the structural cap described in the diagnosis.
