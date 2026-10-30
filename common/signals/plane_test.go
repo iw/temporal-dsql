@@ -75,7 +75,7 @@ func TestPlaneIsOffByDefault(t *testing.T) {
 	f := newPlaneFixture(t, nil)
 	f.settings = DefaultSettings
 	called := false
-	f.plane.Subscribe(func(*Snapshot) { called = true })
+	f.plane.Subscribe(func(*Snapshot) { called = true }, nil)
 
 	require.Nil(t, f.tick())
 	require.False(t, called)
@@ -86,7 +86,7 @@ func TestPlaneSnapshotsTheHost(t *testing.T) {
 	f := newPlaneFixture(t, fakeRPC{meanMS: 20, p99MS: 85, errorRatio: 0.02, enabled: true, percentiles: true})
 	f.settings.Windows = 5
 	var published *Snapshot
-	f.plane.Subscribe(func(s *Snapshot) { published = s })
+	f.plane.Subscribe(func(s *Snapshot) { published = s }, nil)
 
 	snap := f.tick()
 	require.NotNil(t, snap)
@@ -132,8 +132,8 @@ func TestPlaneKeepsEachControllersLatestDecision(t *testing.T) {
 func TestPlaneCallsSubscribersInOrderUntilCancelled(t *testing.T) {
 	f := newPlaneFixture(t, nil)
 	var calls []string
-	cancelFirst := f.plane.Subscribe(func(*Snapshot) { calls = append(calls, "first") })
-	f.plane.Subscribe(func(*Snapshot) { calls = append(calls, "second") })
+	cancelFirst := f.plane.Subscribe(func(*Snapshot) { calls = append(calls, "first") }, nil)
+	f.plane.Subscribe(func(*Snapshot) { calls = append(calls, "second") }, nil)
 
 	f.tick()
 	cancelFirst()

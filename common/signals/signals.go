@@ -23,9 +23,12 @@ type (
 		// Persistence is the persistence health over the newest Settings.Windows latency
 		// windows, including the p90 of task queueing delay on history hosts.
 		Persistence persistence.HealthSnapshot
-		RPC         RPC
-		Runtime     Runtime
-		Memory      Memory
+		// Queues is the queueing delay of each of history's task queues, by queue, over the
+		// newest Settings.Windows seconds.
+		Queues  map[string]Queue `json:",omitempty"`
+		RPC     RPC
+		Runtime Runtime
+		Memory  Memory
 		// Decisions holds each controller's latest decision, by controller. Traces record
 		// decisions as their own lines instead.
 		Decisions map[string]adaptive.Decision `json:"-"`
@@ -66,7 +69,8 @@ type (
 
 	// Settings is the plane's dynamic config.
 	Settings struct {
-		// Enabled runs the plane. It's off by default.
+		// Enabled runs the plane. It's off by default, but a controller that drives a
+		// setting from the plane runs it while that controller is in shadow or enabled.
 		Enabled bool
 		// Interval is the time between snapshots.
 		Interval time.Duration
