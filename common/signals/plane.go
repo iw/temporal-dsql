@@ -10,6 +10,7 @@ import (
 	"go.temporal.io/server/common/clock"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/persistence"
+	"go.temporal.io/server/common/stats"
 )
 
 type (
@@ -33,9 +34,11 @@ type (
 		rpc         RPCHealth // nil on hosts that don't record RPC health
 		runtime     *runtimeSource
 		memory      *cgroupMemory
+		queues      queueDelays
 		timeSource  clock.TimeSource
 
-		latest atomic.Pointer[Snapshot]
+		latest  atomic.Pointer[Snapshot]
+		running atomic.Bool // whether the last tick took a snapshot
 
 		mu          sync.Mutex // guards the fields below
 		decisions   map[string]adaptive.Decision
@@ -50,8 +53,9 @@ type (
 	}
 
 	subscriber struct {
-		id int
-		fn func(*Snapshot)
+		id     int
+		fn     func(*Snapshot)
+		active func() bool
 	}
 )
 
@@ -72,6 +76,7 @@ func newPlane(
 		rpc:         rpcHealth,
 		runtime:     newRuntimeSource(),
 		memory:      memory,
+		queues:      queueDelays{byQueue: make(map[string]stats.TimeWindowedStats)},
 		timeSource:  timeSource,
 		decisions:   make(map[string]adaptive.Decision),
 		trace:       newTraceWriter(traceHeader, logger),
@@ -80,20 +85,21 @@ func newPlane(
 	}
 }
 
-// Latest returns the newest snapshot, or nil while the plane is disabled.
+// Latest returns the newest snapshot, or nil while the plane isn't running.
 func (p *Plane) Latest() *Snapshot {
 	return p.latest.Load()
 }
 
 // Subscribe calls fn with each new snapshot, on the plane's goroutine and in the order
-// subscribers subscribed, until the returned function cancels it.
-func (p *Plane) Subscribe(fn func(*Snapshot)) (cancel func()) {
+// subscribers subscribed, until the returned function cancels it. While active, if it
+// isn't nil, returns true, the plane runs even if Settings.Enabled is off.
+func (p *Plane) Subscribe(fn func(*Snapshot), active func() bool) (cancel func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	id := p.nextID
 	p.nextID++
 	// Copied on write, so a tick can call the subscribers without holding the lock.
-	p.subscribers = append(p.subscribers[:len(p.subscribers):len(p.subscribers)], subscriber{id: id, fn: fn})
+	p.subscribers = append(p.subscribers[:len(p.subscribers):len(p.subscribers)], subscriber{id: id, fn: fn, active: active})
 	return func() {
 		p.mu.Lock()
 		defer p.mu.Unlock()
@@ -120,11 +126,12 @@ func (p *Plane) RecordDecision(d adaptive.Decision) {
 	p.trace.write(Record{Decision: &d})
 }
 
-// Tick takes and publishes a snapshot at now, if the plane is enabled. Only one
-// goroutine may call it.
+// Tick takes and publishes a snapshot at now, if the plane is enabled or a subscriber
+// is active. Only one goroutine may call it.
 func (p *Plane) Tick(now time.Time) {
 	s := p.settings()
-	if !s.Enabled {
+	if !s.Enabled && !p.anyActive() {
+		p.running.Store(false)
 		p.latest.Store(nil)
 		p.runtime.reset()
 		p.mu.Lock()
@@ -132,9 +139,11 @@ func (p *Plane) Tick(now time.Time) {
 		p.mu.Unlock()
 		return
 	}
+	p.running.Store(true)
 
 	snap := &Snapshot{Time: now}
 	snap.Persistence = p.persistence.RecentSnapshot(max(1, s.Windows))
+	snap.Queues = p.queues.snapshot(max(1, s.Windows), now)
 	if p.rpc != nil {
 		if errorRatio, ok := p.rpc.ErrorRatio(); ok {
 			snap.RPC = RPC{Reported: true, Mean: millis(p.rpc.AverageLatency()), ErrorRatio: errorRatio}
@@ -158,6 +167,18 @@ func (p *Plane) Tick(now time.Time) {
 	for _, sub := range subscribers {
 		sub.fn(snap)
 	}
+}
+
+func (p *Plane) anyActive() bool {
+	p.mu.Lock()
+	subscribers := p.subscribers
+	p.mu.Unlock()
+	for _, sub := range subscribers {
+		if sub.active != nil && sub.active() {
+			return true
+		}
+	}
+	return false
 }
 
 func millis(ms float64) time.Duration {

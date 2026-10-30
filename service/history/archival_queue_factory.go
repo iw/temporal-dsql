@@ -69,7 +69,7 @@ func newHostScheduler(params ArchivalQueueFactoryParams) queues.Scheduler {
 	return queues.NewScheduler(
 		params.ClusterMetadata.GetCurrentClusterName(),
 		queues.SchedulerOptions{
-			WorkerCount:                    params.Config.ArchivalProcessorSchedulerWorkerCount,
+			WorkerCount:                    params.HistoryQueues.WorkerCount(tasks.CategoryArchival.Name(), params.Config.ArchivalProcessorSchedulerWorkerCount),
 			ActiveNamespaceWeights:         dynamicconfig.GetMapPropertyFnFilteredByNamespace(ArchivalTaskPriorities),
 			StandbyNamespaceWeights:        dynamicconfig.GetMapPropertyFnFilteredByNamespace(ArchivalTaskPriorities),
 			InactiveNamespaceDeletionDelay: params.Config.TaskSchedulerInactiveChannelDeletionDelay,
@@ -177,7 +177,7 @@ func (f *archivalQueueFactory) newScheduledQueue(shard historyi.ShardContext, ex
 		f.Config.TaskDLQUnexpectedErrorAttempts,
 		f.Config.TaskDLQInternalErrors,
 		f.Config.TaskDLQErrorPattern,
-		f.HealthSignals,
+		f.HistoryQueues.ScheduleLatencyRecorder(tasks.CategoryArchival.Name()),
 	)
 	return queues.NewScheduledQueue(
 		shard,

@@ -135,7 +135,7 @@ Every envelope field has a precedent in 1.32:
 
 `ModeOff` must be bit-identical to today's behaviour, so the default is safe to ship.
 
-On this branch, `common/adaptive` holds the modes, `RolloutPercent`, the freeze key, the decisions metric and a generic `Envelope` with bounds and a step limit. The persistence capacity controller uses the first four. It keeps its own envelope, because its bounds are multiples of the static rate and it steps differently for cuts and probes. `Subscribable` comes with the worker counts in Proposal 4, the first controller to drive a subscribable setting.
+On this branch, `common/adaptive` holds the modes, `RolloutPercent`, the freeze key, the decisions metric and a generic `Envelope` with bounds and a step limit. The persistence capacity controller uses the first four. It keeps its own envelope, because its bounds are multiples of the static rate and it steps differently for cuts and probes. The worker counts in Proposal 4 add `Subscribable`, as `signals.Drive`.
 
 ## Proposal 2: a per-host signal plane
 
@@ -213,6 +213,24 @@ The control law is `goro.AdaptivePool`'s, lifted into a controller:
 - **Shrink** slowly when workers sit idle, with jitter so the pool shrinks slower than it grows.
 
 The backoff guard is the important part. Adding workers while persistence is the bottleneck only manufactures more `ResourceExhausted` errors, which `executable.go` then resubmits.
+
+On this branch, `common/adaptive/workers` drives the worker counts of history's transfer, timer, visibility and archival queues. The memory timer and replication queues record no queueing delay, so they keep their settings. Each queue's controller steps on the signal plane's snapshots, which carry each queue's p90 delay over the newest `Windows` seconds:
+
+- **Grow** by `GrowFrac`, 25%, while the p90 delay is above `TargetDelay`, 100 ms, at most once per `Cooldown`, 3s.
+- **Back off** while persistence is backing off: hold, or return to the configured count if the pool grew. Persistence is backing off while any of these holds:
+  - the capacity controller found the store overloaded in the last `BackoffHold`, 10s;
+  - errors, throttled calls and the persistence rate limiter's rejections pass `MaxErrorRatio`, 1%, of calls;
+  - more than `MaxQueuedRatio`, 25%, of the store's connection acquires waited.
+- **Shrink** by `ShrinkFrac`, 5%, after `IdleSteps`, 30, idle steps in a row. A step is idle when the delay is under a quarter of the target or covers fewer than `MinSamples`, 20, tasks.
+- **Bounds** are `MinMultiplier`, 0.5, and `MaxMultiplier`, 2, of each queue's worker count setting.
+
+`signals.Drive` turns a controller into a subscribable setting. While the controller is disabled, the scheduler gets its setting's value as before. In shadow, the controller reports what it would do. Enabled, it applies its proposals within the envelope. A controller in shadow or enabled runs the plane even when `adaptive.signals` doesn't enable it. The backoff guard reads persistence health, so it needs `system.persistenceHealthSignalPercentilesEnabled`.
+
+```yaml
+history.workerCountController:
+  - value:
+      Mode: shadow
+```
 
 ## Proposal 5: a memory budget instead of counts and bytes
 

@@ -275,7 +275,7 @@ func (f *outboundQueueFactory) CreateQueue(
 		f.Config.TaskDLQUnexpectedErrorAttempts,
 		f.Config.TaskDLQInternalErrors,
 		f.Config.TaskDLQErrorPattern,
-		f.HealthSignals,
+		f.HistoryQueues.ScheduleLatencyRecorder(tasks.CategoryOutbound.Name()),
 	)
 	return queues.NewImmediateQueue(
 		shardContext,
