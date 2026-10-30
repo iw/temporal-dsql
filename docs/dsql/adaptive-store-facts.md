@@ -85,6 +85,7 @@ const (
 	StoreFactContention
 	StoreFactLimit
 	StoreFactQueued
+	StoreFactAcquired // the base that queued facts are a share of
 )
 
 // StoreFacts receives typed facts from a persistence plugin.
@@ -116,15 +117,16 @@ The health signal aggregator implements `StoreFacts`.
 | `TxRetryBackoff`: retries on 40001 ran out | Contention |
 | `maybeConvertError`: DSQL returned 54000 (transaction, row, key or age limits), 53200 (a transaction's memory) or 53100 (storage) | Limit |
 | A once-a-second sample of the pool's acquires that found no idle connection | Queued |
+| The same sample's count of all the pool's acquires | Acquired |
 
-The plugin reports each failed call once, where it already converts the error. Its existing pool collector samples every 15 seconds, which is too coarse for the controller's windows, so queued facts have a sampler of their own.
+The plugin reports each failed call once, where it already converts the error. Its existing pool collector samples every 15 seconds, which is too coarse for the controller's windows, so queued and acquired facts have a sampler of their own.
 
 `txExecute` is core code from the fork's patch set, and its retry policy belongs to the plugin. The plugin reports contention where its retries run out.
 
 AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection rate and 53300 for the connection count. Its other codes are fixed limits. Nothing throttles query throughput, so on DSQL these facts and Temporal's timeouts cover every documented constraint.
 
 **The plugin's own pacing shows up as queued facts.** The first row rarely fires. pgx's pool (puddle) builds a new connection in a goroutine whose context the caller's deadline doesn't cancel. So `beforeConnect` waits on the pacing without that deadline.
-- A caller whose deadline passes gives up on the pool and counts as queued, or as a timeout.
+- A caller that waits and then gets a connection counts as queued. One whose deadline passes first gives up on the pool, and its call counts as a timeout.
 - The pacing wait fails only if the pool closes during it, at shutdown.
 - On DSQL, throttled facts come from DSQL's own refusals.
 
@@ -136,7 +138,8 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
 - **Contention is reported, not acted on.** Conflicts concentrate on hot keys, so cutting the host's rate would shed unrelated work. Contention appears in `persistence_store_facts`.
 - **Queued facts are an early overload signal.** The pool belongs to the plugin, so callers queueing for its connections is a fact, not an inference.
   - It warns before deadlines expire, as latency did before.
-  - Queued facts divided by store requests are held to `MaxQueuedRatio`, 0.25 by default, and a cut reports the reason `queued`.
+  - Queued facts are read as a share of acquired facts, and that share is held to `MaxQueuedRatio`, 0.25 by default. At 0.25, a quarter of the pool's acquires found no idle connection. A cut reports the reason `queued`.
+  - They aren't divided by store requests. One request can take several connections in turn, one for each transaction and one for each query outside a transaction, so that ratio has no fixed scale.
 - **On a store that reports facts, latency isn't a trigger.** The controller relies on facts and Temporal's own timeouts.
   - The learned p99 law keeps running in shadow for comparison. When it would have cut, the step is logged, and counted as `latency-shadow` in `persistence_capacity_decisions`, which records every step's reason.
   - If shadow runs show the facts miss nothing it catches, it goes for those stores.
