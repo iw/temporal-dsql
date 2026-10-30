@@ -21,6 +21,8 @@ func (a *noopSignalAggregator) Record(_ int32, _ time.Duration, _ error) {}
 
 func (a *noopSignalAggregator) RecordCall(_ context.Context, _ int32, _ time.Duration, _ error) {}
 
+func (a *noopSignalAggregator) RecordScheduleLatency(_ time.Duration) {}
+
 func (a *noopSignalAggregator) AverageLatency() float64 {
 	return 0
 }

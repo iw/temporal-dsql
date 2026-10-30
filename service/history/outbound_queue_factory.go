@@ -275,6 +275,7 @@ func (f *outboundQueueFactory) CreateQueue(
 		f.Config.TaskDLQUnexpectedErrorAttempts,
 		f.Config.TaskDLQInternalErrors,
 		f.Config.TaskDLQErrorPattern,
+		f.HealthSignals,
 	)
 	return queues.NewImmediateQueue(
 		shardContext,

@@ -84,6 +84,36 @@ func TestRecentSnapshotDeclaredFactsAndThrottledThroughput(t *testing.T) {
 	require.InDelta(t, 10.0, snap.Throughput*snap.Span.Seconds(), 1e-6)
 }
 
+func TestRecentSnapshotReportsScheduleLatency(t *testing.T) {
+	percentiles := true
+	agg := NewHealthSignalAggregator(
+		true,
+		func() bool { return percentiles },
+		time.Minute,
+		1000,
+		metrics.NoopMetricsHandler,
+		log.NewNoopLogger(),
+		time.Second,
+		10,
+	)
+	t.Cleanup(agg.emitMetricsTimer.Stop)
+	require.Zero(t, agg.RecentSnapshot(3).ScheduleSamples)
+
+	for i := 1; i <= 100; i++ {
+		agg.RecordScheduleLatency(time.Duration(i) * time.Millisecond)
+	}
+	snap := agg.RecentSnapshot(3)
+	require.Equal(t, 100, snap.ScheduleSamples)
+	require.InDelta(t, float64(90*time.Millisecond), float64(snap.ScheduleP90), float64(2*time.Millisecond))
+	require.Zero(t, snap.Samples, "task waits aren't persistence calls")
+
+	// Like the persistence windows, task waits are recorded only with percentiles on.
+	percentiles = false
+	agg.RecordScheduleLatency(time.Second)
+	percentiles = true
+	require.Equal(t, 100, agg.RecentSnapshot(3).ScheduleSamples)
+}
+
 func TestRecentSnapshotLeavesOutLimiterRejections(t *testing.T) {
 	agg := NewHealthSignalAggregator(
 		true,
