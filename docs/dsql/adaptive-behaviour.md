@@ -135,6 +135,8 @@ Every envelope field has a precedent in 1.32:
 
 `ModeOff` must be bit-identical to today's behaviour, so the default is safe to ship.
 
+On this branch, `common/adaptive` holds the modes, `RolloutPercent`, the freeze key, the decisions metric and a generic `Envelope` with bounds and a step limit. The persistence capacity controller uses the first four. It keeps its own envelope, because its bounds are multiples of the static rate and it steps differently for cuts and probes. `Subscribable` comes with the worker counts in Proposal 4, the first controller to drive a subscribable setting.
+
 ## Proposal 2: a per-host signal plane
 
 Generalise `persistence.HealthSignalAggregator` into a `common/signals` package that every controller on a host reads. It publishes one immutable snapshot per tick, so controllers see a consistent view and can be tested deterministically with a fake `clock.TimeSource`.
@@ -233,8 +235,8 @@ Every controller ships disabled, is proven in shadow, and stays inside bounds an
 - **Three modes.** Disabled returns the static value exactly. Shadow runs the controller and reports proposals while the static value applies. Enabled applies the output, clamped. Shadow is open-loop: proposals never feel their own effect, so they show direction and timing, not a settled value.
 - **Bounds and step limits.** Every output is clamped to a minimum and maximum and to a largest change per tick.
 - **Staged rollout.** `RolloutAccepts` keyed on host or shard ID enables a controller on a stable, growing cohort. On this branch, the persistence controller has it as `Capacity.RolloutPercent`, keyed on the hostname.
-- **One freeze key.** An `adaptive.frozen` setting holds every controller at its current value during an incident.
-- **Explainable decisions.** Each decision carries a reason (latency, errors, cooldown, idle, probe), emitted as a metric tag and logged on decreases, as matching already does for poller scaling.
+- **One freeze key.** An `adaptive.frozen` setting holds every controller at its current value during an incident. Modes still change while it's set, so a controller can still be disabled. On this branch, the persistence controller honours it.
+- **Explainable decisions.** Each decision carries a reason (latency, errors, cooldown, idle, probe), emitted as a metric tag and logged on decreases, as matching already does for poller scaling. On this branch, `adaptive_controller_decisions` counts every step by `controller` and `reason`.
 
 **Separate the timescales** so loops don't chase each other. Inner loops must settle before outer loops act on them.
 

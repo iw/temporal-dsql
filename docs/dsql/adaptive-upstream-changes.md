@@ -1,6 +1,6 @@
 # Adaptive behaviour: changes to upstream code
 
-The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller) and its [store facts](adaptive-store-facts.md), the task queueing delay that [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane) adds to the host's signals, and the partition scaler option from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity).
+The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller) and its [store facts](adaptive-store-facts.md), the task queueing delay that [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane) adds to the host's signals, and the partition scaler option from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity).
 
 The branch takes main's changes by merge or rebase, and reaches a new release tag through main. When that happens, check the files below against the new tag first.
 
@@ -9,14 +9,15 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 | File | Change and reason |
 | --- | --- |
 | `common/dynamicconfig/shared_constants.go` | `DynamicRateLimitingParams` gains `Capacity`, the controller's envelope. Its `Mode` is disabled by default, and its `RolloutPercent`, 100 by default, is the share of hosts that apply an enabled `Mode`. |
-| `common/persistence/client/quotas.go` | `NewPriorityRateLimiter` wraps the per-priority health limiters in the capacity-aware limiter. The basic limiter's rate comes from `capacityCeilingFn`. Both take the host's rollout key, its hostname. |
+| `common/persistence/client/quotas.go` | `NewPriorityRateLimiter` wraps the per-priority health limiters in the capacity-aware limiter, which also takes the `adaptive.frozen` setting. The basic limiter's rate comes from `capacityCeilingFn`. Both take the host's rollout key, its hostname. |
+| `common/persistence/client/fx.go` | `Module` provides `AdaptiveFrozen`, the `adaptive.frozen` setting, and `FactoryProvider` passes it to `NewPriorityRateLimiter`. |
 | `common/persistence/client/factory.go` | `NewFactory` hands the health signal aggregator to a data store factory that accepts store facts. |
 | `common/persistence/health_signal_aggregator.go` | The aggregator gains `RecentSnapshot`, `RecordCall` and `RecordScheduleLatency`, and implements `StoreFacts`. The snapshot leaves out the persistence limiter's own rejections, counts a call that failed after its deadline as a timeout, and leaves calls the store reports as throttled out of delivered throughput. It also reports the p90 of how long history task attempts waited in their schedulers. |
 | `common/persistence/noop_health_signal_aggregator.go` | The no-op aggregator implements the new methods. |
 | `common/persistence/persistence_metric_clients.go` | Each call records its own context through `RecordCall`, so a call that fails after its deadline counts as a timeout, whatever error the store wrapped it in. |
 | `common/persistence/sql/factory.go` | `DbConn` keeps the store-facts sink and passes it to the plugin's database when that's created. |
 | `common/stats/windowed_tdigest.go` | `QuantileRecent` reads a quantile over the newest windows only. |
-| `common/metrics/metric_defs.go` | Adds `persistence_store_facts` and `persistence_capacity_decisions`. |
+| `common/metrics/metric_defs.go` | Adds `persistence_store_facts`. |
 | `service/history/queues/executable.go` | Each task attempt also passes its `scheduleLatency` to an optional `ScheduleLatencyRecorder`, beside the existing metric. |
 | `service/history/queues/executable_factory.go` | `NewExecutableFactory` takes the recorder and passes it to each executable. |
 | `service/history/queue_factory_base.go` | `QueueFactoryBaseParams` gains `HealthSignals`, the persistence health signal aggregator. |
@@ -32,6 +33,7 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 
 These files extend existing packages without editing upstream files:
 
+- `common/adaptive`: the shared core, with the modes, rollout, the envelope, the `adaptive.frozen` setting and the `adaptive_controller_decisions` metric.
 - `common/adaptive/capacity/controller.go`: the controller.
 - `common/persistence/client/capacity_rate_limiter.go`: the capacity-aware limiter.
 - `common/persistence/store_facts.go`: the store-facts types.
