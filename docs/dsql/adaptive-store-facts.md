@@ -163,6 +163,41 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
   - The simulator doesn't yet model the host recording the limiter's rejections, or a source of throttled facts. Once it does, rerun the six scenarios.
 - **Live:** run in shadow mode on a throwaway cluster, with `maxConns` and the connection rate set low enough to cause throttling. The decisions it logs show whether the controller hears DSQL.
 
+## Shadow runs
+
+In October 2026 the controller ran in shadow mode three times: it made and recorded its decisions while the existing limiter stayed in charge. Each run used a throwaway DSQL cluster in eu-west-1 and a single-process server on a laptop, so every query paid a round trip to the region. A driver started simple workflows at a fixed rate.
+
+**29 October: 4 shards at 10 starts a second.** One phase capped history's `maxConns` at 4, and another paced new connections at 1 a second with 2-minute lifetimes.
+- Queued facts reached the controller, which decided to cut for `queued` 54 and 48 times.
+- There were no throttled facts. The plugin's pacing showed up as queued facts, as [section 4](#4-what-the-dsql-plugin-reports) describes.
+- Timeouts weren't counted, because SQL stores return them as `Unavailable`. #88 fixed that.
+- 4 shards couldn't keep up, and the phases shared a database, so later phases started with a backlog.
+
+**30 October, after #88: 32 shards at 5 starts a second, `maxConns` 20.** From here on, each phase had its own schemas and server.
+- History's pool was the limit, at about 250 calls a second.
+- The controller's first `queued` decision came 10 seconds into the load. The latency law never fired, because it learned its baseline while the pool was already saturated.
+- Queued facts came to about 1.55 per request. As a share of acquires, which is how #89 reads them, about 0.93 of acquires waited, going by the next run's 1.66 acquires per call.
+- The run stopped there, since the baseline itself was pool-bound.
+
+**30 October, after #89: 32 shards, `maxConns` 64.**
+
+| Phase | Load | History calls a second | Queued share | Cuts | Latency-law shadow cuts |
+|---|---|---|---|---|---|
+| Baseline | 5 starts a second for 5 minutes | 247 | 0 | 0 | history 2 |
+| Ramp | 5, 10, 20 and 30 starts a second, 2 minutes each | 380 | 0 | 0 | history 4, matching 8 |
+| Connection storm | 5 starts a second, plus 300 connection attempts a second for a minute | 287 | 0 | 0 | history 11, matching 5 |
+
+- No acquire waited. Each history call took about 1.66 of the pool's connections in turn.
+- History's latency-law shadow cuts came at the start of load, when p99 rose past twice a baseline learned while the server was idle, and late in the drains. Matching's came during the ramp's top steps and just after the storm. None came with persistence errors or waits for connections.
+- The ramp's limit was above persistence. 4,196 of its 7,800 workflows were still running after a 5-minute drain, while persistence took about 170 writes a second across 32 shards, with no waits for connections and 4 errors.
+  - History writes to each shard one at a time (`history.shardIOConcurrency` is 1), and each write takes several round trips from the laptop.
+  - The updates that failed ended with their context cancelled before they reached the store, so the controller doesn't see them, by design.
+- DSQL refused about 60% of the storm's connection attempts with 53400. The server's pools were full and needed no new connections during the storm, so no caller saw a refusal and no throttled facts were reported.
+
+**What they show:** queued facts catch a short pool within seconds, where the latency law can miss it. With a healthy pool, the facts made no cuts.
+
+**What they don't cover:** store-side overload. From a laptop, history's shard writes reach their limit long before DSQL does, so throttled facts have no live evidence yet. Whether the latency law can go for stores that report facts, as [section 5](#5-how-the-controller-uses-the-facts) proposes, waits on the simulator testing them.
+
 ## Decisions
 
 Agreed on 29 October 2026:
