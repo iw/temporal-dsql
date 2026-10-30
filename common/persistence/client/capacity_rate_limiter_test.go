@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/adaptive/capacity"
 	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/headers"
 	"go.temporal.io/server/common/log"
@@ -37,9 +38,19 @@ func (c *countingLimiter) Allow(time.Time, quotas.Request) bool {
 	return c.allow
 }
 
+// decisionLog keeps the decisions reported to it.
+type decisionLog struct {
+	decisions []adaptive.Decision
+}
+
+func (d *decisionLog) RecordDecision(decision adaptive.Decision) {
+	d.decisions = append(d.decisions, decision)
+}
+
 type capacityLimiterFixture struct {
 	limiter *capacityAwareRateLimiter
 	legacy  *countingLimiter
+	sink    *decisionLog
 	signals *fakeHealthSignals
 	params  dynamicconfig.DynamicRateLimitingParams
 	frozen  bool
@@ -54,6 +65,7 @@ func newCapacityLimiterFixture(t *testing.T, mode string) *capacityLimiterFixtur
 	handler := metricstest.NewCaptureHandler()
 	f := &capacityLimiterFixture{
 		legacy:  &countingLimiter{allow: true},
+		sink:    &decisionLog{},
 		signals: &fakeHealthSignals{snapshot: healthySnapshot()},
 		params:  dynamicconfig.DefaultDynamicRateLimitingParams,
 		now:     time.Unix(1_700_000_000, 0),
@@ -71,6 +83,7 @@ func newCapacityLimiterFixture(t *testing.T, mode string) *capacityLimiterFixtur
 		f.signals,
 		func() dynamicconfig.DynamicRateLimitingParams { return f.params },
 		func() bool { return f.frozen },
+		f.sink,
 		handler,
 		log.NewNoopLogger(),
 		[]byte("test-host"),
@@ -367,4 +380,49 @@ func TestCapacityLimiterEnabledWhileFrozenStartsAtTheControllersRate(t *testing.
 	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
 	require.InDelta(t, 0.2*testHostRPS, f.bucketRPS(headers.CallerTypeOperator), 0.001)
 	require.Equal(t, 1, f.legacy.calls)
+}
+
+func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
+	f.allowAfter(0)
+	f.signals.snapshot = persistence.HealthSnapshot{P99: 200 * time.Millisecond, Throughput: 600, Samples: 1000}
+	f.allowAfter(time.Second)
+
+	require.Len(t, f.sink.decisions, 2)
+	cut := f.sink.decisions[1]
+	require.Equal(t, capacityController, cut.Controller)
+	require.Equal(t, f.now, cut.Time)
+	require.Equal(t, adaptive.ModeOn, cut.Mode)
+	require.Equal(t, adaptive.Reason(capacity.ReasonLatency), cut.Reason)
+	require.InDelta(t, testHostRPS, cut.Static, 0.001)
+	require.InDelta(t, 540, cut.Proposed, 0.001)
+	require.InDelta(t, 540, cut.Applied, 0.001)
+
+	// The detail is what the controller stepped on, so a trace can replay the step.
+	step, ok := cut.Detail.(capacityStep)
+	require.True(t, ok)
+	require.Equal(t, capacity.ModeOn, step.Envelope.Mode)
+	require.Equal(t, 200*time.Millisecond, step.Signals.P99)
+	require.InDelta(t, 600, step.Signals.Throughput, 0.001)
+	require.Equal(t, capacity.ReasonLatency, step.Decision.Reason)
+}
+
+func TestCapacityLimiterReportsWhatItAppliesInShadowAndWhileFrozen(t *testing.T) {
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameShadow)
+	f.allowAfter(0)
+	f.signals.snapshot = persistence.HealthSnapshot{P99: 200 * time.Millisecond, Throughput: 600, Samples: 1000}
+	f.allowAfter(time.Second)
+	shadow := f.sink.decisions[1]
+	require.Equal(t, adaptive.ModeShadow, shadow.Mode)
+	require.InDelta(t, 540, shadow.Proposed, 0.001)
+	require.InDelta(t, testHostRPS, shadow.Applied, 0.001)
+
+	f.params.Capacity.Mode = adaptive.ModeNameEnabled
+	f.frozen = true
+	f.allowAfter(time.Second)
+	frozen := f.sink.decisions[2]
+	require.Equal(t, adaptive.ModeOn, frozen.Mode)
+	require.Equal(t, adaptive.ReasonFrozen, frozen.Reason)
+	require.InDelta(t, 540, frozen.Applied, 0.001)
+	require.Nil(t, frozen.Detail)
 }
