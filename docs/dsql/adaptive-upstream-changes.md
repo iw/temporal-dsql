@@ -1,6 +1,6 @@
 # Adaptive behaviour: changes to upstream code
 
-The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller), its [store facts](adaptive-store-facts.md) and its coupling to the task scheduler, the signal plane from [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane), with the task queueing delay it reads, the worker counts from [Proposal 4](adaptive-behaviour.md#proposal-4-worker-counts-follow-queueing-delay), the memory budget from [Proposal 5](adaptive-behaviour.md#proposal-5-a-memory-budget-instead-of-counts-and-bytes), and the partition scaler from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity), with its server option.
+The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller), its [store facts](adaptive-store-facts.md) and its coupling to the task scheduler, the signal plane from [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane), with the task queueing delay it reads, the worker counts from [Proposal 4](adaptive-behaviour.md#proposal-4-worker-counts-follow-queueing-delay), the memory budget from [Proposal 5](adaptive-behaviour.md#proposal-5-a-memory-budget-instead-of-counts-and-bytes), the partition scaler from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity), with its server option, and fair share from [Proposal 7](adaptive-behaviour.md#proposal-7-fair-share-follows-demand).
 
 The branch takes main's changes by merge or rebase, and reaches a new release tag through main. When that happens, check the files below against the new tag first.
 
@@ -32,6 +32,11 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 | `service/matching/partition_scaler_mock.go` | Regenerated for `PartitionStatsScaler`. |
 | `service/matching/scale_manager.go` | For a scaler that asks for stats, describes the partitions with their stats, also while managed scaling is off, and before calling the scaler on its timer. Passes the read partitions and the latest stats to the scaler. |
 | `service/matching/fx.go` | Provides the learned partition scaler's factory, built around the simple scaler, in place of `simplePartitionScalerFactoryProvider`. |
+| `common/quotas/calculator/cluster_aware_quota_calculator.go` | Adds `ShareProvider` and `MemberShare`. A calculator with a share provider takes the provider's share of the per cluster limit, and `MemberShare`, the limit divided by the member count, when the provider has none. |
+| `common/quotas/calculator/cluster_aware_quota_calculator_test.go` | Tests a calculator with a share provider. |
+| `common/api/metadata.go` | Adds `FairShareServicePrefix`, and gives the fair-share exchange the admin service's metadata: cluster scope and admin access. |
+| `service/frontend/fx.go` | Provides the fair-share exchange and registers its service on the frontend's gRPC server. `NamespaceRateLimitersProvider` takes the exchange, gives each namespace limit's quota calculator its share, and has the exchange count the tokens each namespace's requests ask of the limit. |
+| `service/frontend/fx_test.go` | Passes no exchange to `NamespaceRateLimitersProvider`. |
 | `temporal/server_option.go` | Adds `WithPartitionScalerFactory`, which sets the factory matching uses to scale task queue partitions. |
 | `temporal/server_options.go` | `serverOptions` keeps that factory. |
 | `temporal/fx.go` | Passes the factory to the matching service, whose graph uses it in place of its default when one is set. |
@@ -52,6 +57,8 @@ These files extend existing packages without editing upstream files:
 - `common/adaptive/partitions`: the partition scaler's controller and its `matching.partitionScalerController` setting.
 - `service/matching/learned_partition_scaler.go`: the scaler that applies it, built around the simple scaler.
 - `service/matching/scale_manager_stats.go`: describes the partitions for their stats.
+- `common/adaptive/fairshare`: the fair-share law, the exchange and its gRPC service, and the `frontend.fairShareController` setting.
+- `service/frontend/fair_share.go`: gives the frontend its exchange, with the frontends it exchanges with and how it calls them.
 - `common/signals`: the signal plane, its sources, its trace, and the persistence backoff rule its controllers share.
 - `common/persistence/client/capacity_rate_limiter.go`: the capacity-aware limiter.
 - `common/persistence/store_facts.go`: the store-facts types.
