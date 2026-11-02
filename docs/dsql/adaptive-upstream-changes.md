@@ -1,6 +1,6 @@
 # Adaptive behaviour: changes to upstream code
 
-The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller), its [store facts](adaptive-store-facts.md) and its coupling to the task scheduler, the signal plane from [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane), with the task queueing delay it reads, the worker counts from [Proposal 4](adaptive-behaviour.md#proposal-4-worker-counts-follow-queueing-delay), and the partition scaler option from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity).
+The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller), its [store facts](adaptive-store-facts.md) and its coupling to the task scheduler, the signal plane from [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane), with the task queueing delay it reads, the worker counts from [Proposal 4](adaptive-behaviour.md#proposal-4-worker-counts-follow-queueing-delay), the memory budget from [Proposal 5](adaptive-behaviour.md#proposal-5-a-memory-budget-instead-of-counts-and-bytes), and the partition scaler option from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity).
 
 The branch takes main's changes by merge or rebase, and reaches a new release tag through main. When that happens, check the files below against the new tag first.
 
@@ -19,11 +19,14 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 | `common/persistence/sql/factory.go` | `DbConn` keeps the store-facts sink and passes it to the plugin's database when that's created. |
 | `common/stats/windowed_tdigest.go` | `QuantileRecent` reads a quantile over the newest windows only. |
 | `common/metrics/metric_defs.go` | Adds `persistence_store_facts`. |
+| `common/cache/cache.go` | Adds `Resizable`, a cache whose size limit can change while it runs. |
+| `common/cache/lru.go` | Adds `SetMaxSize`, which changes the LRU's size limit and evicts down to it. The limit is now read under the lock, and a flag set at creation marks a cache created with size 0 as disabled. |
 | `service/history/queues/executable.go` | Each task attempt also passes its `scheduleLatency` to an optional `ScheduleLatencyRecorder`, beside the existing metric. |
 | `service/history/queues/executable_factory.go` | `NewExecutableFactory` takes the recorder and passes it to each executable. |
 | `service/history/queue_factory_base.go` | `QueueFactoryBaseParams` gains `HistoryQueues`, which gives each queue its queueing delay recorder and its worker count. It's optional, so the queue module's tests build without it, and without it the worker counts stay as configured. |
 | `service/history/transfer_queue_factory.go`, `timer_queue_factory.go`, `visibility_queue_factory.go`, `archival_queue_factory.go`, `outbound_queue_factory.go` | Each passes its queue's recorder from `HistoryQueues` to `NewExecutableFactory`. All but the outbound queue take their scheduler's worker count from `HistoryQueues.WorkerCount`. |
-| `service/history/fx.go` | `Module` provides `HistoryQueues`, and decorates the task scheduler's rate limiter with its coupling to persistence. |
+| `service/history/fx.go` | `Module` provides `HistoryQueues`, decorates the task scheduler's rate limiter with its coupling to persistence, and sizes the host-level caches from the memory budget. |
+| `service/history/workflow/cache/cache.go`, `service/history/events/cache.go` | The history and events caches pass `SetMaxSize` on to their LRU. |
 | `service/history/queues/queue_base_test.go`, `queue_scheduled_test.go` | Pass no recorder to `NewExecutableFactory`. |
 | `temporal/server_option.go` | Adds `WithPartitionScalerFactory`, which sets the factory matching uses to scale task queue partitions. |
 | `temporal/server_options.go` | `serverOptions` keeps that factory. |
@@ -40,6 +43,8 @@ These files extend existing packages without editing upstream files:
 - `common/adaptive/workers`: the worker-count controller and history's queues.
 - `common/adaptive/taskrate`: the task scheduler's coupling to persistence.
 - `service/history/task_scheduler_rate.go`: the decorator that applies it.
+- `common/adaptive/memory`: the memory budget's controllers for history's caches.
+- `service/history/memory_budget.go`: hands them the caches.
 - `common/signals`: the signal plane, its sources and its trace.
 - `common/persistence/client/capacity_rate_limiter.go`: the capacity-aware limiter.
 - `common/persistence/store_facts.go`: the store-facts types.

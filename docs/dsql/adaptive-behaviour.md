@@ -263,6 +263,26 @@ Three code changes are needed:
 
 This turns a question operators cannot answer well ("how many bytes of cache for this pod?") into one they can ("what share of this pod's memory is cache?").
 
+On this branch, `common/adaptive/memory` sizes history's two host-level caches from the process's memory limit, the smaller of its cgroup's limit and `GOMEMLIMIT`. Each cache's controller steps on the signal plane's snapshots. It acts on a cache limited in bytes: the history cache while `history.cacheSizeBasedLimit` is set, and the events cache while `history.enableHostLevelEventsCache` is. A cache limited by entry count keeps its setting, as do the shard-level events caches. The pending-task limit comes in a later change.
+
+- **Budget.** Each cache's budget is its share of the limit, `HistoryCacheShare`, 0.3, or `EventsCacheShare`, 0.1, capped at its size setting. A cache over its budget moves to it.
+- **Pressure** is how close the heap is to the most the limit allows. Under `GOMEMLIMIT`, the runtime holds the heap goal under the limit, so the pressure is the live heap's share of the goal: a half at the default `GOGC`, and near 1 as collections run back to back. A cgroup limit alone is unknown to the runtime, so there the pressure is the heap goal's share of the limit.
+- **Shrink** by `ShrinkFrac`, 25%, while the pressure is above `HighWater`, 0.85, at most once per `Interval`, a minute.
+- **Grow** back towards the budget by `GrowFrac`, 10%, while the pressure is below `LowWater`, 0.6, at most once per `Interval`.
+- **Bounds** are `MinMultiplier`, 0.05, of each cache's size setting, and the setting itself.
+
+`cache.Resizable` lets the LRU change its size limit while it runs. Shrinking evicts the least recently used entries that aren't pinned, and a pinned entry goes once it's released. `signals.DriveFunc` drives each cache's limit from the size it was created with, so while the controller is disabled the cache keeps that size. The two cache settings still take effect at startup.
+
+```yaml
+history.cacheSizeBasedLimit:
+  - value: true
+history.enableHostLevelEventsCache:
+  - value: true
+history.memoryBudgetController:
+  - value:
+      Mode: shadow
+```
+
 ## Proposal 6: the partition scaler learns capacity
 
 Matching's partition scaler already has the hard parts: persisted `PartitionScaleState`, propagation to callers through the partition-count gRPC trailer (`sendPartitionCountTrailer`), drain handling, shadow mode and hysteresis. What it lacks is a saturation signal. `PartitionScalerInput` carries only `NumTasks`, `CurrentTarget`, `BacklogCounts` and `PrivateState`, so `SimplePartitionScalerThreshold.TargetRate` (tasks per second per partition) is an operator's capacity guess.
