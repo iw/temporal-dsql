@@ -263,7 +263,7 @@ Three code changes are needed:
 
 This turns a question operators cannot answer well ("how many bytes of cache for this pod?") into one they can ("what share of this pod's memory is cache?").
 
-On this branch, `common/adaptive/memory` sizes history's two host-level caches from the process's memory limit, the smaller of its cgroup's limit and `GOMEMLIMIT`. Each cache's controller steps on the signal plane's snapshots. It acts on a cache limited in bytes: the history cache while `history.cacheSizeBasedLimit` is set, and the events cache while `history.enableHostLevelEventsCache` is. A cache limited by entry count keeps its setting, as do the shard-level events caches. The pending-task limit comes in a later change.
+On this branch, `common/adaptive/memory` sizes history's two host-level caches, and the tasks its queues hold, from the process's memory limit, the smaller of its cgroup's limit and `GOMEMLIMIT`. Each controller steps on the signal plane's snapshots. A cache's controller acts on a cache limited in bytes: the history cache while `history.cacheSizeBasedLimit` is set, and the events cache while `history.enableHostLevelEventsCache` is. A cache limited by entry count keeps its setting, as do the shard-level events caches.
 
 - **Budget.** Each cache's budget is its share of the limit, `HistoryCacheShare`, 0.3, or `EventsCacheShare`, 0.1, capped at its size setting. A cache over its budget moves to it.
 - **Pressure** is how close the heap is to the most the limit allows. Under `GOMEMLIMIT`, the runtime holds the heap goal under the limit, so the pressure is the live heap's share of the goal: a half at the default `GOGC`, and near 1 as collections run back to back. A cgroup limit alone is unknown to the runtime, so there the pressure is the heap goal's share of the limit.
@@ -271,7 +271,15 @@ On this branch, `common/adaptive/memory` sizes history's two host-level caches f
 - **Grow** back towards the budget by `GrowFrac`, 10%, while the pressure is below `LowWater`, 0.6, at most once per `Interval`.
 - **Bounds** are `MinMultiplier`, 0.05, of each cache's size setting, and the setting itself.
 
-`cache.Resizable` lets the LRU change its size limit while it runs. Shrinking evicts the least recently used entries that aren't pinned, and a pinned entry goes once it's released. `signals.DriveFunc` drives each cache's limit from the size it was created with, so while the controller is disabled the cache keeps that size. The two cache settings still take effect at startup.
+The queues' pending-task limits follow the same law, as one multiplier of their settings, at most 1:
+
+- **What the queues may hold.** Each shard has its own queues, so at their settings the queues may hold the host's shard count, from the shard controller, times the sum of each queue's max count. That's `history.queuePendingTasksMaxCount` for the transfer, timer, visibility and archival queues, and `history.outboundQueuePendingTasksMaxCount` for the outbound queue.
+- **Budget.** The multiplier's budget is the share of that which `PendingTaskShare`, 0.2 of the limit, holds at `BytesPerTask` each.
+- **Limits.** Each queue's max and critical counts are its settings times the multiplier, so they keep the settings' ratio: the mitigator starts unloading tasks a little below the count at which a queue stops loading them. The mitigator's `targetLoadFactor` of 0.8 stays as it is.
+- **Floor.** The multiplier stays at `MinMultiplier` or more, and never takes a queue's critical count below 1,250. A queue's readers after its first stop loading at 0.8 of the critical count, or less, but at no fewer than 1,000 tasks. With a critical count of 1,000 or less, they load past it, and the mitigator unloads their tasks over and over, as a smoke run showed. If a queue's critical count is set below 1,250, the queues keep their settings. With many shards on a host, the floor can leave what the queues may hold above their budget: 512 shards, each with five queues of 1,389 tasks at 2 KiB, may hold 6.8 GiB.
+- **Bytes per task.** Go's runtime doesn't measure the heap by type, so `BytesPerTask` is a setting, 2 KiB. A pending task is the task, its executable and its entry in its slice's tracker. It measured 1.5 KiB with OpenTelemetry's metrics handler and 0.9 KiB with tally's. A test in `service/history/queues` fails if it grows past the setting.
+
+`cache.Resizable` lets the LRU change its size limit while it runs. Shrinking evicts the least recently used entries that aren't pinned, and a pinned entry goes once it's released. `signals.DriveFunc` drives each cache's limit from the size it was created with, so while the controller is disabled the cache keeps that size. The two cache settings still take effect at startup. The multiplier's static value is 1, so while the controller is disabled the queues keep their settings.
 
 ```yaml
 history.cacheSizeBasedLimit:
