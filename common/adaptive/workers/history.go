@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
-	"go.temporal.io/server/common/adaptive/capacity"
 	"go.temporal.io/server/common/adaptive/memory"
 	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/metrics"
@@ -180,23 +179,8 @@ func (q *queueController) Step(snap *signals.Snapshot, env adaptive.Envelope[int
 		Cooldown:    s.Cooldown,
 	}
 	queue := snap.Queues[q.queue]
-	in := Signals{Now: snap.Time, Delay: queue.DelayP90, Samples: queue.Samples, BackingOff: persistenceBackingOff(snap, s)}
+	backoff := signals.Backoff{Hold: s.BackoffHold, MaxErrorRatio: s.MaxErrorRatio, MaxQueuedRatio: s.MaxQueuedRatio, MinSamples: s.MinSamples}
+	in := Signals{Now: snap.Time, Delay: queue.DelayP90, Samples: queue.Samples, BackingOff: snap.PersistenceBackingOff(backoff)}
 	count, reason := q.law.Step(params, static, in)
 	return count, adaptive.Reason(reason), stepDetail{Params: params, Signals: in}
-}
-
-// persistenceBackingOff reads whether persistence is backing off from the snapshot: the
-// capacity controller's latest decision, when it's recent, and persistence health.
-func persistenceBackingOff(snap *signals.Snapshot, s Settings) bool {
-	if d, ok := snap.Decisions[capacity.Name]; ok && snap.Time.Sub(d.Time) <= s.BackoffHold && capacity.Reason(d.Reason).Overloaded() {
-		return true
-	}
-	h := snap.Persistence
-	if calls := h.Samples + h.Rejected; calls >= max(1, s.MinSamples) {
-		failed := h.ErrorRatio*float64(h.Samples) + float64(h.Throttled+h.Rejected)
-		if failed/float64(calls) > s.MaxErrorRatio {
-			return true
-		}
-	}
-	return h.Acquired > 0 && float64(h.Queued)/float64(h.Acquired) > s.MaxQueuedRatio
 }
