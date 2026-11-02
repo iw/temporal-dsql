@@ -3,6 +3,8 @@
 package matching
 
 import (
+	"time"
+
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/server/common/namespace"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -37,11 +39,42 @@ type PartitionScaler interface {
 	Stop()
 }
 
+// PartitionStatsScaler is a PartitionScaler that reads the task queue's stats. While
+// WantsStats returns true, the scale manager describes the task queue's partitions with
+// their stats every BackgroundInterval, and passes the latest to OnTasks.
+type PartitionStatsScaler interface {
+	PartitionScaler
+	WantsStats() bool
+}
+
 type PartitionScalerInput struct {
 	NumTasks      int // estimated tasks added since last call
 	CurrentTarget int
 	BacklogCounts []byte
 	PrivateState  *anypb.Any
+	// ReadPartitions is how many partitions tasks are read from while the scale state
+	// holds them: while managed scaling is on, or partitions it added still drain.
+	// Otherwise it's 0.
+	ReadPartitions int
+	// Stats is the task queue's latest stats, for a PartitionStatsScaler that wants them,
+	// or nil.
+	Stats *PartitionScalerStats
+}
+
+// PartitionScalerStats are a task queue's rates and backlog, summed over the physical
+// queues of the partitions that answered.
+type PartitionScalerStats struct {
+	// Time is when the partitions were described.
+	Time time.Time
+	// WritePartitions is how many partitions tasks are added to, and Described how many
+	// partitions answered.
+	WritePartitions, Described int
+	// AddRate and DispatchRate are tasks a second, over the partitions' last 30 seconds.
+	AddRate, DispatchRate float32
+	BacklogCount          int64
+	BacklogAge            time.Duration // of the oldest backlog
+	// RateLimited is set when a partition's dispatch is rate limited.
+	RateLimited bool
 }
 
 type PartitionScalerDecision struct {

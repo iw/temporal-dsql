@@ -303,6 +303,30 @@ Three changes close the gap:
 
 The proto already reserves room for more learned state: `task_queues.proto:147` reads "For future use: description, rate limits, manual partition control, etc."
 
+On this branch, `common/adaptive/partitions` learns each task queue's capacity, the tasks a second one partition dispatches, and sizes its partitions from it. Matching's default partition scaler factory gives each root partition a scaler built around the simple scaler, which decides while the controller is disabled. A factory set with `WithPartitionScalerFactory` replaces it.
+
+- **Input.** For a scaler that asks for them, the scale manager describes the task queue's partitions every `BackgroundInterval`, 23s, with their stats. It passes their sums: the add and dispatch rates over the partitions' last 30 seconds, the backlog count and its oldest age, and whether a partition's dispatch is rate limited. While managed scaling is off, it describes the write partitions dynamic config gives. The partitions the controller sizes are managed scaling's target while it's on, and those write partitions while it's off. Persistence health comes from the signal plane, by the rule history's worker counts use, rather than from latency.
+- **Size.** The partitions grow to dispatch the add rate at the capacity with `Headroom`, 20%, to spare. They shrink while they'd keep twice that, but only `DownHold`, 5 minutes, after the task queue was last behind or they last changed. A step changes them by at most `MaxStepFrac`, 25%, or one partition, within `MinPartitions`, 1, and `MaxPartitions`, 64.
+- **Settle.** The partitions grow, the capacity learns from their rates, and a trial is judged, only `Settle`, 30s, after the partitions last changed, or the partitions described did. Each partition's rates cover its last 30 seconds, so until then the partitions there before the change still count the tasks they took then. The sum reads high while the partitions grow, and low once a partition that drained stops being described. Without the wait, a smoke run grew a task queue to 13 partitions where 10 were enough. Waiting only for the partitions tasks are added to, a trial that started just after a partition drained took the recovery from that low reading for a gain.
+- **Capacity** starts at `InitialCapacity`, 1,000 tasks a second, and rises to what the partitions dispatch whenever they dispatch more without falling behind.
+- **Behind.** A task queue is behind while its add rate passes its dispatch rate by `BehindRatio`, 10%, at an add rate of `MinRate`, 50 tasks a second, or more.
+- **Trials.** When a task queue is behind on two steps in a row, and the capacity says its partitions are enough, the controller adds a step of partitions and judges it after `TrialWindow`, 2 minutes. A trial starts from the highest settled dispatch rate since the partitions last changed. If dispatch rose from it by `MinGain`, half, of the rise in proportion to the partitions added, the partitions were the limit, and that rate per partition is the capacity. Otherwise, if the task queue is still behind, the controller undoes the step. It then runs no trials for `NoGainHold`, 10 minutes, which doubles with each such trial in a row, up to 80 minutes.
+- **No trials** while a partition's dispatch is rate limited, while persistence is backing off, or while fewer than `MinRate` tasks a second are dispatched. While persistence is backing off, the partitions don't grow at all.
+
+The proposal above records the dispatch rate as the capacity whenever adds outrun dispatch. Adds also outrun dispatch when the task queue's workers hold it back. Each capacity recorded then would be lower than the last, and the partitions would grow to the maximum without helping. A trial tells the two apart, because more partitions raise dispatch only when the partitions were the limit.
+
+The controller keeps its capacity in the scaler's private state, so a task queue's root partition loads with it. While the controller is disabled, the simple scaler decides, and the scale manager describes nothing more than before. In shadow, the simple scaler's decisions apply, and the controller reports what it would do. It runs no trials there, since its proposals can't change dispatch. Enabled, it sets the partitions through managed scaling, in place of `matching.partitionScaler`. `RolloutPercent` is the share of task queues, picked by name, that apply an enabled mode. As for history's worker counts, persistence health needs `system.persistenceHealthSignalPercentilesEnabled`.
+
+Turning managed scaling off is a clean break to dynamic config, which leaves the tasks in partitions beyond its count unpolled until they time out. So when the controller stops applying after it added partitions beyond `matching.numTaskqueueWritePartitions`, it keeps managed scaling on at that count until those partitions drain, and then turns it off.
+
+```yaml
+matching.partitionScalerController:
+  - value:
+      Mode: shadow
+    constraints:
+      namespace: my-namespace
+```
+
 ## Proposal 7: fair share follows demand
 
 This is the hardest change and should come last. Replace the `MemberCounter` dependency in `common/quotas/calculator` with a `ShareProvider` interface whose default implementation is today's `clusterLimit / clusterSize`, so behaviour is unchanged until a new provider is chosen.

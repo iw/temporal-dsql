@@ -104,3 +104,67 @@ func (mr *MockPartitionScalerMockRecorder) Stop() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stop", reflect.TypeOf((*MockPartitionScaler)(nil).Stop))
 }
+
+// MockPartitionStatsScaler is a mock of PartitionStatsScaler interface.
+type MockPartitionStatsScaler struct {
+	ctrl     *gomock.Controller
+	recorder *MockPartitionStatsScalerMockRecorder
+	isgomock struct{}
+}
+
+// MockPartitionStatsScalerMockRecorder is the mock recorder for MockPartitionStatsScaler.
+type MockPartitionStatsScalerMockRecorder struct {
+	mock *MockPartitionStatsScaler
+}
+
+// NewMockPartitionStatsScaler creates a new mock instance.
+func NewMockPartitionStatsScaler(ctrl *gomock.Controller) *MockPartitionStatsScaler {
+	mock := &MockPartitionStatsScaler{ctrl: ctrl}
+	mock.recorder = &MockPartitionStatsScalerMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockPartitionStatsScaler) EXPECT() *MockPartitionStatsScalerMockRecorder {
+	return m.recorder
+}
+
+// OnTasks mocks base method.
+func (m *MockPartitionStatsScaler) OnTasks(arg0 PartitionScalerInput) PartitionScalerDecision {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "OnTasks", arg0)
+	ret0, _ := ret[0].(PartitionScalerDecision)
+	return ret0
+}
+
+// OnTasks indicates an expected call of OnTasks.
+func (mr *MockPartitionStatsScalerMockRecorder) OnTasks(arg0 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnTasks", reflect.TypeOf((*MockPartitionStatsScaler)(nil).OnTasks), arg0)
+}
+
+// Stop mocks base method.
+func (m *MockPartitionStatsScaler) Stop() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Stop")
+}
+
+// Stop indicates an expected call of Stop.
+func (mr *MockPartitionStatsScalerMockRecorder) Stop() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stop", reflect.TypeOf((*MockPartitionStatsScaler)(nil).Stop))
+}
+
+// WantsStats mocks base method.
+func (m *MockPartitionStatsScaler) WantsStats() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "WantsStats")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// WantsStats indicates an expected call of WantsStats.
+func (mr *MockPartitionStatsScalerMockRecorder) WantsStats() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WantsStats", reflect.TypeOf((*MockPartitionStatsScaler)(nil).WantsStats))
+}
