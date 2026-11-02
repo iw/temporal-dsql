@@ -74,6 +74,7 @@ var Module = fx.Options(
 	fx.Provide(workers.NewHistoryQueues),
 	fx.Decorate(coupleSchedulerRateLimiter),
 	fx.Invoke(budgetCaches),
+	fx.Invoke(budgetPendingTasks),
 	fx.Provide(workflow.NewCommandHandlerRegistry),
 	fx.Provide(ServiceErrorInterceptorProvider),
 	fx.Provide(RetryableInterceptorProvider),

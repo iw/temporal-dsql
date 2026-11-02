@@ -179,6 +179,11 @@ func (f *archivalQueueFactory) newScheduledQueue(shard historyi.ShardContext, ex
 		f.Config.TaskDLQErrorPattern,
 		f.HistoryQueues.ScheduleLatencyRecorder(tasks.CategoryArchival.Name()),
 	)
+	maxPendingTasks, criticalPendingTasks := f.HistoryQueues.PendingTaskLimits(
+		tasks.CategoryArchival.Name(),
+		f.Config.QueuePendingTaskMaxCount,
+		f.Config.QueuePendingTaskCriticalCount,
+	)
 	return queues.NewScheduledQueue(
 		shard,
 		tasks.CategoryArchival,
@@ -188,12 +193,12 @@ func (f *archivalQueueFactory) newScheduledQueue(shard historyi.ShardContext, ex
 		&queues.Options{
 			ReaderOptions: queues.ReaderOptions{
 				BatchSize:            f.Config.ArchivalTaskBatchSize,
-				MaxPendingTasksCount: f.Config.QueuePendingTaskMaxCount,
+				MaxPendingTasksCount: maxPendingTasks,
 				PollBackoffInterval:  f.Config.ArchivalProcessorPollBackoffInterval,
 				MaxPredicateSize:     f.Config.QueueMaxPredicateSize,
 			},
 			MonitorOptions: queues.MonitorOptions{
-				PendingTasksCriticalCount:   f.Config.QueuePendingTaskCriticalCount,
+				PendingTasksCriticalCount:   criticalPendingTasks,
 				ReaderStuckCriticalAttempts: f.Config.QueueReaderStuckCriticalAttempts,
 				SliceCountCriticalThreshold: f.Config.QueueCriticalSlicesCount,
 			},

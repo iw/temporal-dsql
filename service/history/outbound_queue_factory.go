@@ -277,6 +277,11 @@ func (f *outboundQueueFactory) CreateQueue(
 		f.Config.TaskDLQErrorPattern,
 		f.HistoryQueues.ScheduleLatencyRecorder(tasks.CategoryOutbound.Name()),
 	)
+	maxPendingTasks, criticalPendingTasks := f.HistoryQueues.PendingTaskLimits(
+		tasks.CategoryOutbound.Name(),
+		f.Config.OutboundQueuePendingTaskMaxCount,
+		f.Config.OutboundQueuePendingTaskCriticalCount,
+	)
 	return queues.NewImmediateQueue(
 		shardContext,
 		tasks.CategoryOutbound,
@@ -285,12 +290,12 @@ func (f *outboundQueueFactory) CreateQueue(
 		&queues.Options{
 			ReaderOptions: queues.ReaderOptions{
 				BatchSize:            f.Config.OutboundTaskBatchSize,
-				MaxPendingTasksCount: f.Config.OutboundQueuePendingTaskMaxCount,
+				MaxPendingTasksCount: maxPendingTasks,
 				PollBackoffInterval:  f.Config.OutboundProcessorPollBackoffInterval,
 				MaxPredicateSize:     f.Config.OutboundQueueMaxPredicateSize,
 			},
 			MonitorOptions: queues.MonitorOptions{
-				PendingTasksCriticalCount: f.Config.OutboundQueuePendingTaskCriticalCount,
+				PendingTasksCriticalCount: criticalPendingTasks,
 				// Shared configuration with other queues.
 				ReaderStuckCriticalAttempts: f.Config.QueueReaderStuckCriticalAttempts,
 				SliceCountCriticalThreshold: f.Config.QueueCriticalSlicesCount,

@@ -12,15 +12,16 @@ const mib = 1 << 20
 
 var (
 	start  = time.Unix(1_700_000_000, 0)
-	params = memory.Params{
-		Min:        50 * mib,
-		Max:        1000 * mib,
-		Share:      0.3,
-		HighWater:  0.85,
-		LowWater:   0.6,
-		ShrinkFrac: 0.25,
-		GrowFrac:   0.1,
-		Interval:   time.Minute,
+	params = memory.Params[int]{
+		Min:          50 * mib,
+		Max:          1000 * mib,
+		Share:        0.3,
+		BytesPerUnit: 1,
+		HighWater:    0.85,
+		LowWater:     0.6,
+		ShrinkFrac:   0.25,
+		GrowFrac:     0.1,
+		Interval:     time.Minute,
 	}
 	// budget is the cache's share of a 1 GiB limit.
 	budget = int(params.Share * float64(1024*mib))
@@ -148,4 +149,53 @@ func TestCacheStaysWithinItsBounds(t *testing.T) {
 	size, reason = memory.New(100*mib).Step(params, memory.Signals{Now: start, CgroupLimit: 64 * mib, HeapGoal: 20 * mib, HeapLive: 10 * mib})
 	require.Equal(t, params.Min, size)
 	require.Equal(t, memory.ReasonBudget, reason)
+}
+
+func TestIntegerValueMovesByAtLeastOne(t *testing.T) {
+	p := params
+	p.Min = 1
+	size, reason := memory.New(2).Step(p, cgroup(0, 1000*mib))
+	require.Equal(t, 1, size)
+	require.Equal(t, memory.ReasonPressure, reason)
+}
+
+// multiplier sizes a multiplier of settings whose units hold 400 MiB each, as the
+// queues' pending tasks do at their settings.
+var multiplier = memory.Params[float64]{
+	Min:          0.05,
+	Max:          1,
+	Share:        0.2,
+	BytesPerUnit: 400 * mib,
+	HighWater:    0.85,
+	LowWater:     0.6,
+	ShrinkFrac:   0.25,
+	GrowFrac:     0.1,
+	Interval:     time.Minute,
+}
+
+func TestMultiplierFollowsTheSameLaw(t *testing.T) {
+	c := memory.New(1.0)
+
+	// 0.2 of a 1 GiB limit holds 0.512 of the settings.
+	m, reason := c.Step(multiplier, cgroup(0, 200*mib))
+	require.InDelta(t, 0.512, m, 1e-9)
+	require.Equal(t, memory.ReasonBudget, reason)
+
+	// Under pressure it shrinks by a quarter, without the integer's step of one.
+	m, reason = c.Step(multiplier, cgroup(time.Minute, 500*mib))
+	require.InDelta(t, 0.384, m, 1e-9)
+	require.Equal(t, memory.ReasonPressure, reason)
+
+	m, reason = c.Step(multiplier, cgroup(2*time.Minute, 200*mib))
+	require.InDelta(t, 0.4224, m, 1e-9)
+	require.Equal(t, memory.ReasonHeadroom, reason)
+}
+
+func TestValueWithNoBytesPerUnitHasNoBudget(t *testing.T) {
+	// The queues hold nothing before the host owns a shard.
+	p := multiplier
+	p.BytesPerUnit = 0
+	m, reason := memory.New(1.0).Step(p, cgroup(0, 200*mib))
+	require.InDelta(t, 1.0, m, 1e-9)
+	require.Equal(t, memory.ReasonSteady, reason)
 }

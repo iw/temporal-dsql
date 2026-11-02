@@ -5,6 +5,7 @@ import (
 
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/capacity"
+	"go.temporal.io/server/common/adaptive/memory"
 	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/persistence"
@@ -36,8 +37,8 @@ type (
 		MaxQueuedRatio float64
 	}
 
-	// HistoryQueues gives history's task queues their queueing delay recorders and their
-	// worker counts.
+	// HistoryQueues gives history's task queues their queueing delay recorders, their
+	// worker counts and their pending-task limits.
 	HistoryQueues struct {
 		plane    *signals.Plane
 		settings func() Settings
@@ -45,6 +46,7 @@ type (
 		hostKey  []byte
 		metrics  metrics.Handler
 		health   signals.ScheduleLatencyRecorder
+		pending  *memory.QueueLimits
 	}
 
 	queueController struct {
@@ -101,6 +103,7 @@ func NewHistoryQueues(
 		hostKey:  adaptive.HostKey(),
 		metrics:  handler,
 		health:   health,
+		pending:  memory.NewQueueLimits(plane, collection, handler),
 	}
 }
 
@@ -121,6 +124,28 @@ func (h *HistoryQueues) WorkerCount(queue string, static dynamicconfig.TypedSubs
 	}
 	ctrl := &queueController{queue: queue, settings: h.settings, law: New(0)}
 	return signals.Drive(h.plane, static, ctrl, h.frozen, h.hostKey, h.metrics).Subscribable()
+}
+
+// PendingTaskLimits returns a queue's max and critical pending task counts, which the
+// memory budget scales while its controller is enabled.
+func (h *HistoryQueues) PendingTaskLimits(
+	queue string,
+	maxCount dynamicconfig.IntPropertyFn,
+	criticalCount dynamicconfig.IntPropertyFn,
+) (maxPending, criticalPending dynamicconfig.IntPropertyFn) {
+	if h == nil {
+		return maxCount, criticalCount
+	}
+	return h.pending.Limits(queue, maxCount, criticalCount)
+}
+
+// SetShardCount sets how the pending-task limits count the host's shards. The shard
+// controller depends on the queues, so it comes after both exist.
+func (h *HistoryQueues) SetShardCount(shards func() int) {
+	if h == nil {
+		return
+	}
+	h.pending.SetShardCount(shards)
 }
 
 func (q *queueController) Name() string {

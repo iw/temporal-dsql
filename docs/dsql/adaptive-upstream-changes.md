@@ -24,8 +24,8 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 | `service/history/queues/executable.go` | Each task attempt also passes its `scheduleLatency` to an optional `ScheduleLatencyRecorder`, beside the existing metric. |
 | `service/history/queues/executable_factory.go` | `NewExecutableFactory` takes the recorder and passes it to each executable. |
 | `service/history/queue_factory_base.go` | `QueueFactoryBaseParams` gains `HistoryQueues`, which gives each queue its queueing delay recorder and its worker count. It's optional, so the queue module's tests build without it, and without it the worker counts stay as configured. |
-| `service/history/transfer_queue_factory.go`, `timer_queue_factory.go`, `visibility_queue_factory.go`, `archival_queue_factory.go`, `outbound_queue_factory.go` | Each passes its queue's recorder from `HistoryQueues` to `NewExecutableFactory`. All but the outbound queue take their scheduler's worker count from `HistoryQueues.WorkerCount`. |
-| `service/history/fx.go` | `Module` provides `HistoryQueues`, decorates the task scheduler's rate limiter with its coupling to persistence, and sizes the host-level caches from the memory budget. |
+| `service/history/transfer_queue_factory.go`, `timer_queue_factory.go`, `visibility_queue_factory.go`, `archival_queue_factory.go`, `outbound_queue_factory.go` | Each passes its queue's recorder from `HistoryQueues` to `NewExecutableFactory`, and takes its pending-task limits from `HistoryQueues.PendingTaskLimits`. All but the outbound queue take their scheduler's worker count from `HistoryQueues.WorkerCount`. |
+| `service/history/fx.go` | `Module` provides `HistoryQueues`, decorates the task scheduler's rate limiter with its coupling to persistence, sizes the host-level caches from the memory budget, and gives the queues' pending-task limits the host's shard count. |
 | `service/history/workflow/cache/cache.go`, `service/history/events/cache.go` | The history and events caches pass `SetMaxSize` on to their LRU. |
 | `service/history/queues/queue_base_test.go`, `queue_scheduled_test.go` | Pass no recorder to `NewExecutableFactory`. |
 | `temporal/server_option.go` | Adds `WithPartitionScalerFactory`, which sets the factory matching uses to scale task queue partitions. |
@@ -43,14 +43,14 @@ These files extend existing packages without editing upstream files:
 - `common/adaptive/workers`: the worker-count controller and history's queues.
 - `common/adaptive/taskrate`: the task scheduler's coupling to persistence.
 - `service/history/task_scheduler_rate.go`: the decorator that applies it.
-- `common/adaptive/memory`: the memory budget's controllers for history's caches.
-- `service/history/memory_budget.go`: hands them the caches.
+- `common/adaptive/memory`: the memory budget's controllers for history's caches and its queues' pending tasks.
+- `service/history/memory_budget.go`: hands them the caches and the shard count.
 - `common/signals`: the signal plane, its sources and its trace.
 - `common/persistence/client/capacity_rate_limiter.go`: the capacity-aware limiter.
 - `common/persistence/store_facts.go`: the store-facts types.
 - `common/persistence/windowed_counter.go`: request, error, rejection, fact and task-attempt counts over fixed windows.
 - `common/persistence/sql/store_facts.go`: passes the sink through the SQL factory and `DbConn`.
-- Their tests, and `common/persistence/health_signal_aggregator_snapshot_test.go`, `common/persistence/client/store_facts_test.go`, `common/stats/windowed_tdigest_recent_test.go`, `service/history/queues/executable_schedule_latency_test.go` and `temporal/partition_scaler_option_test.go`.
+- Their tests, and `common/persistence/health_signal_aggregator_snapshot_test.go`, `common/persistence/client/store_facts_test.go`, `common/stats/windowed_tdigest_recent_test.go`, `service/history/queues/executable_schedule_latency_test.go`, `service/history/queues/pending_task_size_test.go` and `temporal/partition_scaler_option_test.go`.
 
 The DSQL plugin's store facts live in its own directory, `common/persistence/sql/sqlplugin/dsql`.
 

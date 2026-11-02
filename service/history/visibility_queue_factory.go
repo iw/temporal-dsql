@@ -138,6 +138,11 @@ func (f *visibilityQueueFactory) CreateQueue(
 		f.Config.TaskDLQErrorPattern,
 		f.HistoryQueues.ScheduleLatencyRecorder(tasks.CategoryVisibility.Name()),
 	)
+	maxPendingTasks, criticalPendingTasks := f.HistoryQueues.PendingTaskLimits(
+		tasks.CategoryVisibility.Name(),
+		f.Config.QueuePendingTaskMaxCount,
+		f.Config.QueuePendingTaskCriticalCount,
+	)
 	return queues.NewImmediateQueue(
 		shard,
 		tasks.CategoryVisibility,
@@ -146,12 +151,12 @@ func (f *visibilityQueueFactory) CreateQueue(
 		&queues.Options{
 			ReaderOptions: queues.ReaderOptions{
 				BatchSize:            f.Config.VisibilityTaskBatchSize,
-				MaxPendingTasksCount: f.Config.QueuePendingTaskMaxCount,
+				MaxPendingTasksCount: maxPendingTasks,
 				PollBackoffInterval:  f.Config.VisibilityProcessorPollBackoffInterval,
 				MaxPredicateSize:     f.Config.QueueMaxPredicateSize,
 			},
 			MonitorOptions: queues.MonitorOptions{
-				PendingTasksCriticalCount:   f.Config.QueuePendingTaskCriticalCount,
+				PendingTasksCriticalCount:   criticalPendingTasks,
 				ReaderStuckCriticalAttempts: f.Config.QueueReaderStuckCriticalAttempts,
 				SliceCountCriticalThreshold: f.Config.QueueCriticalSlicesCount,
 			},

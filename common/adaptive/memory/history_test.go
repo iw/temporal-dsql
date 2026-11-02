@@ -34,15 +34,16 @@ func TestCacheControllerStepsOnTheHostsMemory(t *testing.T) {
 	require.Equal(t, int(settings.EventsCacheShare*float64(900*mib)), size, "the events cache's share of GOMEMLIMIT")
 	require.Equal(t, adaptive.Reason(ReasonBudget), reason)
 	require.Equal(t, stepDetail{
-		Params: Params{
-			Min:        env.Min,
-			Max:        env.Max,
-			Share:      0.1,
-			HighWater:  0.85,
-			LowWater:   0.6,
-			ShrinkFrac: 0.25,
-			GrowFrac:   0.1,
-			Interval:   time.Minute,
+		Params: Params[int]{
+			Min:          env.Min,
+			Max:          env.Max,
+			Share:        0.1,
+			BytesPerUnit: 1,
+			HighWater:    0.85,
+			LowWater:     0.6,
+			ShrinkFrac:   0.25,
+			GrowFrac:     0.1,
+			Interval:     time.Minute,
 		},
 		Signals: Signals{Now: snap.Time, CgroupLimit: 1024 * mib, GoLimit: 900 * mib, HeapGoal: 400 * mib, HeapLive: 200 * mib},
 	}, detail)
