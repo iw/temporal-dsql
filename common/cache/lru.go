@@ -33,7 +33,8 @@ type (
 		mut             sync.Mutex
 		byAccess        *list.List
 		byKey           map[any]*list.Element
-		maxSize         int
+		maxSize         int  // guarded by mut, since SetMaxSize changes it
+		disabled        bool // created with size 0; read without mut
 		currSize        int
 		pinnedSize      int
 		onPut           func(val any)
@@ -166,6 +167,7 @@ func NewWithMetrics(maxSize int, opts *Options, handler metrics.Handler) Stoppab
 		byKey:           make(map[any]*list.Element),
 		ttl:             opts.TTL,
 		maxSize:         maxSize,
+		disabled:        maxSize == 0,
 		currSize:        0,
 		pin:             opts.Pin,
 		onPut:           opts.OnPut,
@@ -188,7 +190,7 @@ func NewLRU(maxSize int, handler metrics.Handler) StoppableCache {
 
 // Get retrieves the value stored under the given key
 func (c *lru) Get(key any) any {
-	if c.maxSize == 0 { //
+	if c.disabled {
 		return nil
 	}
 	c.mut.Lock()
@@ -240,7 +242,7 @@ func (c *lru) PutIfNotExist(key any, value any) (any, error) {
 
 // Delete deletes a key, value pair associated with a key
 func (c *lru) Delete(key any) {
-	if c.maxSize == 0 {
+	if c.disabled {
 		return
 	}
 	c.mut.Lock()
@@ -254,7 +256,7 @@ func (c *lru) Delete(key any) {
 
 // Release decrements the ref count of a pinned element.
 func (c *lru) Release(key any) {
-	if c.maxSize == 0 || !c.pin {
+	if c.disabled || !c.pin {
 		return
 	}
 	c.mut.Lock()
@@ -291,19 +293,40 @@ func (c *lru) Size() int {
 	return c.currSize
 }
 
+// SetMaxSize changes the cache's size limit. Shrinking evicts the least recently used
+// entries that aren't pinned until the cache fits; a pinned entry goes once it's released.
+// A cache created with size 0 is disabled, and stays so.
+func (c *lru) SetMaxSize(maxSize int) {
+	if c.disabled || maxSize <= 0 {
+		return
+	}
+	c.mut.Lock()
+	defer c.mut.Unlock()
+
+	if maxSize == c.maxSize {
+		return
+	}
+	c.maxSize = maxSize
+	metrics.CacheSize.With(c.metricsHandler).Record(float64(maxSize))
+	if c.currSize > c.maxSize {
+		c.tryEvictUntilCacheSizeUnderLimit()
+	}
+}
+
 // Put puts a new value associated with a given key, returning the existing value (if present)
 // allowUpdate flag is used to control overwrite behavior if the value exists.
 func (c *lru) putInternal(key any, value any, allowUpdate bool) (any, error) {
-	if c.maxSize == 0 {
+	if c.disabled {
 		return nil, nil
 	}
 	newEntrySize := getSize(value)
-	if newEntrySize > c.maxSize {
-		return nil, ErrCacheItemTooLarge
-	}
 
 	c.mut.Lock()
 	defer c.mut.Unlock()
+
+	if newEntrySize > c.maxSize {
+		return nil, ErrCacheItemTooLarge
+	}
 
 	elt := c.byKey[key]
 	// If the entry exists, check if it has expired or update the value

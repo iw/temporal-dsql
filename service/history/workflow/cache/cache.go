@@ -160,6 +160,13 @@ func (c *cacheImpl) stop() {
 	c.Cache.(cache.StoppableCache).Stop()
 }
 
+// SetMaxSize changes the cache's size limit, for the memory budget.
+func (c *cacheImpl) SetMaxSize(maxSize int) {
+	if r, ok := c.Cache.(cache.Resizable); ok {
+		r.SetMaxSize(maxSize)
+	}
+}
+
 func (c *cacheImpl) GetOrCreateWorkflowExecution(
 	ctx context.Context,
 	shardContext historyi.ShardContext,
