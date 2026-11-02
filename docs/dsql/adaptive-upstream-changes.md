@@ -1,6 +1,6 @@
 # Adaptive behaviour: changes to upstream code
 
-The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller) and its [store facts](adaptive-store-facts.md), the signal plane from [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane), with the task queueing delay it reads, the worker counts from [Proposal 4](adaptive-behaviour.md#proposal-4-worker-counts-follow-queueing-delay), and the partition scaler option from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity).
+The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller), its [store facts](adaptive-store-facts.md) and its coupling to the task scheduler, the signal plane from [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane), with the task queueing delay it reads, the worker counts from [Proposal 4](adaptive-behaviour.md#proposal-4-worker-counts-follow-queueing-delay), and the partition scaler option from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity).
 
 The branch takes main's changes by merge or rebase, and reaches a new release tag through main. When that happens, check the files below against the new tag first.
 
@@ -13,7 +13,7 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 | `common/persistence/client/fx.go` | `Module` provides `AdaptiveFrozen`, the `adaptive.frozen` setting. `NewFactoryParams` takes the `adaptive.DecisionSink`, and `FactoryProvider` passes both to `NewPriorityRateLimiter`. |
 | `common/resource/fx.go` | `Module` includes `signals.Module`, which gives each service its signal plane, provided as the services' `adaptive.DecisionSink` too. |
 | `common/persistence/client/factory.go` | `NewFactory` hands the health signal aggregator to a data store factory that accepts store facts. |
-| `common/persistence/health_signal_aggregator.go` | The aggregator gains `RecentSnapshot`, `RecordCall` and `RecordScheduleLatency`, and implements `StoreFacts`. The snapshot leaves out the persistence limiter's own rejections, counts a call that failed after its deadline as a timeout, and leaves calls the store reports as throttled out of delivered throughput. It also reports the p90 of how long history task attempts waited in their schedulers, and counts the persistence limiter's rejections apart. |
+| `common/persistence/health_signal_aggregator.go` | The aggregator gains `RecentSnapshot`, `RecordCall` and `RecordScheduleLatency`, and implements `StoreFacts`. The snapshot leaves out the persistence limiter's own rejections, counts a call that failed after its deadline as a timeout, and leaves calls the store reports as throttled out of delivered throughput. It also counts history task attempts with the calls, reports the p90 of how long they waited in their schedulers, and counts the persistence limiter's rejections apart. |
 | `common/persistence/noop_health_signal_aggregator.go` | The no-op aggregator implements the new methods. |
 | `common/persistence/persistence_metric_clients.go` | Each call records its own context through `RecordCall`, so a call that fails after its deadline counts as a timeout, whatever error the store wrapped it in. |
 | `common/persistence/sql/factory.go` | `DbConn` keeps the store-facts sink and passes it to the plugin's database when that's created. |
@@ -23,7 +23,7 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 | `service/history/queues/executable_factory.go` | `NewExecutableFactory` takes the recorder and passes it to each executable. |
 | `service/history/queue_factory_base.go` | `QueueFactoryBaseParams` gains `HistoryQueues`, which gives each queue its queueing delay recorder and its worker count. It's optional, so the queue module's tests build without it, and without it the worker counts stay as configured. |
 | `service/history/transfer_queue_factory.go`, `timer_queue_factory.go`, `visibility_queue_factory.go`, `archival_queue_factory.go`, `outbound_queue_factory.go` | Each passes its queue's recorder from `HistoryQueues` to `NewExecutableFactory`. All but the outbound queue take their scheduler's worker count from `HistoryQueues.WorkerCount`. |
-| `service/history/fx.go` | `Module` provides `HistoryQueues`. |
+| `service/history/fx.go` | `Module` provides `HistoryQueues`, and decorates the task scheduler's rate limiter with its coupling to persistence. |
 | `service/history/queues/queue_base_test.go`, `queue_scheduled_test.go` | Pass no recorder to `NewExecutableFactory`. |
 | `temporal/server_option.go` | Adds `WithPartitionScalerFactory`, which sets the factory matching uses to scale task queue partitions. |
 | `temporal/server_options.go` | `serverOptions` keeps that factory. |
@@ -38,10 +38,12 @@ These files extend existing packages without editing upstream files:
 - `common/adaptive`: the shared core, with the modes, rollout, the envelope, the `adaptive.frozen` setting, and decisions with their `adaptive_controller_decisions` metric.
 - `common/adaptive/capacity/controller.go`: the controller.
 - `common/adaptive/workers`: the worker-count controller and history's queues.
+- `common/adaptive/taskrate`: the task scheduler's coupling to persistence.
+- `service/history/task_scheduler_rate.go`: the decorator that applies it.
 - `common/signals`: the signal plane, its sources and its trace.
 - `common/persistence/client/capacity_rate_limiter.go`: the capacity-aware limiter.
 - `common/persistence/store_facts.go`: the store-facts types.
-- `common/persistence/windowed_counter.go`: request, error and fact counts aligned with the latency windows.
+- `common/persistence/windowed_counter.go`: request, error, rejection, fact and task-attempt counts over fixed windows.
 - `common/persistence/sql/store_facts.go`: passes the sink through the SQL factory and `DbConn`.
 - Their tests, and `common/persistence/health_signal_aggregator_snapshot_test.go`, `common/persistence/client/store_facts_test.go`, `common/stats/windowed_tdigest_recent_test.go`, `service/history/queues/executable_schedule_latency_test.go` and `temporal/partition_scaler_option_test.go`.
 
