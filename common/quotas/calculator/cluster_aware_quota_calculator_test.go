@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/quotas/quotastest"
 )
@@ -94,4 +95,38 @@ func TestClusterAwareNamespaceSpecificQuotaCalculator_GetQuota(t *testing.T) {
 			}.GetQuota("test-namespace"))
 		})
 	}
+}
+
+// fixedShare is a ShareProvider with one share for one namespace.
+type fixedShare struct {
+	namespace string
+	share     float64
+}
+
+func (f fixedShare) Share(namespace string, _ float64) (float64, bool) {
+	return f.share, namespace == f.namespace
+}
+
+func TestQuotaCalculatorShareProvider(t *testing.T) {
+	t.Parallel()
+
+	calc := ClusterAwareNamespaceQuotaCalculator{
+		MemberCounter:    quotastest.NewFakeMemberCounter(4),
+		ShareProvider:    fixedShare{namespace: "test-namespace", share: 15},
+		PerInstanceQuota: func(string) int { return 10 },
+		GlobalQuota:      func(string) int { return 20 },
+	}
+	require.InDelta(t, 15.0, calc.GetQuota("test-namespace"), 1e-9, "the provider's share")
+	require.InDelta(t, 5.0, calc.GetQuota("other"), 1e-9, "an equal share when the provider has none")
+
+	calc.GlobalQuota = func(string) int { return 0 }
+	require.InDelta(t, 10.0, calc.GetQuota("test-namespace"), 1e-9, "the per instance limit without a per cluster limit")
+
+	hostCalc := ClusterAwareQuotaCalculator{
+		MemberCounter:    quotastest.NewFakeMemberCounter(0),
+		ShareProvider:    fixedShare{share: 7},
+		PerInstanceQuota: dynamicconfig.GetIntPropertyFn(10),
+		GlobalQuota:      dynamicconfig.GetIntPropertyFn(20),
+	}
+	require.InDelta(t, 7.0, hostCalc.GetQuota(), 1e-9, "a host quota's share, with no namespace")
 }

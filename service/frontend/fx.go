@@ -17,6 +17,7 @@ import (
 	chasmworkflow "go.temporal.io/server/chasm/lib/workflow"
 	"go.temporal.io/server/client"
 	"go.temporal.io/server/common"
+	"go.temporal.io/server/common/adaptive/fairshare"
 	"go.temporal.io/server/common/archiver"
 	"go.temporal.io/server/common/archiver/provider"
 	"go.temporal.io/server/common/authorization"
@@ -101,6 +102,8 @@ var Module = fx.Options(
 	fx.Provide(interceptor.NewHealthInterceptor),
 	fx.Provide(NamespaceCountLimitInterceptorProvider),
 	fx.Provide(NamespaceValidatorInterceptorProvider),
+	fx.Provide(FairShareProvider),
+	fx.Invoke(RegisterFairShare),
 	fx.Provide(NamespaceRateLimitersProvider),
 	fx.Provide(NamespaceRateLimitInterceptorProvider),
 	fx.Provide(SDKVersionInterceptorProvider),
@@ -540,6 +543,7 @@ func NamespaceRateLimitersProvider(
 	serviceName primitives.ServiceName,
 	serviceConfig *Config,
 	frontendServiceResolver membership.ServiceResolver,
+	fairShare *fairshare.Exchange,
 	logger log.SnTaggedLogger,
 ) NamespaceRateLimiters {
 	var globalNamespaceRPS, globalNamespaceVisibilityRPS, globalNamespaceNamespaceReplicationInducingAPIsRPS dynamicconfig.IntPropertyFnWithNamespaceFilter
@@ -561,6 +565,7 @@ func NamespaceRateLimitersProvider(
 	namespaceRateFn := calculator.NewLoggedNamespaceCalculator(
 		calculator.ClusterAwareNamespaceQuotaCalculator{
 			MemberCounter:    frontendServiceResolver,
+			ShareProvider:    fairShare.Shares(fairShareExecution, globalNamespaceRPS),
 			PerInstanceQuota: serviceConfig.MaxNamespaceRPSPerInstance,
 			GlobalQuota:      globalNamespaceRPS,
 		},
@@ -569,6 +574,7 @@ func NamespaceRateLimitersProvider(
 	visibilityRateFn := calculator.NewLoggedNamespaceCalculator(
 		calculator.ClusterAwareNamespaceQuotaCalculator{
 			MemberCounter:    frontendServiceResolver,
+			ShareProvider:    fairShare.Shares(fairShareVisibility, globalNamespaceVisibilityRPS),
 			PerInstanceQuota: serviceConfig.MaxNamespaceVisibilityRPSPerInstance,
 			GlobalQuota:      globalNamespaceVisibilityRPS,
 		},
@@ -577,6 +583,7 @@ func NamespaceRateLimitersProvider(
 	namespaceReplicationInducingRateFn := calculator.NewLoggedNamespaceCalculator(
 		calculator.ClusterAwareNamespaceQuotaCalculator{
 			MemberCounter:    frontendServiceResolver,
+			ShareProvider:    fairShare.Shares(fairShareReplicationInducing, globalNamespaceNamespaceReplicationInducingAPIsRPS),
 			PerInstanceQuota: serviceConfig.MaxNamespaceNamespaceReplicationInducingAPIsRPSPerInstance,
 			GlobalQuota:      globalNamespaceNamespaceReplicationInducingAPIsRPS,
 		},
@@ -584,7 +591,7 @@ func NamespaceRateLimitersProvider(
 	).GetQuota
 
 	return NamespaceRateLimiters{
-		Execution: quotas.NewNamespaceRequestRateLimiter(
+		Execution: fairShare.Count(fairShareExecution, quotas.NewNamespaceRequestRateLimiter(
 			func(req quotas.Request) quotas.RequestRateLimiter {
 				return configs.NewExecutionPriorityRateLimiter(
 					quotas.NewNamespaceRateBurst(
@@ -595,8 +602,8 @@ func NamespaceRateLimitersProvider(
 					serviceConfig.OperatorRPSRatio,
 				)
 			},
-		),
-		Visibility: quotas.NewNamespaceRequestRateLimiter(
+		)),
+		Visibility: fairShare.Count(fairShareVisibility, quotas.NewNamespaceRequestRateLimiter(
 			func(req quotas.Request) quotas.RequestRateLimiter {
 				return configs.NewVisibilityPriorityRateLimiter(
 					quotas.NewNamespaceRateBurst(
@@ -607,8 +614,8 @@ func NamespaceRateLimitersProvider(
 					serviceConfig.OperatorRPSRatio,
 				)
 			},
-		),
-		NamespaceReplicationInducing: quotas.NewNamespaceRequestRateLimiter(
+		)),
+		NamespaceReplicationInducing: fairShare.Count(fairShareReplicationInducing, quotas.NewNamespaceRequestRateLimiter(
 			func(req quotas.Request) quotas.RequestRateLimiter {
 				return configs.NewNamespaceReplicationInducingAPIPriorityRateLimiter(
 					quotas.NewNamespaceRateBurst(
@@ -619,7 +626,7 @@ func NamespaceRateLimitersProvider(
 					serviceConfig.OperatorRPSRatio,
 				)
 			},
-		),
+		)),
 	}
 }
 

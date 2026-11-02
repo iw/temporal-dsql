@@ -335,6 +335,24 @@ A demand-weighted provider gives each host a share proportional to its recent pe
 
 History's `OwnershipAwareQuotaCalculator` is the precedent: it already scales a host's share by the fraction of shards it owns, an observed quantity rather than a head count.
 
+On this branch, `common/adaptive/fairshare` splits a namespace's limits across the cluster between frontends by their demand. The quota calculator takes an optional `ShareProvider` beside its `MemberCounter`, so every existing calculator is unchanged. Without a provider, or when the provider has no share for a namespace, the calculator divides the limit by the member count as before. The frontend's three namespace limits, `frontend.globalNamespaceRPS`, its `.visibility` limit and its `.namespaceReplicationInducingAPIs` limit, take their shares from the fair-share exchange, as do the internal frontend's.
+
+- **Demand.** Each frontend counts the tokens each namespace's requests ask of each limit, admitted or not, and measures their rate over the last `Window`, 30s.
+- **Exchange.** Every `Interval`, 5s, each frontend sends its rates to the other frontends that take requests, and each reply carries the other's latest rates. The exchange is its own gRPC service on the frontend's port, `temporal.server.adaptive.v1.FairShareService`, whose messages are `structpb.Struct`s, so there's no proto change, and nothing rides on ringpop labels. A frontend counts another's report for `StaleAfter`, 15s. A reply says how long ago its report was measured, so a frontend whose rounds stop goes stale.
+- **Share.** A frontend keeps an equal share for each frontend whose demand it doesn't know, and the frontends it knows split the rest. Each keeps `MinShare`, 20%, of an equal share, so it can take requests that arrive before the next exchange, and the remainder follows their demand. While the demand with `Headroom`, 20%, fits the remainder, each gets its demand with headroom and an even part of what's spare. Otherwise each gets a part in proportion to its demand, so a request is as likely to be admitted at one frontend as at another. Without demand, each gets an equal share. When the frontends see the same demand, their shares add up to the limit. They agree within a round or two, rather than through consensus on the totals.
+- **Deadband.** A frontend applies a new share once it moves `Deadband`, 10% of an equal share, from the share it applies. Each limiter logs every change to its quota, so smaller moves would only fill the logs.
+- **Lag.** Each limiter reads its rate once a minute, so a share takes up to a minute to apply. A frontend that starts to receive a namespace's requests while the namespace is over its limit holds them to its floor until then.
+
+The authorizer sees the exchange as a cluster-scoped admin API, as it sees the admin service. Under the default authorizer, frontends need system admin claims to call each other; without them, the exchange is refused and each frontend keeps an equal share. A frontend calls the others as the system worker calls a frontend, and an internal frontend calls the others as the other services call it.
+
+While the controller is disabled, nothing is counted or exchanged, and every limit takes an equal share. In shadow, frontends exchange their rates and report the shares they'd take, while the equal shares apply. `RolloutPercent` is the share of namespaces, picked by name, that apply an enabled mode, and the others run in shadow. `adaptive.frozen` holds the shares applied.
+
+```yaml
+frontend.fairShareController:
+  - value:
+      Mode: shadow
+```
+
 ## Safety, operability and testing
 
 Every controller ships disabled, is proven in shadow, and stays inside bounds an operator sets. The rules below apply to all seven proposals.

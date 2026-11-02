@@ -590,6 +590,7 @@ func TestNamespaceRateLimitInterceptorProvider(t *testing.T) {
 				primitives.FrontendService,
 				&config,
 				serviceResolver,
+				nil, // no fair share
 				log.NewTestLogger(),
 			)
 			rateLimitInterceptor := NamespaceRateLimitInterceptorProvider(
