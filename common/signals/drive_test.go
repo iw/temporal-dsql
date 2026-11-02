@@ -138,3 +138,39 @@ func TestDrivenSettingHoldsWhileFrozen(t *testing.T) {
 	f.tick()
 	require.Equal(t, []int{120, 100}, f.got)
 }
+
+func TestDriveFuncReadsItsStaticValueOnEachStep(t *testing.T) {
+	f := newPlaneFixture(t, nil)
+	f.settings.Enabled = false
+	static := 100
+	ctrl := &fakeController{
+		env:  adaptive.Envelope[int]{Mode: adaptive.ModeNameShadow, RolloutPercent: 100, Min: 50, Max: 200, MaxStepFrac: 0.25},
+		next: 120,
+	}
+	d := DriveFunc(f.plane, func() int { return static }, ctrl, func() bool { return false }, []byte("history-1"), metrics.NoopMetricsHandler)
+	t.Cleanup(d.Stop)
+
+	value, on := d.Applying()
+	require.Equal(t, 100, value)
+	require.False(t, on)
+
+	// In shadow the consumer keeps its static value.
+	f.tick()
+	_, on = d.Applying()
+	require.False(t, on)
+
+	ctrl.env.Mode = adaptive.ModeNameEnabled
+	static = 160
+	f.tick()
+	value, on = d.Applying()
+	require.Equal(t, 120, value)
+	require.True(t, on)
+	require.InDelta(t, 160, f.tick().Decisions["fake"].Static, 0)
+
+	ctrl.env.Mode = adaptive.ModeNameDisabled
+	f.tick()
+	value, on = d.Applying()
+	require.Equal(t, 160, value)
+	require.False(t, on)
+	require.Nil(t, f.tick(), "nothing runs the plane once the value is back at its static value")
+}
