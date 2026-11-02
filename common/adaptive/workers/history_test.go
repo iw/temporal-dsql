@@ -75,4 +75,7 @@ func TestHistoryQueuesWithoutAPlaneLeaveTheSettingsAlone(t *testing.T) {
 	value, _ := queues.WorkerCount("transfer", static)(nil)
 	require.Equal(t, 512, value)
 	require.Nil(t, queues.ScheduleLatencyRecorder("transfer"))
+	maxCount, criticalCount := queues.PendingTaskLimits("transfer", func() int { return 10000 }, func() int { return 9000 })
+	require.Equal(t, 10000, maxCount())
+	require.Equal(t, 9000, criticalCount())
 }
