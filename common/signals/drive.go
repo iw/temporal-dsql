@@ -3,6 +3,7 @@ package signals
 import (
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -23,16 +24,18 @@ type (
 		Step(snap *Snapshot, env adaptive.Envelope[T], static T) (T, adaptive.Reason, any)
 	}
 
-	// Driven is a subscribable setting that a Controller drives, on the plane's ticks,
-	// while its envelope's mode enables it. While the controller is off, the setting's
-	// subscribers get the static setting's value, as without the controller.
+	// Driven is a setting that a Controller drives, on the plane's ticks, while its
+	// envelope's mode enables it. While the controller is off, the setting's subscribers
+	// get the static setting's value, as without the controller.
 	Driven[T adaptive.Number] struct {
-		plane   *Plane
-		ctrl    Controller[T]
-		frozen  func() bool
-		hostKey []byte
-		metrics metrics.Handler
-		cancels []func()
+		plane    *Plane
+		ctrl     Controller[T]
+		frozen   func() bool
+		hostKey  []byte
+		metrics  metrics.Handler
+		staticFn func() T // for DriveFunc, read on each step
+		cancels  []func()
+		current  atomic.Pointer[applying[T]]
 
 		mu          sync.Mutex // guards the fields below, and orders notifications
 		static      T
@@ -41,6 +44,11 @@ type (
 		mode        adaptive.Mode
 		subscribers map[int]func(T)
 		nextID      int
+	}
+
+	applying[T adaptive.Number] struct {
+		value T
+		on    bool
 	}
 )
 
@@ -54,7 +62,33 @@ func Drive[T adaptive.Number](
 	hostKey []byte,
 	handler metrics.Handler,
 ) *Driven[T] {
-	d := &Driven[T]{
+	d := newDriven(plane, ctrl, frozen, hostKey, handler)
+	value, cancelStatic := static(d.staticChanged)
+	if cancelStatic != nil {
+		d.cancels = append(d.cancels, cancelStatic)
+	}
+	d.start(value)
+	return d
+}
+
+// DriveFunc drives a value from ctrl, as Drive does, for a consumer that reads it with
+// Applying. Its static value comes from static, which each step reads.
+func DriveFunc[T adaptive.Number](
+	plane *Plane,
+	static func() T,
+	ctrl Controller[T],
+	frozen func() bool,
+	hostKey []byte,
+	handler metrics.Handler,
+) *Driven[T] {
+	d := newDriven(plane, ctrl, frozen, hostKey, handler)
+	d.staticFn = static
+	d.start(static())
+	return d
+}
+
+func newDriven[T adaptive.Number](plane *Plane, ctrl Controller[T], frozen func() bool, hostKey []byte, handler metrics.Handler) *Driven[T] {
+	return &Driven[T]{
 		plane:       plane,
 		ctrl:        ctrl,
 		frozen:      frozen,
@@ -62,14 +96,25 @@ func Drive[T adaptive.Number](
 		metrics:     handler,
 		subscribers: make(map[int]func(T)),
 	}
-	value, cancelStatic := static(d.staticChanged)
-	d.static, d.proposed, d.applied = value, value, value
-	ctrl.Reset(value)
-	if cancelStatic != nil {
-		d.cancels = append(d.cancels, cancelStatic)
-	}
-	d.cancels = append(d.cancels, plane.Subscribe(d.step, d.active))
-	return d
+}
+
+func (d *Driven[T]) start(static T) {
+	d.static, d.proposed, d.applied = static, static, static
+	d.ctrl.Reset(static)
+	d.publish()
+	d.cancels = append(d.cancels, d.plane.Subscribe(d.step, d.active))
+}
+
+// Applying returns the controller's value, and true, while it's enabled. Otherwise the
+// consumer uses the static value.
+func (d *Driven[T]) Applying() (T, bool) {
+	current := d.current.Load()
+	return current.value, current.on
+}
+
+// publish makes the applied value visible to Applying. Callers hold mu, or own d.
+func (d *Driven[T]) publish() {
+	d.current.Store(&applying[T]{value: d.applied, on: d.mode == adaptive.ModeOn})
 }
 
 // Subscribable is the setting as its consumer subscribes to it.
@@ -98,6 +143,7 @@ func (d *Driven[T]) Stop() {
 func (d *Driven[T]) staticChanged(value T) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	defer d.publish()
 	d.static = value
 	switch d.mode {
 	case adaptive.ModeOff:
@@ -122,7 +168,11 @@ func (d *Driven[T]) active() bool {
 func (d *Driven[T]) step(snap *Snapshot) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	defer d.publish()
 
+	if d.staticFn != nil {
+		d.static = d.staticFn()
+	}
 	env := d.ctrl.Envelope(d.static)
 	mode := env.HostMode(d.hostKey)
 	d.mode = mode

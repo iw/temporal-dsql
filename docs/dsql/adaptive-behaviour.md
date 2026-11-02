@@ -199,6 +199,25 @@ history.persistenceDynamicRateLimitingParams:
 
 **Couple the task scheduler to it next.** `QueueSchedulerRateLimiterProvider` should derive the scheduler's host rate from the controller's admitted rate divided by measured persistence calls per task, instead of a static fallback. Tasks then wait in the scheduler, which is cheap, instead of failing mid-execution and bouncing through the rescheduler.
 
+On this branch, `common/adaptive/taskrate` does this:
+
+- **The rate** is the persistence rate times `Headroom`, 0.9, times the task attempts per persistence call that the persistence snapshot measures. API calls count among the calls, so they keep their share of the persistence rate.
+- **The persistence rate** is the capacity controller's while it's enabled and its decision is less than `DecisionHold`, 10s, old. Otherwise it's the static limit.
+- **Bounds.** The rate stays between `MinMultiplier`, 2%, of the static persistence rate and the scheduler's fallback, which is that rate. It moves at most `MaxStepFrac`, 25%, in a step.
+- **How it limits.** The scheduler's own limiter refreshes its rate once a minute. So while the controller is enabled, it limits the scheduler with its own buckets, on top of the scheduler's limiter. Disabled, it passes every request to the scheduler's limiter.
+
+It acts only where the scheduler's rate limiter is on and out of shadow mode:
+
+```yaml
+history.taskSchedulerEnableRateLimiter:
+  - value: true
+history.taskSchedulerEnableRateLimiterShadowMode:
+  - value: false
+history.taskSchedulerRateController:
+  - value:
+      Mode: enabled
+```
+
 **On DSQL, hear the plugin's facts.** The design for passing the DSQL plugin's throttling, contention and pool pressure to the controller, rather than inferring the store's health from latency, is in [Store facts for the capacity controller](adaptive-store-facts.md).
 
 ## Proposal 4: worker counts follow queueing delay

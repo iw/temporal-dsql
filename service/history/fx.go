@@ -72,6 +72,7 @@ var Module = fx.Options(
 	chasmtests.Module,
 	fx.Provide(ConfigProvider), // might be worth just using provider for configs.Config directly
 	fx.Provide(workers.NewHistoryQueues),
+	fx.Decorate(coupleSchedulerRateLimiter),
 	fx.Provide(workflow.NewCommandHandlerRegistry),
 	fx.Provide(ServiceErrorInterceptorProvider),
 	fx.Provide(RetryableInterceptorProvider),

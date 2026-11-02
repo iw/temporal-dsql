@@ -57,8 +57,8 @@ type (
 		// facts. The counts are its facts over the same span.
 		StoreReportsFacts                              bool
 		Throttled, Contention, Limit, Queued, Acquired int
-		// ScheduleP90 is the 90th percentile of how long task attempts waited in the
-		// host's schedulers over the same span, and ScheduleSamples how many it covers.
+		// ScheduleSamples counts the task attempts the host's schedulers ran over the same
+		// span, and ScheduleP90 is the 90th percentile of how long they waited there.
 		ScheduleP90     time.Duration
 		ScheduleSamples int
 		// Rejected counts the calls the persistence rate limiter rejected over the same
@@ -79,8 +79,8 @@ type (
 
 		latencyAverage      aggregate.MovingWindowAverage
 		latencyDistribution stats.TimeWindowedStats
-		counters            *windowedCounter        // aligned with latencyDistribution windows
-		scheduleLatency     stats.TimeWindowedStats // aligned with counters' windows
+		counters            *windowedCounter        // calls, rejections, facts and task attempts
+		scheduleLatency     stats.TimeWindowedStats // how long task attempts waited
 		errorRatio          aggregate.MovingWindowAverage
 		factsDeclared       atomic.Bool
 
@@ -208,7 +208,9 @@ func (s *healthSignalAggregatorImpl) record(callerSegment int32, latency time.Du
 
 func (s *healthSignalAggregatorImpl) RecordScheduleLatency(latency time.Duration) {
 	if s.aggregationEnabled && s.percentilesEnabled() && s.scheduleLatency != nil {
-		s.scheduleLatency.Record(float64(latency.Milliseconds()), time.Now())
+		now := time.Now()
+		s.scheduleLatency.Record(float64(latency.Milliseconds()), now)
+		s.counters.recordAttempt(now)
 	}
 }
 
@@ -254,6 +256,7 @@ func (s *healthSignalAggregatorImpl) RecentSnapshot(windows int) HealthSnapshot 
 		Queued:            int(counts.facts[StoreFactQueued]),
 		Acquired:          int(counts.facts[StoreFactAcquired]),
 		Rejected:          int(counts.rejected),
+		ScheduleSamples:   int(counts.attempts),
 	}
 	if counts.total > 0 {
 		snap.ErrorRatio = float64(counts.errors) / float64(counts.total)
@@ -264,10 +267,11 @@ func (s *healthSignalAggregatorImpl) RecentSnapshot(windows int) HealthSnapshot 
 		delivered -= min(delivered, counts.facts[StoreFactThrottled])
 		snap.Throughput = float64(delivered) / span.Seconds()
 	}
-	if sq, ok := s.scheduleLatency.(stats.RecentQuantiler); ok {
-		p90ms, samples := sq.QuantileRecent(0.90, windows, now)
+	// Attempts are counted with the calls. The digest's newest windows can reach back
+	// past their span when the newest second had no attempts, so it gives only the p90.
+	if sq, ok := s.scheduleLatency.(stats.RecentQuantiler); ok && counts.attempts > 0 {
+		p90ms, _ := sq.QuantileRecent(0.90, windows, now)
 		snap.ScheduleP90 = time.Duration(p90ms * float64(time.Millisecond))
-		snap.ScheduleSamples = int(samples)
 	}
 	return snap
 }
