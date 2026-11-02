@@ -154,6 +154,7 @@ impl Ci {
         args.extend(packages.unwrap_or_else(|| {
             strings(&[
                 "./common/adaptive/...",
+                "./common/cache/...",
                 "./common/persistence",
                 "./common/persistence/client/...",
                 "./common/persistence/sql/...",

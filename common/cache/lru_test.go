@@ -849,3 +849,76 @@ func TestCache_UnusedExpiryPin(t *testing.T) {
 		return cache.Size() == 0
 	}, 1*time.Second, 100*time.Millisecond)
 }
+
+func TestSetMaxSize(t *testing.T) {
+	t.Parallel()
+
+	cache := New(4, nil)
+	for _, key := range []string{"A", "B", "C", "D"} {
+		cache.Put(key, key)
+	}
+	require.Equal(t, "A", cache.Get("A")) // A is now the most recently used
+
+	resizable := cache.(Resizable)
+	resizable.SetMaxSize(2)
+	require.Equal(t, 2, cache.Size())
+	require.Nil(t, cache.Get("B"), "the least recently used go first")
+	require.Nil(t, cache.Get("C"))
+	require.Equal(t, "D", cache.Get("D"))
+	require.Equal(t, "A", cache.Get("A"))
+
+	resizable.SetMaxSize(0) // not a size: ignored
+	resizable.SetMaxSize(3)
+	cache.Put("E", "E")
+	require.Equal(t, 3, cache.Size())
+}
+
+func TestSetMaxSizeWithPin(t *testing.T) {
+	t.Parallel()
+
+	cache := New(3, &Options{Pin: true})
+	for _, key := range []string{"A", "B", "C"} {
+		_, err := cache.PutIfNotExist(key, key)
+		require.NoError(t, err)
+	}
+	cache.Release("C") // A and B stay pinned
+
+	cache.(Resizable).SetMaxSize(1)
+	require.Equal(t, 2, cache.Size(), "pinned entries stay past the limit")
+
+	cache.Release("A")
+	require.Equal(t, 1, cache.Size(), "a pinned entry goes once it's released")
+	require.Equal(t, "B", cache.Get("B"))
+}
+
+func TestSetMaxSizeLeavesADisabledCacheDisabled(t *testing.T) {
+	t.Parallel()
+
+	cache := New(0, nil)
+	cache.(Resizable).SetMaxSize(10)
+	cache.Put("A", "A")
+	require.Nil(t, cache.Get("A"))
+	require.Zero(t, cache.Size())
+}
+
+func TestSetMaxSizeWhileInUse(t *testing.T) {
+	t.Parallel()
+
+	cache := New(100, nil)
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Go(func() {
+			for j := range 1000 {
+				key := (i*1000 + j) % 300
+				cache.Put(key, j)
+				cache.Get(key)
+			}
+		})
+	}
+	resizable := cache.(Resizable)
+	for size := 100; size > 0; size-- {
+		resizable.SetMaxSize(size)
+	}
+	wg.Wait()
+	require.LessOrEqual(t, cache.Size(), 1)
+}

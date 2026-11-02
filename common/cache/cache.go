@@ -42,6 +42,11 @@ type StoppableCache interface {
 	Stop()
 }
 
+// Resizable is a cache whose size limit can change while it runs, as the LRU's can.
+type Resizable interface {
+	SetMaxSize(maxSize int)
+}
+
 // Options control the behavior of the cache.
 type Options struct {
 	// TTL controls the time-to-live for a given cache entry.  Cache entries that

@@ -94,6 +94,13 @@ func newEventsCache(
 	}
 }
 
+// SetMaxSize changes the cache's size limit in bytes, for the memory budget.
+func (e *CacheImpl) SetMaxSize(maxSize int) {
+	if r, ok := e.Cache.(cache.Resizable); ok {
+		r.SetMaxSize(maxSize)
+	}
+}
+
 func (e *CacheImpl) validateKey(key EventKey) bool {
 	if len(key.NamespaceID) == 0 || len(key.WorkflowID) == 0 || len(key.RunID) == 0 || key.EventID < common.FirstEventID {
 		// This is definitely a bug, but just warn and don't crash so we can find anywhere this happens.
