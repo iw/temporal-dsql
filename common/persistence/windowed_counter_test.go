@@ -48,3 +48,22 @@ func TestWindowedCounterFacts(t *testing.T) {
 		t.Fatalf("stale facts counted: %v", counts.facts)
 	}
 }
+
+func TestWindowedCounterAttemptsLeaveWithTheirCalls(t *testing.T) {
+	c := newWindowedCounter(time.Second, 5)
+	base := time.Unix(1_700_000_000, 0)
+	for i := range 40 { // window 0: a burst of task attempts and their calls
+		c.recordAttempt(base.Add(time.Duration(i) * time.Millisecond))
+		c.record(base.Add(time.Duration(i)*time.Millisecond), false)
+	}
+	c.record(base.Add(2*time.Second), false) // window 2: a call, and no attempts
+	now := base.Add(2500 * time.Millisecond)
+
+	if counts, _ := c.sum(now, 3); counts.attempts != 40 || counts.total != 41 {
+		t.Fatalf("got attempts=%d total=%d", counts.attempts, counts.total)
+	}
+	// A window on, the burst's attempts leave the span with its calls.
+	if counts, _ := c.sum(now.Add(time.Second), 3); counts.attempts != 0 || counts.total != 1 {
+		t.Fatalf("got attempts=%d total=%d", counts.attempts, counts.total)
+	}
+}

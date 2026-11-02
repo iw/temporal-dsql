@@ -6,9 +6,10 @@ import (
 )
 
 // windowedCounter counts requests, unhealthy errors, the persistence rate limiter's
-// rejections and store facts in fixed time windows aligned with the latency t-digest
-// windows, so error ratio, throughput and facts can be read over exactly the same span
-// as the latency quantile.
+// rejections, store facts and task attempts in fixed time windows, so error ratio,
+// throughput, facts and attempts per call are all read over exactly the same span. The
+// latency t-digests start a window at its first sample, so their quantiles cover about
+// that span.
 type windowedCounter struct {
 	mu      sync.Mutex
 	size    time.Duration
@@ -22,8 +23,8 @@ type counterBucket struct {
 
 // windowCounts are the counts in one window, or summed over several.
 type windowCounts struct {
-	total, errors, rejected uint64
-	facts                   [numStoreFacts]uint64
+	total, errors, rejected, attempts uint64
+	facts                             [numStoreFacts]uint64
 }
 
 func newWindowedCounter(size time.Duration, count int) *windowedCounter {
@@ -52,6 +53,12 @@ func (c *windowedCounter) recordFact(now time.Time, fact StoreFact, count uint64
 	c.bucket(now).facts[fact] += count
 }
 
+func (c *windowedCounter) recordAttempt(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bucket(now).attempts++
+}
+
 // bucket returns now's bucket, cleared if it still holds an older window. Callers hold mu.
 func (c *windowedCounter) bucket(now time.Time) *counterBucket {
 	w := now.UnixNano() / int64(c.size)
@@ -75,6 +82,7 @@ func (c *windowedCounter) sum(now time.Time, n int) (counts windowCounts, span t
 			counts.total += b.total
 			counts.errors += b.errors
 			counts.rejected += b.rejected
+			counts.attempts += b.attempts
 			for fact, count := range b.facts {
 				counts.facts[fact] += count
 			}
