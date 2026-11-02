@@ -54,6 +54,7 @@ type scaleManager struct {
 	nextDecision     time.Time
 	nextShadowLog    time.Time
 	prevShadowTarget int32
+	stats            *PartitionScalerStats // the latest, for a PartitionStatsScaler
 
 	// store separately from scaleState to avoid data race
 	currentWrite atomic.Int32
@@ -162,6 +163,12 @@ func (sm *scaleManager) backgroundWork(ctx context.Context) error {
 
 		case <-ch:
 			ch = timerCh()
+			if sm.wantsStats() {
+				// describe the partitions first, so the scaler gets their stats fresh
+				sm.updateBacklogAndDrainState(ctx)
+				sm.callScaler()
+				continue
+			}
 			// call scaler even if batch == 0, to allow scale down when no tasks are coming in
 			sm.callScaler()
 			// check child partitions periodically
@@ -197,10 +204,12 @@ func (sm *scaleManager) callScaler() {
 	tasks := int(sm.batch.Swap(0))
 
 	decision := sm.partitionScaler.OnTasks(PartitionScalerInput{
-		NumTasks:      tasks,
-		CurrentTarget: int(sm.scaleState.GetTarget()),
-		BacklogCounts: sm.scaleState.GetBacklogCounts(),
-		PrivateState:  sm.scaleState.GetPrivateScalerState(),
+		NumTasks:       tasks,
+		CurrentTarget:  int(sm.scaleState.GetTarget()),
+		BacklogCounts:  sm.scaleState.GetBacklogCounts(),
+		PrivateState:   sm.scaleState.GetPrivateScalerState(),
+		ReadPartitions: int(scaleStateToReadCount(sm.scaleState)),
+		Stats:          sm.stats,
 	})
 	backlogCapC8 := number.EncodeCompact8(int64(decision.BacklogCap))
 	disabledStateNeedsCleanup := decision.NewTarget == 0 &&
@@ -414,11 +423,17 @@ func (sm *scaleManager) describeRequest(id int32, versions []string) *matchingse
 func (sm *scaleManager) updateBacklogAndDrainState(ctx context.Context) {
 	scaleState := sm.scaleState
 	read := scaleStateToReadCount(scaleState)
-	if read == 0 {
+	wantsStats := sm.wantsStats()
+	if read == 0 && !wantsStats {
+		sm.stats = nil
 		return
 	}
 	versions, err := sm.versionsForDescribe()
 	if err != nil {
+		return
+	}
+	if read == 0 {
+		sm.updateUnmanagedStats(ctx, versions)
 		return
 	}
 
@@ -435,15 +450,19 @@ func (sm *scaleManager) updateBacklogAndDrainState(ctx context.Context) {
 		sm.timeSource.Since(time.Unix(0, scaleState.GetTargetVersion())) >= settings.DrainBufferTime
 	info := scaleStateToInfo(scaleState, settings)
 	var toClear []int32
+	stats := sm.newStats(wantsStats, info.Write)
 
 	for id := range read {
 		callCtx, cancel := context.WithTimeout(ctx, ioTimeout)
-		res, err := sm.matchingClient.DescribeTaskQueuePartition(callCtx, sm.describeRequest(id, versions))
+		req := sm.describeRequest(id, versions)
+		req.ReportStats = wantsStats
+		res, err := sm.matchingClient.DescribeTaskQueuePartition(callCtx, req)
 		cancel()
 		if err != nil {
 			// CONSIDER(carlydf): Emit a metric when an unloaded partition in the draining range blocks scale-down.
 			continue
 		}
+		stats.add(res)
 
 		// update backlog count
 		total := totalBacklogFromDescribeResponse(res)
@@ -463,6 +482,7 @@ func (sm *scaleManager) updateBacklogAndDrainState(ctx context.Context) {
 		}
 	}
 
+	sm.stats = stats
 	if !backlogChanged && len(toClear) == 0 {
 		return
 	}
