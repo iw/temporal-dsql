@@ -64,6 +64,9 @@ const (
 	MatchingServicePrefix = "/temporal.server.api.matchingservice.v1.MatchingService/"
 	// Technically not a gRPC service, but still using this format for metadata.
 	NexusServicePrefix = "/temporal.api.nexusservice.v1.NexusService/"
+	// FairShareServicePrefix is the service frontends exchange their namespaces' demand
+	// through, for the fair-share controller in common/adaptive/fairshare.
+	FairShareServicePrefix = "/temporal.server.adaptive.v1.FairShareService/"
 )
 
 var (
@@ -225,7 +228,7 @@ func GetMethodMetadata(fullApiName string) MethodMetadata {
 		return operatorServiceMetadata[MethodName(fullApiName)]
 	case strings.HasPrefix(fullApiName, NexusServicePrefix):
 		return nexusServiceMetadata[MethodName(fullApiName)]
-	case strings.HasPrefix(fullApiName, AdminServicePrefix):
+	case strings.HasPrefix(fullApiName, AdminServicePrefix), strings.HasPrefix(fullApiName, FairShareServicePrefix):
 		return MethodMetadata{Scope: ScopeCluster, Access: AccessAdmin}
 	default:
 		return MethodMetadata{Scope: ScopeUnknown, Access: AccessUnknown}
