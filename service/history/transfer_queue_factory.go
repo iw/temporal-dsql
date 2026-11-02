@@ -175,6 +175,11 @@ func (f *transferQueueFactory) CreateQueue(
 		f.Config.TaskDLQErrorPattern,
 		f.HistoryQueues.ScheduleLatencyRecorder(tasks.CategoryTransfer.Name()),
 	)
+	maxPendingTasks, criticalPendingTasks := f.HistoryQueues.PendingTaskLimits(
+		tasks.CategoryTransfer.Name(),
+		f.Config.QueuePendingTaskMaxCount,
+		f.Config.QueuePendingTaskCriticalCount,
+	)
 	return queues.NewImmediateQueue(
 		shardContext,
 		tasks.CategoryTransfer,
@@ -183,12 +188,12 @@ func (f *transferQueueFactory) CreateQueue(
 		&queues.Options{
 			ReaderOptions: queues.ReaderOptions{
 				BatchSize:            f.Config.TransferTaskBatchSize,
-				MaxPendingTasksCount: f.Config.QueuePendingTaskMaxCount,
+				MaxPendingTasksCount: maxPendingTasks,
 				PollBackoffInterval:  f.Config.TransferProcessorPollBackoffInterval,
 				MaxPredicateSize:     f.Config.QueueMaxPredicateSize,
 			},
 			MonitorOptions: queues.MonitorOptions{
-				PendingTasksCriticalCount:   f.Config.QueuePendingTaskCriticalCount,
+				PendingTasksCriticalCount:   criticalPendingTasks,
 				ReaderStuckCriticalAttempts: f.Config.QueueReaderStuckCriticalAttempts,
 				SliceCountCriticalThreshold: f.Config.QueueCriticalSlicesCount,
 			},

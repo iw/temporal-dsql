@@ -175,6 +175,11 @@ func (f *timerQueueFactory) CreateQueue(
 		f.Config.TaskDLQErrorPattern,
 		f.HistoryQueues.ScheduleLatencyRecorder(tasks.CategoryTimer.Name()),
 	)
+	maxPendingTasks, criticalPendingTasks := f.HistoryQueues.PendingTaskLimits(
+		tasks.CategoryTimer.Name(),
+		f.Config.QueuePendingTaskMaxCount,
+		f.Config.QueuePendingTaskCriticalCount,
+	)
 	return queues.NewScheduledQueue(
 		shardContext,
 		tasks.CategoryTimer,
@@ -184,12 +189,12 @@ func (f *timerQueueFactory) CreateQueue(
 		&queues.Options{
 			ReaderOptions: queues.ReaderOptions{
 				BatchSize:            f.Config.TimerTaskBatchSize,
-				MaxPendingTasksCount: f.Config.QueuePendingTaskMaxCount,
+				MaxPendingTasksCount: maxPendingTasks,
 				PollBackoffInterval:  f.Config.TimerProcessorPollBackoffInterval,
 				MaxPredicateSize:     f.Config.QueueMaxPredicateSize,
 			},
 			MonitorOptions: queues.MonitorOptions{
-				PendingTasksCriticalCount:   f.Config.QueuePendingTaskCriticalCount,
+				PendingTasksCriticalCount:   criticalPendingTasks,
 				ReaderStuckCriticalAttempts: f.Config.QueueReaderStuckCriticalAttempts,
 				SliceCountCriticalThreshold: f.Config.QueueCriticalSlicesCount,
 			},
