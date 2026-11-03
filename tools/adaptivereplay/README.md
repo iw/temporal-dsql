@@ -75,9 +75,9 @@ comparison. A controller the tool doesn't know gets a row of its own, marked not
 - A recording opened on a running host, by setting the trace directory then, starts each
   law from its static value. Its first steps can differ from the recorded ones until the
   law's state catches up.
-- Fair share records a namespace's decision only when its mode or reason changes, or its
-  share moves by `Deadband`, so its series holds those changes. A held or frozen step keeps
-  the reason it recorded.
+- Fair share records a namespace's decision only when its mode, its reason or the share it
+  applies changes, or the share it proposes moves by `Deadband`, so its series holds those
+  changes. A held or frozen step keeps the reason it recorded.
 
 ## Test
 
