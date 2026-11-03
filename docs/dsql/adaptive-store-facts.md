@@ -250,6 +250,16 @@ API errors as a share of API calls, across the six scenarios, or across the thre
   - the proposed controller is lower in all six scenarios, where the figure has it lower in five.
 - Neither figure has been regenerated.
 
+**With the max-filter.** On 3 November 2026 the simulator was rerun with the max-filter from [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller), which returns the rate to 90% of what the store delivered after a cut. For the six scenarios:
+- without facts, API errors were 0.5–3.1%, against 0.5–3.4%;
+- with facts and nothing to report, 1.6–6.6%, against 3.0–7.4%;
+- with pools 1.25 or 2 times what the store needs, 0.6–3.8%, against 0.7–3.5%. On trace A at 60 ms, the 2-times pool's rose from 2.85 to 3.76%: without the latency law, the probe after a return reaches the timeouts sooner;
+- with pools 5 times that, 0.5–4.8%, against 0.55–5.1%. On trace A at 60 ms, they rose from 3.39 to 3.80%.
+
+Over 30 variants of each scenario with facts, with the drop's level and its timing varied, mean API errors fell or held in 21 of the 24 cases. They rose by 0.08 points on trace B at 15 ms with nothing to report, and by 0.05 and 0.01 points at 60 ms with the 2-times pool. The throttling store's runs didn't change, and the short pools' API errors stayed at 0.
+
+The max-filter trusts delivered throughput, so it relies on fix 1. Before it, a binding limit's rejections count as delivered, and the filter returns to rates the store didn't deliver: on trace B at 15 ms, API errors rose from 18.1 to 28.7%.
+
 ## Decisions
 
 Agreed on 29 October 2026:
