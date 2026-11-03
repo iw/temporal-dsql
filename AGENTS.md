@@ -157,5 +157,6 @@ Plugin settings come only from datastore `connectAttributes` or defaults. Region
 | `docs/dsql/adaptive-behaviour.md` | Adaptive behaviour design: dynamic config as the envelope around controllers |
 | `docs/dsql/adaptive-store-facts.md` | Typed store facts for the persistence capacity controller |
 | `docs/dsql/adaptive-upstream-changes.md` | The `adaptive-behaviour` branch's changes to upstream code |
+| `docs/dsql/adaptive-appreciation.md` | The system appreciation: the adaptive controllers together on a throwaway DSQL cluster |
 | `tools/poolsim/README.md` | Pool simulator documentation |
 | `tools/adaptivereplay/README.md` | Trace replay tool documentation |

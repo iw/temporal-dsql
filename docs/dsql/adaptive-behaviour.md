@@ -162,7 +162,7 @@ On this branch, `common/signals` is the plane. Each service has one, off by defa
 
 Controllers report each step to the plane through `adaptive.Report`, and the next snapshot carries each controller's latest decision. The persistence capacity controller reports its steps, with the envelope and signals it stepped on. It still reads the persistence aggregator itself, on its own step.
 
-With `TraceDirectory` set, each service writes its snapshots and decisions to `<service>-<host>-<pid>.jsonl` in that directory, up to `TraceMaxBytes`, 1 GiB by default. Each line is one JSON object: a header that starts the file, a snapshot or a decision. Durations are in nanoseconds. The traces feed the [offline replay](#offline-replay) and the system appreciation.
+With `TraceDirectory` set, each service writes its snapshots and decisions to `<service>-<host>-<pid>.jsonl` in that directory, up to `TraceMaxBytes`, 1 GiB by default. Each line is one JSON object: a header that starts the file, a snapshot or a decision. Durations are in nanoseconds. The traces feed the [offline replay](#offline-replay) and the [system appreciation](adaptive-appreciation.md).
 
 ```yaml
 adaptive.signals:
@@ -445,6 +445,8 @@ It works for settings read with `.Get` on every call and for the subscribed sett
 
 Phase 1 goes first because it carries the most operator pain and is already prototyped. Phases 2 and 3 build the shared core and couple the loops; Phase 4 touches matching and cross-host state, which carry the most risk.
 
+Every phase was built first, off by default, and then the [system appreciation](adaptive-appreciation.md) ran the controllers together on a throwaway DSQL cluster, in place of a gate after each phase.
+
 ## Evidence from the Phase 1 prototype
 
 With one default config, the proposed controller kept simulated API errors at 0.5–3.4% across six scenarios, where static limits gave 29–33%. The evidence is a fluid simulation of one history host, so it supports building Phase 1, not skipping its shadow period.
@@ -489,7 +491,7 @@ The timeline shows three failure modes. Static admits past capacity, every queue
 |---|---|---|
 | Baseline drift | A slowly degrading database raises the learned minimum and the target with it | Absolute latency ceiling in the envelope; on this branch, a warning and a `baseline-up` or `baseline-down` decision when the baseline moves by `BaselineAlert` |
 | Over-cut on a step drop | Successful throughput collapses during a timeout storm, so the cut overshoots | Cooldown at least 2× signal span; on this branch, a BBR-style max-filter returns the rate to 90% of what the store delivered after the cut |
-| Controllers fighting | Worker, persistence and partition loops act on overlapping resources | Timescale separation; workers back off when persistence does |
+| Controllers fighting | Worker, persistence and partition loops act on overlapping resources | Timescale separation; workers back off when persistence does. The [system appreciation](adaptive-appreciation.md#loops-and-timescales) saw no two loops chase each other |
 | Open-loop shadow | Shadow proposals never feel their own effect | Treat shadow as a direction check; canary small cohorts in enabled mode |
 | Hidden state | Learned values are not in YAML, so incidents need a new way to see them | Decision reasons as metrics; a describe API for current controller state |
 | Static ceiling lag | The basic limiter refreshes its rate once a minute, so a raised ceiling applies late | Acceptable for a safety ceiling; document it |
