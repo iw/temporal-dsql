@@ -121,6 +121,18 @@ func (f *capacityLimiterFixture) bucketRPS(callerType string) float64 {
 	return f.limiter.buckets[CallerTypeDefaultPriority[callerType]].Rate()
 }
 
+// bind exhausts the API bucket's burst so a request is denied: the limit binds at
+// the next step.
+func (f *capacityLimiterFixture) bind(t *testing.T) {
+	t.Helper()
+	for range 2 * int(testHostRPS) {
+		if !f.limiter.Allow(f.now, apiRequest()) {
+			return
+		}
+	}
+	require.FailNow(t, "the API bucket admitted every request")
+}
+
 func TestCapacityLimiterDisabledDelegatesToLegacy(t *testing.T) {
 	for name, configure := range map[string]func(*dynamicconfig.DynamicRateLimitingParams){
 		"default params": func(p *dynamicconfig.DynamicRateLimitingParams) {
@@ -177,17 +189,85 @@ func TestCapacityLimiterProbesOnlyWhileBinding(t *testing.T) {
 	f.allowAfter(time.Second)
 	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001, "idle: no probe")
 
-	// Exhaust the API bucket's burst so a request is denied: the limit is binding.
-	denied := false
-	for range 2 * int(testHostRPS) {
-		if !f.limiter.Allow(f.now, apiRequest()) {
-			denied = true
-			break
-		}
-	}
-	require.True(t, denied)
+	f.bind(t)
 	f.allowAfter(time.Second)
 	require.InDelta(t, 1.05*testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+}
+
+func TestCapacityLimiterRecoversToWhatTheStoreDeliveredAfterACut(t *testing.T) {
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
+	f.signals.snapshot.Span = 3 * time.Second
+	f.allowAfter(0) // learns a 10ms baseline
+
+	// A timeout storm: nothing completes, so the controller halves its rate.
+	f.signals.snapshot = persistence.HealthSnapshot{P99: 2 * time.Second, ErrorRatio: 0.5, Samples: 1000, Span: 3 * time.Second}
+	f.allowAfter(time.Second)
+	require.InDelta(t, 500, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+
+	// The store works through its queue at 900 a second, still slow. A window that
+	// holds seconds from before the cut doesn't count.
+	f.signals.snapshot = persistence.HealthSnapshot{P99: 500 * time.Millisecond, Throughput: 950, Samples: 1000, Span: 3 * time.Second}
+	f.allowAfter(time.Second)
+	f.signals.snapshot.Throughput = 900
+	for range 2 {
+		f.allowAfter(time.Second)
+	}
+	require.InDelta(t, 500, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+
+	// Healthy again, with the limit binding: the rate returns to 0.9 x 900 at once.
+	f.signals.snapshot.P99 = 10 * time.Millisecond
+	f.bind(t)
+	f.allowAfter(time.Second)
+	require.InDelta(t, 810, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+	require.InDelta(t, 162, f.bucketRPS(headers.CallerTypeOperator), 0.001)
+	require.Equal(t, []string{"idle", "errors", "cooldown", "cooldown", "cooldown", "recover"}, f.decisions())
+
+	recovered, ok := f.sink.decisions[len(f.sink.decisions)-1].Detail.(capacityStep)
+	require.True(t, ok)
+	require.InDelta(t, 900, recovered.Decision.Delivered, 0.001)
+}
+
+func TestCapacityLimiterReportsBaselineMoves(t *testing.T) {
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
+	f.params.Capacity.BaselineWindow = time.Minute
+	f.params.Capacity.BaselineAlert = 1.5
+	f.allowAfter(0)
+	for range 61 {
+		f.allowAfter(time.Second) // a whole window of 10ms settles the baseline
+	}
+	require.Empty(t, baselineMoves(f.decisions()))
+
+	// The store slows to 16ms, under the 20ms target, so the controller holds. Once the
+	// 10ms samples leave the window, the baseline has moved by more than 1.5x.
+	f.signals.snapshot.P99 = 16 * time.Millisecond
+	for range 61 {
+		f.allowAfter(time.Second)
+	}
+	require.Equal(t, []string{string(capacityReasonBaselineUp)}, baselineMoves(f.decisions()))
+	up, ok := f.sink.decisions[len(f.sink.decisions)-1].Detail.(capacityStep)
+	require.True(t, ok)
+	require.Equal(t, 10*time.Millisecond, up.Decision.BaselineMovedFrom)
+	require.Equal(t, 16*time.Millisecond, up.Decision.Baseline)
+
+	// Back at 10ms, the minimum falls at once, and the alert measures from 16ms.
+	f.signals.snapshot.P99 = 10 * time.Millisecond
+	f.allowAfter(time.Second)
+	require.Equal(t,
+		[]string{string(capacityReasonBaselineUp), string(capacityReasonBaselineDown)},
+		baselineMoves(f.decisions()),
+	)
+	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+}
+
+// baselineMoves keeps the baseline alert's reasons from the limiter's decisions.
+func baselineMoves(reasons []string) []string {
+	var moves []string
+	for _, reason := range reasons {
+		if reason == string(capacityReasonBaselineUp) || reason == string(capacityReasonBaselineDown) {
+			moves = append(moves, reason)
+		}
+	}
+	return moves
 }
 
 func TestCapacityLimiterReturnsToLegacyWhenDisabled(t *testing.T) {
@@ -385,7 +465,7 @@ func TestCapacityLimiterEnabledWhileFrozenStartsAtTheControllersRate(t *testing.
 func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
 	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	f.allowAfter(0)
-	f.signals.snapshot = persistence.HealthSnapshot{P99: 200 * time.Millisecond, Throughput: 600, Samples: 1000}
+	f.signals.snapshot = persistence.HealthSnapshot{P99: 200 * time.Millisecond, Throughput: 600, Samples: 1000, Span: 3 * time.Second}
 	f.allowAfter(time.Second)
 
 	require.Len(t, f.sink.decisions, 2)
@@ -402,8 +482,11 @@ func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
 	step, ok := cut.Detail.(capacityStep)
 	require.True(t, ok)
 	require.Equal(t, capacity.ModeOn, step.Envelope.Mode)
+	require.Equal(t, 30*time.Second, step.Envelope.DeliveryWindow)
+	require.InDelta(t, 2, step.Envelope.BaselineAlert, 0.001)
 	require.Equal(t, 200*time.Millisecond, step.Signals.P99)
 	require.InDelta(t, 600, step.Signals.Throughput, 0.001)
+	require.Equal(t, 3*time.Second, step.Signals.Span)
 	require.Equal(t, capacity.ReasonLatency, step.Decision.Reason)
 }
 

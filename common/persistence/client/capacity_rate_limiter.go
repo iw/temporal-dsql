@@ -193,6 +193,7 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 		P99:            snap.P99,
 		ErrorRatio:     snap.ErrorRatio,
 		Throughput:     snap.Throughput,
+		Span:           snap.Span,
 		Samples:        snap.Samples,
 		Binding:        l.denied.Swap(false),
 		FactsReported:  snap.StoreReportsFacts,
@@ -225,6 +226,9 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 	if d.LatencyShadow {
 		adaptive.RecordDecision(l.metrics, capacityController, capacityReasonLatencyShadow)
 	}
+	if d.BaselineMovedFrom > 0 {
+		l.reportBaselineMove(mode, env, d)
+	}
 	if d.Reason != l.lastReason && isDecrease(d.Reason) {
 		l.logger.Info("Persistence capacity controller decreased rate.",
 			tag.NewStringTag("mode", mode.String()),
@@ -239,6 +243,14 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 			tag.NewInt("acquired", snap.Acquired),
 		)
 	}
+	if d.Reason == capacity.ReasonRecover {
+		l.logger.Info("Persistence capacity controller returned its rate to what the store delivered after a cut.",
+			tag.NewStringTag("mode", mode.String()),
+			tag.Float64("proposedRPS", d.Proposed),
+			tag.Float64("deliveredRPS", d.Delivered),
+			tag.Float64("staticRPS", static),
+		)
+	}
 	if d.LatencyShadow && !l.lastShadow {
 		l.logger.Info("Persistence capacity controller's latency law would have decreased rate; the store reports facts, so it ran in shadow.",
 			tag.NewStringTag("mode", mode.String()),
@@ -248,6 +260,24 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 	}
 	l.lastReason = d.Reason
 	l.lastShadow = d.LatencyShadow
+}
+
+// reportBaselineMove counts a move of the controller's learned latency baseline and
+// logs it as a warning: a store that slows down raises the controller's target with it,
+// up to LatencyCeiling.
+func (l *capacityAwareRateLimiter) reportBaselineMove(mode adaptive.Mode, env capacity.Envelope, d capacity.Decision) {
+	reason := capacityReasonBaselineUp
+	if d.Baseline < d.BaselineMovedFrom {
+		reason = capacityReasonBaselineDown
+	}
+	adaptive.RecordDecision(l.metrics, capacityController, reason)
+	l.logger.Warn("Persistence capacity controller's learned latency baseline moved.",
+		tag.NewStringTag("mode", mode.String()),
+		tag.NewDurationTag("from", d.BaselineMovedFrom),
+		tag.NewDurationTag("baseline", d.Baseline),
+		tag.NewDurationTag("target", d.Target),
+		tag.NewDurationTag("latencyCeiling", env.LatencyCeiling),
+	)
 }
 
 // applyRate sets the shared buckets to the controller's rate, scaled for each priority.
@@ -287,6 +317,13 @@ type capacityStep struct {
 // capacityReasonLatencyShadow tags a step where the latency law would have cut a
 // store that reports facts, so shadow runs can compare the two.
 const capacityReasonLatencyShadow adaptive.Reason = "latency-shadow"
+
+// capacityReasonBaselineUp and capacityReasonBaselineDown tag a step where the learned
+// latency baseline moved by BaselineAlert, so operators can alert on a store that slows.
+const (
+	capacityReasonBaselineUp   adaptive.Reason = "baseline-up"
+	capacityReasonBaselineDown adaptive.Reason = "baseline-down"
+)
 
 func isDecrease(reason capacity.Reason) bool {
 	switch reason {
@@ -372,10 +409,12 @@ func capacityEnvelope(
 		MaxQueuedRatio:  p.MaxQueuedRatio,
 		MaxDecrease:     p.MaxDecrease,
 		DeliveryBackoff: p.DeliveryBackoff,
+		DeliveryWindow:  p.DeliveryWindow,
 		IncreaseFrac:    p.IncreaseFrac,
 		ProbeRamp:       p.ProbeRamp,
 		Cooldown:        max(p.Cooldown, 2*signalSpan),
 		BaselineWindow:  p.BaselineWindow,
+		BaselineAlert:   p.BaselineAlert,
 		MinSamples:      p.MinSamples,
 	}
 }

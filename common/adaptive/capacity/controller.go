@@ -10,9 +10,16 @@
 //   - On overload, cut to a fraction of the throughput the database actually
 //     delivered (the best live estimate of capacity), never more than
 //     MaxDecrease in one step, at most once per Cooldown.
+//   - After a cut, keep the most the database delivered, as BBR's max-filter
+//     keeps a path's bandwidth. During a timeout storm the delivered rate
+//     collapses, so a cut can go below capacity; once the database is healthy
+//     again, the rate returns to that fraction of what it delivered after the cut.
 //   - Probe upward only while the limit is binding (anti-windup); probe
 //     slowly near the rate where overload was last seen, accelerating the
 //     longer the system stays healthy.
+//
+// The controller reports when its learned baseline moves by BaselineAlert, since a
+// database that slows down raises the target with it.
 //
 // When the store's plugin reports facts (docs/dsql/adaptive-store-facts.md), the
 // controller acts on those and on timeouts instead, and runs the latency law only
@@ -74,6 +81,12 @@ type Envelope struct {
 	MaxDecrease     float64
 	DeliveryBackoff float64
 
+	// DeliveryWindow is how long after a cut the controller keeps the most the
+	// store delivered, over signal windows that start after the cut. While the store
+	// is healthy and the limit binds within it, the rate returns at once to
+	// DeliveryBackoff times that, never above the rate before the cut. 0 turns it off.
+	DeliveryWindow time.Duration
+
 	// IncreaseFrac is the multiplicative probe step per Step while healthy and
 	// binding. Within 15% of the last overload rate the step starts at 10% of
 	// IncreaseFrac and ramps to the full step over ProbeRamp.
@@ -86,6 +99,11 @@ type Envelope struct {
 
 	// BaselineWindow is how long the learned minimum is remembered.
 	BaselineWindow time.Duration
+
+	// BaselineAlert is the factor by which the learned baseline moves, up or down,
+	// before Step reports it. It's measured from the first baseline learned over a
+	// whole BaselineWindow, then from each one reported. 0 turns it off.
+	BaselineAlert float64
 
 	// MinSamples below which the controller holds.
 	MinSamples int
@@ -105,10 +123,12 @@ func DefaultEnvelope(staticRPS float64) Envelope {
 		MaxQueuedRatio:  0.25,
 		MaxDecrease:     0.5,
 		DeliveryBackoff: 0.9,
+		DeliveryWindow:  30 * time.Second,
 		IncreaseFrac:    0.05,
 		ProbeRamp:       30 * time.Second,
 		Cooldown:        6 * time.Second,
 		BaselineWindow:  10 * time.Minute,
+		BaselineAlert:   2,
 		MinSamples:      50,
 	}
 }
@@ -119,6 +139,7 @@ type Signals struct {
 	P99        time.Duration // over the most recent signal window only
 	ErrorRatio float64       // unhealthy errors / requests over the same window
 	Throughput float64       // completions per second the store delivered over the same window
+	Span       time.Duration // how long that window is
 	Samples    int
 	Binding    bool // the limiter rejected requests since the previous Step
 
@@ -146,6 +167,7 @@ const (
 	ReasonCooldown  Reason = "cooldown"
 	ReasonIdle      Reason = "idle" // healthy but not binding: hold (anti-windup)
 	ReasonProbe     Reason = "probe"
+	ReasonRecover   Reason = "recover" // back to what the store delivered after a cut
 )
 
 // Overloaded reports whether a step with this reason found the store overloaded: it
@@ -169,6 +191,12 @@ type Decision struct {
 	// LatencyShadow is set when the store reports facts and the latency law would
 	// have cut. The controller didn't; it reports it so the two can be compared.
 	LatencyShadow bool
+	// Delivered is the most the store delivered since the last cut, over signal
+	// windows that start after it, while DeliveryWindow lasts.
+	Delivered float64
+	// BaselineMovedFrom is set on a step where the learned baseline has moved by
+	// BaselineAlert: the baseline it moved from.
+	BaselineMovedFrom time.Duration
 }
 
 // Controller holds the learned state. It is not safe for concurrent use; the
@@ -178,6 +206,18 @@ type Controller struct {
 	lastDecrease time.Time
 	lastBadRate  float64 // capacity estimate when overload was last detected
 	baseline     windowMin
+
+	// The last cut: when it was, the rate before it, and the most the store has
+	// delivered since.
+	lastCut   time.Time
+	beforeCut float64
+	delivered float64
+
+	// The baseline the alert measures from, when the baseline's current run of
+	// samples began, and the latest sample.
+	settled  time.Duration
+	learning time.Time
+	lastData time.Time
 }
 
 // New returns a controller starting at initialRPS (normally the static MaxQPS).
@@ -202,6 +242,8 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 		base := max(c.baseline.min(), env.LatencyFloor)
 		target := min(time.Duration(float64(base)*env.Tolerance), env.LatencyCeiling)
 		d.Baseline, d.Target = base, target
+		d.BaselineMovedFrom = c.baselineMoved(env, s.Now, base)
+		d.Delivered = c.recordDelivered(env, s)
 
 		errorsHigh := s.ErrorRatio > env.MaxErrorRatio
 		throttledHigh := !errorsHigh && s.ThrottledRatio > 0 && s.ErrorRatio+s.ThrottledRatio > env.MaxErrorRatio
@@ -240,8 +282,14 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 			if s.Throughput > 0 {
 				c.lastBadRate = s.Throughput // delivered rate = live capacity estimate
 			}
+			before := c.rate
 			c.rate = math.Min(c.rate, math.Max(next, c.rate*env.MaxDecrease))
 			c.lastDecrease = s.Now
+			if c.rate < before {
+				// What the store delivered before the cut doesn't say what it delivers now.
+				c.lastCut, c.beforeCut, c.delivered = s.Now, before, 0
+				d.Delivered = 0
+			}
 		case !s.Binding:
 			d.Reason = ReasonIdle
 		default:
@@ -252,6 +300,14 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 			}
 			c.rate *= 1 + step
 			d.Reason = ReasonProbe
+			// A cut made while timeouts took the delivered rate down can go below what
+			// the store delivers once it recovers, so return to that at once instead of
+			// probing back up to it, and probe slowly from there.
+			if recovered := min(d.Delivered*env.DeliveryBackoff, c.beforeCut); recovered > c.rate {
+				c.rate = recovered
+				c.lastBadRate = d.Delivered
+				d.Reason = ReasonRecover
+			}
 		}
 	}
 
@@ -262,6 +318,46 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 		d.RPS = staticRPS
 	}
 	return d
+}
+
+// recordDelivered keeps the most the store has delivered since the last cut, over
+// signal windows that start after it, and returns it until DeliveryWindow has passed.
+func (c *Controller) recordDelivered(env Envelope, s Signals) float64 {
+	if env.DeliveryWindow <= 0 || c.lastCut.IsZero() {
+		return 0
+	}
+	since := s.Now.Sub(c.lastCut)
+	if since > env.DeliveryWindow {
+		return 0
+	}
+	if since >= s.Span {
+		c.delivered = max(c.delivered, s.Throughput)
+	}
+	return c.delivered
+}
+
+// baselineMoved returns the baseline that base moved from, when it has moved by
+// BaselineAlert from the baseline the alert measures from, and 0 otherwise. The alert
+// settles on a baseline once the baseline has a whole BaselineWindow of samples, with
+// no gap long enough for the window to forget them.
+func (c *Controller) baselineMoved(env Envelope, now time.Time, base time.Duration) time.Duration {
+	if c.lastData.IsZero() || now.Sub(c.lastData) > env.BaselineWindow {
+		c.learning = now
+	}
+	c.lastData = now
+	if env.BaselineAlert <= 1 || now.Sub(c.learning) < env.BaselineWindow {
+		return 0
+	}
+	from := c.settled
+	if from == 0 {
+		c.settled = base
+		return 0
+	}
+	if float64(base) < float64(from)*env.BaselineAlert && float64(base)*env.BaselineAlert > float64(from) {
+		return 0
+	}
+	c.settled = base
+	return from
 }
 
 // windowMin is a sliding-window minimum (monotonic deque).

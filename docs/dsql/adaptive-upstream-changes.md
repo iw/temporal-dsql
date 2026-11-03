@@ -8,7 +8,7 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 
 | File | Change and reason |
 | --- | --- |
-| `common/dynamicconfig/shared_constants.go` | `DynamicRateLimitingParams` gains `Capacity`, the controller's envelope. Its `Mode` is disabled by default, and its `RolloutPercent`, 100 by default, is the share of hosts that apply an enabled `Mode`. |
+| `common/dynamicconfig/shared_constants.go` | `DynamicRateLimitingParams` gains `Capacity`, the controller's envelope. Its `Mode` is disabled by default, and its `RolloutPercent`, 100 by default, is the share of hosts that apply an enabled `Mode`. Its `DeliveryWindow`, 30s, and `BaselineAlert`, 2, set the return to what the store delivered after a cut and the warning when the learned baseline moves. |
 | `common/persistence/client/quotas.go` | `NewPriorityRateLimiter` wraps the per-priority health limiters in the capacity-aware limiter, which also takes the `adaptive.frozen` setting and the sink for its decisions. The basic limiter's rate comes from `capacityCeilingFn`. Both take the host's rollout key, its hostname. |
 | `common/persistence/client/fx.go` | `Module` provides `AdaptiveFrozen`, the `adaptive.frozen` setting. `NewFactoryParams` takes the `adaptive.DecisionSink`, and `FactoryProvider` passes both to `NewPriorityRateLimiter`. |
 | `common/resource/fx.go` | `Module` includes `signals.Module`, which gives each service its signal plane, provided as the services' `adaptive.DecisionSink` too. |

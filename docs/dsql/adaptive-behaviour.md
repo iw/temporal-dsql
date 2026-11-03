@@ -197,6 +197,23 @@ history.persistenceDynamicRateLimitingParams:
         RolloutPercent: 100   # with Mode: enabled, the share of hosts that apply it
 ```
 
+**Return to what the store delivered, and say when the baseline moves.** On this branch, two additions answer the first two [risks](#risks-and-open-questions):
+
+- **After a cut.** During a timeout storm, the throughput the store delivers collapses, so a cut based on it can go well below what the store can do. For `DeliveryWindow`, 30s, after a cut, the controller keeps the most the store delivered over signal windows that start after the cut, as BBR's max-filter keeps a path's bandwidth. Once the store is healthy and the limit binds, the rate returns at once to `DeliveryBackoff`, 90%, of that, never above the rate before the cut, and probes slowly from there. The step's reason is `recover`, and the limiter logs it.
+- **The baseline.** A store that slows down raises the learned baseline, and the target with it, up to `LatencyCeiling`. The controller settles on the first baseline it learns over a whole `BaselineWindow`. When the baseline moves by `BaselineAlert`, 2 times, up or down, the limiter logs a warning and counts a `baseline-up` or `baseline-down` decision, and the controller measures from the new baseline. A gap in the samples longer than the window starts the settling again.
+
+Setting either to 0 turns it off:
+
+```yaml
+history.persistenceDynamicRateLimitingParams:
+  - value:
+      Enabled: true
+      Capacity:
+        Mode: shadow
+        DeliveryWindow: 30s
+        BaselineAlert: 2
+```
+
 **Couple the task scheduler to it next.** `QueueSchedulerRateLimiterProvider` should derive the scheduler's host rate from the controller's admitted rate divided by measured persistence calls per task, instead of a static fallback. Tasks then wait in the scheduler, which is cheap, instead of failing mid-execution and bouncing through the rescheduler.
 
 On this branch, `common/adaptive/taskrate` does this:
@@ -361,7 +378,7 @@ Every controller ships disabled, is proven in shadow, and stays inside bounds an
 - **Bounds and step limits.** Every output is clamped to a minimum and maximum and to a largest change per tick.
 - **Staged rollout.** `RolloutAccepts` keyed on host or shard ID enables a controller on a stable, growing cohort. On this branch, the persistence controller has it as `Capacity.RolloutPercent`, keyed on the hostname.
 - **One freeze key.** An `adaptive.frozen` setting holds every controller at its current value during an incident. Modes still change while it's set, so a controller can still be disabled. On this branch, the persistence controller honours it.
-- **Explainable decisions.** Each decision carries a reason (latency, errors, cooldown, idle, probe), emitted as a metric tag and logged on decreases, as matching already does for poller scaling. On this branch, `adaptive_controller_decisions` counts every step by `controller` and `reason`.
+- **Explainable decisions.** Each decision carries a reason (latency, errors, cooldown, idle, probe), emitted as a metric tag and logged on decreases, as matching already does for poller scaling. On this branch, `adaptive_controller_decisions` counts every step by `controller` and `reason`. With the tally metrics framework, a reason's hyphens become underscores, so `baseline-up` reads `baseline_up`.
 
 **Separate the timescales** so loops don't chase each other. Inner loops must settle before outer loops act on them.
 
@@ -420,14 +437,32 @@ Oracle-tuned legacy won only on trace B with the fast 3 ms database. Legacy with
 
 The timeline shows three failure modes. Static admits past capacity, every queued request waits past its deadline, and goodput collapses to zero; this FIFO-with-deadline model is harsher than some real stores, but the direction holds. Oracle-tuned legacy cannot settle: steps of 0.3 and 0.1 against a 3000 ceiling reach only multiples of 300, so it alternates between too low (rejections) and too high (timeouts). The proposed controller tracks capacity and used the headroom to clear the 250k-task burst in 137s, against about 1,120s for static.
 
-**Limitations.** On a hard step drop the controller briefly over-cuts, because successful throughput collapses during the timeout storm. It settles at about 85–90% of database capacity by design. The controller, windowed counter and `QuantileRecent` are compiled and tested; the integration files in the patch are syntax-checked and symbol-checked against the source, not compiled. Production traces replayed in a discrete-event simulator are the next test.
+**With the max-filter.** On 3 November 2026 the simulator was rerun with the branch's controller, which returns to what the store delivered after a cut ([Proposal 3](#proposal-3-one-persistence-capacity-controller)). Across the six scenarios, API errors were 0.5–3.1%, against 0.5–3.4%:
+
+| Scenario | Before | With the max-filter |
+|---|---|---|
+| Trace A, 3 ms | 0.53% | 0.48% |
+| Trace A, 15 ms | 0.68% | 0.61% |
+| Trace A, 60 ms | 3.43% | 3.06% |
+| Trace B, 3 ms | 1.76% | 1.76% |
+| Trace B, 15 ms | 2.01% | 2.01% |
+| Trace B, 60 ms | 2.30% | 1.99% |
+
+- On trace A with the 15 ms database, the controller returned to 1,620 calls a second, 90% of the 1,800 the store delivered, 17 s after the drop. API errors stopped at 418 s, rather than 424 s.
+- On trace A with the 60 ms database, rejections fell from 2.46 to 1.84% and timeouts rose from 0.97 to 1.23%.
+- Over 30 variants of each scenario, with the drop's level and its timing against the controller's steps varied, mean API errors fell or held for every database: on trace A from 2.15 to 2.11%, 2.26 to 2.24% and 3.33 to 3.22%, and on trace B from 1.75 to 1.75%, 1.92 to 1.92% and 2.22 to 2.06%. Of the 180 variants, 101 did better and 22 worse, and the rest moved by less than 0.005 points.
+- The gain is in the minute after the drop. On trace A, mean API errors there fell from 14.8 to 14.0%, 17.3 to 16.4% and 21.2 to 19.7%.
+- A `DeliveryWindow` of 10s gave 0.01–0.02 points less on trace A and the same on trace B, and one of 60s gave the same as 30s. The default keeps 30s, which leaves room for a store that takes longer to recover.
+- The figures above show the controller before the max-filter. With store facts, the rerun is in [Store facts](adaptive-store-facts.md#simulator-runs).
+
+**Limitations.** On a hard step drop the controller briefly over-cuts, because successful throughput collapses during the timeout storm. The max-filter on this branch shortens the over-cut, but doesn't prevent it. It settles at about 85–90% of database capacity by design. The controller, windowed counter and `QuantileRecent` are compiled and tested; the integration files in the patch are syntax-checked and symbol-checked against the source, not compiled. Production traces replayed in a discrete-event simulator are the next test.
 
 ## Risks and open questions
 
 | Risk | Why it matters | Mitigation |
 |---|---|---|
-| Baseline drift | A slowly degrading database raises the learned minimum and the target with it | Absolute latency ceiling in the envelope; alert when the baseline moves |
-| Over-cut on a step drop | Successful throughput collapses during a timeout storm, so the cut overshoots | Cooldown at least 2× signal span (in the patch); next, a BBR-style max-filter on delivered rate |
+| Baseline drift | A slowly degrading database raises the learned minimum and the target with it | Absolute latency ceiling in the envelope; on this branch, a warning and a `baseline-up` or `baseline-down` decision when the baseline moves by `BaselineAlert` |
+| Over-cut on a step drop | Successful throughput collapses during a timeout storm, so the cut overshoots | Cooldown at least 2× signal span; on this branch, a BBR-style max-filter returns the rate to 90% of what the store delivered after the cut |
 | Controllers fighting | Worker, persistence and partition loops act on overlapping resources | Timescale separation; workers back off when persistence does |
 | Open-loop shadow | Shadow proposals never feel their own effect | Treat shadow as a direction check; canary small cohorts in enabled mode |
 | Hidden state | Learned values are not in YAML, so incidents need a new way to see them | Decision reasons as metrics; a describe API for current controller state |
