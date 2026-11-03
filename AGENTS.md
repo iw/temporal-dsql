@@ -107,6 +107,7 @@
 
 #### Tooling
 - `tools/poolsim/` - Discrete event simulator for pgxpool, DSQL limits and workload scenarios
+- `tools/adaptivereplay/` - Replays the signal plane's traces through the adaptive controllers' laws
 - `tools/dsql/` - DSQL schema management tool
 - `.dagger/modules/ci/` - Dagger CI module: `dagger call ci build|lint|test`
 - `.dagger/live/` - Rust program for the DSQL live tests on throwaway AWS resources, run locally with the `temporal-dsql-ci` profile
@@ -157,3 +158,4 @@ Plugin settings come only from datastore `connectAttributes` or defaults. Region
 | `docs/dsql/adaptive-store-facts.md` | Typed store facts for the persistence capacity controller |
 | `docs/dsql/adaptive-upstream-changes.md` | The `adaptive-behaviour` branch's changes to upstream code |
 | `tools/poolsim/README.md` | Pool simulator documentation |
+| `tools/adaptivereplay/README.md` | Trace replay tool documentation |
