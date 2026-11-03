@@ -18,6 +18,9 @@
 //     slowly near the rate where overload was last seen, accelerating the
 //     longer the system stays healthy.
 //
+// The controller reports when its learned baseline moves by BaselineAlert, since a
+// database that slows down raises the target with it.
+//
 // When the store's plugin reports facts (docs/dsql/adaptive-store-facts.md), the
 // controller acts on those and on timeouts instead, and runs the latency law only
 // in shadow.
@@ -97,6 +100,11 @@ type Envelope struct {
 	// BaselineWindow is how long the learned minimum is remembered.
 	BaselineWindow time.Duration
 
+	// BaselineAlert is the factor by which the learned baseline moves, up or down,
+	// before Step reports it. It's measured from the first baseline learned over a
+	// whole BaselineWindow, then from each one reported. 0 turns it off.
+	BaselineAlert float64
+
 	// MinSamples below which the controller holds.
 	MinSamples int
 }
@@ -120,6 +128,7 @@ func DefaultEnvelope(staticRPS float64) Envelope {
 		ProbeRamp:       30 * time.Second,
 		Cooldown:        6 * time.Second,
 		BaselineWindow:  10 * time.Minute,
+		BaselineAlert:   2,
 		MinSamples:      50,
 	}
 }
@@ -185,6 +194,9 @@ type Decision struct {
 	// Delivered is the most the store delivered since the last cut, over signal
 	// windows that start after it, while DeliveryWindow lasts.
 	Delivered float64
+	// BaselineMovedFrom is set on a step where the learned baseline has moved by
+	// BaselineAlert: the baseline it moved from.
+	BaselineMovedFrom time.Duration
 }
 
 // Controller holds the learned state. It is not safe for concurrent use; the
@@ -200,6 +212,12 @@ type Controller struct {
 	lastCut   time.Time
 	beforeCut float64
 	delivered float64
+
+	// The baseline the alert measures from, when the baseline's current run of
+	// samples began, and the latest sample.
+	settled  time.Duration
+	learning time.Time
+	lastData time.Time
 }
 
 // New returns a controller starting at initialRPS (normally the static MaxQPS).
@@ -224,6 +242,7 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 		base := max(c.baseline.min(), env.LatencyFloor)
 		target := min(time.Duration(float64(base)*env.Tolerance), env.LatencyCeiling)
 		d.Baseline, d.Target = base, target
+		d.BaselineMovedFrom = c.baselineMoved(env, s.Now, base)
 		d.Delivered = c.recordDelivered(env, s)
 
 		errorsHigh := s.ErrorRatio > env.MaxErrorRatio
@@ -315,6 +334,30 @@ func (c *Controller) recordDelivered(env Envelope, s Signals) float64 {
 		c.delivered = max(c.delivered, s.Throughput)
 	}
 	return c.delivered
+}
+
+// baselineMoved returns the baseline that base moved from, when it has moved by
+// BaselineAlert from the baseline the alert measures from, and 0 otherwise. The alert
+// settles on a baseline once the baseline has a whole BaselineWindow of samples, with
+// no gap long enough for the window to forget them.
+func (c *Controller) baselineMoved(env Envelope, now time.Time, base time.Duration) time.Duration {
+	if c.lastData.IsZero() || now.Sub(c.lastData) > env.BaselineWindow {
+		c.learning = now
+	}
+	c.lastData = now
+	if env.BaselineAlert <= 1 || now.Sub(c.learning) < env.BaselineWindow {
+		return 0
+	}
+	from := c.settled
+	if from == 0 {
+		c.settled = base
+		return 0
+	}
+	if float64(base) < float64(from)*env.BaselineAlert && float64(base)*env.BaselineAlert > float64(from) {
+		return 0
+	}
+	c.settled = base
+	return from
 }
 
 // windowMin is a sliding-window minimum (monotonic deque).

@@ -323,3 +323,76 @@ func TestNoRecoveryWithoutACutOrWithoutADeliveryWindow(t *testing.T) {
 		t.Fatalf("DeliveryWindow 0 must turn the return off, got %+v", d)
 	}
 }
+
+func TestBaselineAlertReportsMovesFromWhereTheBaselineSettled(t *testing.T) {
+	env := DefaultEnvelope(1000) // BaselineWindow 10m, BaselineAlert 2
+	c := New(1000)
+	step := func(minute int, p99 time.Duration) Decision {
+		return c.Step(env, 1000, healthy(time.Duration(minute)*time.Minute, p99, false))
+	}
+	moves := func(from, to int, p99 time.Duration) []Decision {
+		var moved []Decision
+		for m := from; m <= to; m++ {
+			if d := step(m, p99); d.BaselineMovedFrom != 0 {
+				moved = append(moved, d)
+			}
+		}
+		return moved
+	}
+
+	// The first calls are slow, as on a cold start. The baseline settles once it has a
+	// whole window of samples, so its fall to 10ms isn't a move.
+	if moved := moves(0, 0, 40*time.Millisecond); len(moved) != 0 {
+		t.Fatalf("reported a move on the first sample: %+v", moved)
+	}
+	if moved := moves(1, 10, 10*time.Millisecond); len(moved) != 0 {
+		t.Fatalf("reported a move while the baseline was settling: %+v", moved)
+	}
+	// From the 10ms it settled on, 15ms is under the factor.
+	if moved := moves(11, 25, 15*time.Millisecond); len(moved) != 0 {
+		t.Fatalf("a move of 1.5x was reported: %+v", moved)
+	}
+	// 30ms is twice 10ms. The move is reported once, when the 15ms samples leave the window.
+	moved := moves(26, 40, 30*time.Millisecond)
+	if len(moved) != 1 || moved[0].BaselineMovedFrom != 10*time.Millisecond || moved[0].Baseline != 30*time.Millisecond {
+		t.Fatalf("expected one move from 10ms to 30ms, got %+v", moved)
+	}
+	// The next move is measured from 30ms: down to 14ms is more than halving it.
+	moved = moves(41, 55, 14*time.Millisecond)
+	if len(moved) != 1 || moved[0].BaselineMovedFrom != 30*time.Millisecond || moved[0].Baseline != 14*time.Millisecond {
+		t.Fatalf("expected one move from 30ms down to 14ms, got %+v", moved)
+	}
+}
+
+func TestBaselineAlertWaitsForAWholeWindowAfterAGap(t *testing.T) {
+	env := DefaultEnvelope(1000)
+	c := New(1000)
+	for m := 0; m <= 10; m++ {
+		c.Step(env, 1000, healthy(time.Duration(m)*time.Minute, 10*time.Millisecond, false))
+	}
+	// No calls for 20 minutes, so the window forgets the 10ms samples. A baseline learned
+	// from a few calls after the gap isn't reported until it has a whole window.
+	for m := 30; m < 40; m++ {
+		if d := c.Step(env, 1000, healthy(time.Duration(m)*time.Minute, 40*time.Millisecond, false)); d.BaselineMovedFrom != 0 {
+			t.Fatalf("reported a baseline learned since the gap at minute %d: %+v", m, d)
+		}
+	}
+	if d := c.Step(env, 1000, healthy(40*time.Minute, 40*time.Millisecond, false)); d.BaselineMovedFrom != 10*time.Millisecond {
+		t.Fatalf("expected the move from 10ms to be reported a window after the gap, got %+v", d)
+	}
+}
+
+func TestBaselineAlertOff(t *testing.T) {
+	env := DefaultEnvelope(1000)
+	env.BaselineAlert = 0
+	c := New(1000)
+	for m := 0; m <= 30; m++ {
+		p99 := 10 * time.Millisecond
+		if m > 10 {
+			p99 = 100 * time.Millisecond
+		}
+		if d := c.Step(env, 1000, healthy(time.Duration(m)*time.Minute, p99, false)); d.BaselineMovedFrom != 0 {
+			t.Fatalf("BaselineAlert 0 reported a move: %+v", d)
+		}
+	}
+}

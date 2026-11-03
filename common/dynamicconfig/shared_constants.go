@@ -132,6 +132,10 @@ type CapacityControllerParams struct {
 	ProbeRamp    time.Duration
 	// BaselineWindow is how long the learned latency minimum is remembered.
 	BaselineWindow time.Duration
+	// BaselineAlert is the factor by which the learned baseline moves, up or down,
+	// before the controller logs a warning and counts a baseline-up or
+	// baseline-down decision. 0 turns it off.
+	BaselineAlert float64
 	// StepInterval is the control period; SignalWindows is how many of the
 	// newest health signal latency windows form the signal.
 	StepInterval  time.Duration
@@ -166,6 +170,7 @@ var DefaultDynamicRateLimitingParams = DynamicRateLimitingParams{
 		IncreaseFrac:    0.05,
 		ProbeRamp:       30 * time.Second,
 		BaselineWindow:  10 * time.Minute,
+		BaselineAlert:   2,
 		StepInterval:    time.Second,
 		SignalWindows:   3,
 		MinSamples:      50,

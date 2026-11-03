@@ -227,6 +227,49 @@ func TestCapacityLimiterRecoversToWhatTheStoreDeliveredAfterACut(t *testing.T) {
 	require.InDelta(t, 900, recovered.Decision.Delivered, 0.001)
 }
 
+func TestCapacityLimiterReportsBaselineMoves(t *testing.T) {
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
+	f.params.Capacity.BaselineWindow = time.Minute
+	f.params.Capacity.BaselineAlert = 1.5
+	f.allowAfter(0)
+	for range 61 {
+		f.allowAfter(time.Second) // a whole window of 10ms settles the baseline
+	}
+	require.Empty(t, baselineMoves(f.decisions()))
+
+	// The store slows to 16ms, under the 20ms target, so the controller holds. Once the
+	// 10ms samples leave the window, the baseline has moved by more than 1.5x.
+	f.signals.snapshot.P99 = 16 * time.Millisecond
+	for range 61 {
+		f.allowAfter(time.Second)
+	}
+	require.Equal(t, []string{string(capacityReasonBaselineUp)}, baselineMoves(f.decisions()))
+	up, ok := f.sink.decisions[len(f.sink.decisions)-1].Detail.(capacityStep)
+	require.True(t, ok)
+	require.Equal(t, 10*time.Millisecond, up.Decision.BaselineMovedFrom)
+	require.Equal(t, 16*time.Millisecond, up.Decision.Baseline)
+
+	// Back at 10ms, the minimum falls at once, and the alert measures from 16ms.
+	f.signals.snapshot.P99 = 10 * time.Millisecond
+	f.allowAfter(time.Second)
+	require.Equal(t,
+		[]string{string(capacityReasonBaselineUp), string(capacityReasonBaselineDown)},
+		baselineMoves(f.decisions()),
+	)
+	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+}
+
+// baselineMoves keeps the baseline alert's reasons from the limiter's decisions.
+func baselineMoves(reasons []string) []string {
+	var moves []string
+	for _, reason := range reasons {
+		if reason == string(capacityReasonBaselineUp) || reason == string(capacityReasonBaselineDown) {
+			moves = append(moves, reason)
+		}
+	}
+	return moves
+}
+
 func TestCapacityLimiterReturnsToLegacyWhenDisabled(t *testing.T) {
 	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	f.allowAfter(0)
@@ -440,6 +483,7 @@ func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, capacity.ModeOn, step.Envelope.Mode)
 	require.Equal(t, 30*time.Second, step.Envelope.DeliveryWindow)
+	require.InDelta(t, 2, step.Envelope.BaselineAlert, 0.001)
 	require.Equal(t, 200*time.Millisecond, step.Signals.P99)
 	require.InDelta(t, 600, step.Signals.Throughput, 0.001)
 	require.Equal(t, 3*time.Second, step.Signals.Span)
