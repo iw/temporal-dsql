@@ -42,20 +42,34 @@ type testCluster struct {
 type decisionRecorder struct {
 	mu        sync.Mutex
 	decisions []adaptive.Decision
+	hosts     []string // the frontend that made each decision
 }
 
-func (r *decisionRecorder) RecordDecision(d adaptive.Decision) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.decisions = append(r.decisions, d)
+// frontendSink records one frontend's decisions.
+type frontendSink struct {
+	host     string
+	recorder *decisionRecorder
+}
+
+func (s frontendSink) RecordDecision(d adaptive.Decision) {
+	s.recorder.mu.Lock()
+	defer s.recorder.mu.Unlock()
+	s.recorder.decisions = append(s.recorder.decisions, d)
+	s.recorder.hosts = append(s.recorder.hosts, s.host)
 }
 
 // last is the latest decision for a namespace, from any frontend in the cluster.
 func (r *decisionRecorder) last(namespace string) (adaptive.Decision, bool) {
+	return r.lastFrom("", namespace)
+}
+
+// lastFrom is a frontend's latest decision for a namespace, or any frontend's when host is
+// empty.
+func (r *decisionRecorder) lastFrom(host, namespace string) (adaptive.Decision, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, d := range slices.Backward(r.decisions) {
-		if d.Detail.(Detail).Namespace == namespace {
+	for i, d := range slices.Backward(r.decisions) {
+		if (host == "" || r.hosts[i] == host) && d.Detail.(Detail).Namespace == namespace {
 			return d, true
 		}
 	}
@@ -101,7 +115,7 @@ func newTestCluster(t *testing.T, mode string, hosts ...string) *testCluster {
 			TimeSource: c.ts,
 			Logger:     log.NewNoopLogger(),
 			Handler:    metrics.NoopMetricsHandler,
-			Sink:       c.decisions,
+			Sink:       frontendSink{host: host, recorder: c.decisions},
 		})
 		e.Shares(testLimit, func(namespace string) int { return c.limits[namespace] })
 		c.limiters[host] = e.Count(testLimit, quotas.NoopRequestRateLimiter)
@@ -274,32 +288,108 @@ func TestFrozenHoldsTheSharesApplied(t *testing.T) {
 	require.InDelta(t, 15.0, after, 1e-6)
 }
 
-func TestSmallChangesHoldTheShareApplied(t *testing.T) {
+func TestSharesRiseByDeadbandAndFallAtOnce(t *testing.T) {
 	c := newTestCluster(t, adaptive.ModeNameEnabled, "a", "b")
 	c.limits["ns"] = 100
 	c.round()
 	for range 7 {
 		c.load(map[string]int{"a": 750, "b": 50}, "ns")
 	}
-	before, _ := c.share("a", "ns")
+	before, _ := c.share("b", "ns")
 
-	// a's part of the demand moves from 150/160 to 150/170 over the window: its share
-	// moves by under 5, Deadband of an equal share.
+	// b's part of the demand moves from 10/160 to 20/170 over the window: its share rises
+	// by under 5, Deadband of an equal share, so it holds.
 	for range 7 {
 		c.load(map[string]int{"a": 750, "b": 100}, "ns")
 	}
-	held, _ := c.share("a", "ns")
+	held, _ := c.share("b", "ns")
 	require.InDelta(t, before, held, 1e-9)
-	d, _ := c.decisions.last("ns")
+	d, _ := c.decisions.lastFrom("b", "ns")
 	require.Equal(t, adaptive.Reason(ReasonHeld), d.Reason)
+	// a's falls by as much, and applies at once, so the shares fit the limit.
+	a, _ := c.share("a", "ns")
+	require.InDelta(t, 10+80*150/170.0, a, 1e-6)
+	d, _ = c.decisions.lastFrom("a", "ns")
+	require.Equal(t, adaptive.Reason(ReasonOver), d.Reason)
 
-	// An even demand moves it to within Deadband of an equal share.
+	// An even demand raises b's to within Deadband of an equal share, and lowers a's to an
+	// equal share.
 	for range 8 {
 		c.load(map[string]int{"a": 750, "b": 750}, "ns")
 	}
-	after, _ := c.share("a", "ns")
+	after, _ := c.share("b", "ns")
 	require.InDelta(t, 50.0, after, 5)
-	require.Less(t, after, before-5)
+	require.Greater(t, after, before+5)
+	a, _ = c.share("a", "ns")
+	require.InDelta(t, 50.0, a, 1e-6)
+}
+
+func TestSharesFitTheLimitOnceStaggeredWindowsFill(t *testing.T) {
+	// The system appreciation's uneven frontends: a limit of 60 a second, with 72 requests a
+	// second reaching a and 18 reaching b.
+	for _, first := range []string{"a", "b"} {
+		t.Run(first+" first", func(t *testing.T) {
+			c := newTestCluster(t, adaptive.ModeNameEnabled, "a", "b")
+			if first == "b" {
+				c.members = []string{"b", "a"}
+			}
+			c.limits["ns"] = 60
+			want := map[string]float64{}
+			for host, own := range map[string]float64{"a": 72, "b": 18} {
+				want[host], _ = Share(c.settings.Params(), 60, Demand{Own: own, Peers: 90 - own, Members: 2, Known: 1})
+			}
+			band := c.settings.Deadband * 60 / 2 // Deadband of an equal share
+			c.round()
+
+			// The requests start 2 s before the first round, so the windows fill over the
+			// next 30 s. The frontend whose round comes first sets its share from its own
+			// window and the other's a round behind it, so while they fill, the shares add up
+			// to more than the limit.
+			var filling float64
+			for round := 1; round <= 20; round++ {
+				seconds := 5
+				if round == 1 {
+					seconds = 2
+				}
+				c.load(map[string]int{"a": seconds * 72, "b": seconds * 18}, "ns")
+				shares := map[string]float64{}
+				for _, host := range []string{"a", "b"} {
+					share, ok := c.share(host, "ns")
+					require.True(t, ok)
+					shares[host] = share
+				}
+				total := shares["a"] + shares["b"]
+				if time.Duration(round)*c.settings.Interval <= c.settings.Window+c.settings.Interval {
+					filling = max(filling, total)
+					continue
+				}
+				// Once both windows have filled, the shares fit the limit: each frontend holds
+				// a share no higher than the demand gives it, and less than Deadband below it.
+				require.LessOrEqual(t, total, 60+1e-9, "round %d", round)
+				for host, share := range shares {
+					require.LessOrEqual(t, share, want[host]+1e-9, "%s in round %d", host, round)
+					require.Greater(t, share, want[host]-band, "%s in round %d", host, round)
+				}
+			}
+			require.Greater(t, filling, 60.0)
+
+			// Each decision replays as tools/adaptivereplay reads it: its detail gives the
+			// share it proposed and, unless it held, its reason. None held a share above the
+			// one proposed.
+			c.decisions.mu.Lock()
+			defer c.decisions.mu.Unlock()
+			for _, d := range c.decisions.decisions {
+				detail := d.Detail.(Detail)
+				share, reason := Share(detail.Params, detail.Limit, detail.Demand)
+				require.InDelta(t, share, d.Proposed, 1e-9)
+				if d.Reason == adaptive.Reason(ReasonHeld) {
+					require.LessOrEqual(t, d.Applied, d.Proposed)
+				} else {
+					require.Equal(t, adaptive.Reason(reason), d.Reason)
+				}
+			}
+		})
+	}
 }
 
 func TestFrontendsWithoutFreshReportsKeepAnEqualShare(t *testing.T) {

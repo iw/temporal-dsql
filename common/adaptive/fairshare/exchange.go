@@ -19,7 +19,10 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-// ReasonHeld is a step whose share moved less than Deadband, so the share applied stays.
+// ReasonHeld is a step whose share rose less than Deadband, so the share applied stays. A
+// share that falls applies at once: a frontend never holds a share above the one Share
+// gives it, so once the frontends see the same demand, the shares they hold add up to at
+// most the limit.
 const ReasonHeld Reason = "held"
 
 // Exchanges counts a frontend's exchanges with the others, by outcome.
@@ -382,7 +385,7 @@ func (e *Exchange) step(c *class, s Settings, now time.Time, frozen bool, namesp
 		if had {
 			applied = held
 		}
-	case had && math.Abs(proposed-held) < s.Deadband*equal:
+	case had && proposed >= held && proposed-held < s.Deadband*equal:
 		applied, decision = held, adaptive.Reason(ReasonHeld)
 	default:
 		applied = proposed
