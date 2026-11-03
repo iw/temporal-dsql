@@ -185,6 +185,18 @@ func millis(ms float64) time.Duration {
 	return time.Duration(ms * float64(time.Millisecond))
 }
 
+// openTrace opens the trace before the first tick while the plane is enabled, so the
+// trace has the decisions controllers make as the host starts.
+func (p *Plane) openTrace() {
+	s := p.settings()
+	if !s.Enabled {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.trace.configure(s.TraceDirectory, s.TraceMaxBytes, p.timeSource.Now())
+}
+
 // Start ticks the plane on its own goroutine until Stop.
 func (p *Plane) Start() {
 	if !p.started.CompareAndSwap(false, true) {

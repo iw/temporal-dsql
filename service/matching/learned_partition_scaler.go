@@ -50,23 +50,16 @@ type (
 		simpleCfg       func() dynamicconfig.SimplePartitionScalerSettings
 		writePartitions func() int
 		key             []byte // the task queue, which places it in or out of the rollout
+		namespace       string
 		taskQueue       string
+		taskQueueType   string
 		law             *partitions.Controller
 		loaded          bool      // whether the law has the private state's capacity
+		loadedFrom      float64   // that capacity, until a step reports it
+		reported        bool      // whether a step reported the law since it started
 		lastStats       time.Time // the stats the law last stepped on
 		lastTasks       time.Time // when tasks last arrived
 		managed         bool      // whether the controller sized the partitions at the last call
-	}
-
-	// learnedStepDetail is a step as its decision's detail, so a trace can replay it.
-	learnedStepDetail struct {
-		TaskQueue    string
-		Params       partitions.Params
-		Signals      partitions.Signals
-		Capacity     float64
-		Described    int
-		BacklogCount int64
-		BacklogAge   time.Duration
 	}
 )
 
@@ -119,9 +112,11 @@ func (f *learnedScalerFactory) New(nsName namespace.Name, tqName string, tqType 
 		writePartitions: func() int {
 			return max(1, f.writePartitions(ns, tqName, tqType))
 		},
-		key:       []byte(ns + "/" + tqName + "/" + tqType.String()),
-		taskQueue: tqName,
-		law:       partitions.New(0),
+		key:           []byte(ns + "/" + tqName + "/" + tqType.String()),
+		namespace:     ns,
+		taskQueue:     tqName,
+		taskQueueType: tqType.String(),
+		law:           partitions.New(0),
 	}
 }
 
@@ -165,6 +160,7 @@ func (l *learnedScaler) OnTasks(in PartitionScalerInput) PartitionScalerDecision
 	if mode == adaptive.ModeOn && !l.loaded {
 		if capacity, ok := learnedCapacity(in.PrivateState); ok {
 			l.law = partitions.New(capacity)
+			l.loadedFrom, l.reported = capacity, false
 		}
 		l.loaded = true
 	}
@@ -245,16 +241,21 @@ func (l *learnedScaler) step(
 		Static:     float64(staticTarget),
 		Proposed:   float64(target),
 		Applied:    float64(applied),
-		Detail: learnedStepDetail{
-			TaskQueue:    l.taskQueue,
-			Params:       params,
-			Signals:      sig,
-			Capacity:     l.law.Capacity(params),
-			Described:    stats.Described,
-			BacklogCount: stats.BacklogCount,
-			BacklogAge:   stats.BacklogAge,
+		Detail: partitions.Detail{
+			Namespace:     l.namespace,
+			TaskQueue:     l.taskQueue,
+			TaskQueueType: l.taskQueueType,
+			Params:        params,
+			Signals:       sig,
+			Capacity:      l.law.Capacity(params),
+			Started:       !l.reported,
+			Loaded:        l.loadedFrom,
+			Held:          held,
+			BacklogCount:  stats.BacklogCount,
+			BacklogAge:    stats.BacklogAge,
 		},
 	})
+	l.loadedFrom, l.reported = 0, true
 	return target, held
 }
 

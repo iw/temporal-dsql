@@ -199,6 +199,18 @@ type Decision struct {
 	BaselineMovedFrom time.Duration
 }
 
+// Detail is a step as its decision's detail records it: what Step took and returned,
+// so a trace can replay it.
+type Detail struct {
+	Envelope Envelope
+	Signals  Signals
+	Decision Decision
+	// Start is the rate the law had before the step, when it took it other than by a
+	// step: the rate it started at, or the static rate it tracked while the controller was
+	// off. A frozen decision has a detail only for Start.
+	Start float64 `json:",omitempty"`
+}
+
 // Controller holds the learned state. It is not safe for concurrent use; the
 // owner calls Step from a single ticker goroutine and publishes RPS atomically.
 type Controller struct {

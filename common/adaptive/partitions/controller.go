@@ -76,6 +76,27 @@ type (
 		BackingOff bool
 	}
 
+	// Detail is a step as its decision's detail records it, so a trace can replay it.
+	Detail struct {
+		// Namespace, TaskQueue and TaskQueueType name the task queue.
+		Namespace, TaskQueue, TaskQueueType string
+		Params                              Params
+		Signals                             Signals
+		// Capacity is the tasks a second the law takes a partition to dispatch, after the
+		// step.
+		Capacity float64
+		// Started is set on the first step of a law that started over: the task queue's
+		// scaler is new, as each time matching loads the task queue, or its law took the
+		// capacity the task queue's state kept from an earlier run, which Loaded is.
+		Started bool    `json:",omitempty"`
+		Loaded  float64 `json:",omitempty"`
+		// Held is set when the law didn't step: the controller was frozen, or had no
+		// snapshot or partition rates to step on.
+		Held         bool `json:",omitempty"`
+		BacklogCount int64
+		BacklogAge   time.Duration
+	}
+
 	// Reason explains a step.
 	Reason string
 

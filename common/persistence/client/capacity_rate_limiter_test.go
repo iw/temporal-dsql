@@ -222,7 +222,7 @@ func TestCapacityLimiterRecoversToWhatTheStoreDeliveredAfterACut(t *testing.T) {
 	require.InDelta(t, 162, f.bucketRPS(headers.CallerTypeOperator), 0.001)
 	require.Equal(t, []string{"idle", "errors", "cooldown", "cooldown", "cooldown", "recover"}, f.decisions())
 
-	recovered, ok := f.sink.decisions[len(f.sink.decisions)-1].Detail.(capacityStep)
+	recovered, ok := f.sink.decisions[len(f.sink.decisions)-1].Detail.(capacity.Detail)
 	require.True(t, ok)
 	require.InDelta(t, 900, recovered.Decision.Delivered, 0.001)
 }
@@ -244,7 +244,7 @@ func TestCapacityLimiterReportsBaselineMoves(t *testing.T) {
 		f.allowAfter(time.Second)
 	}
 	require.Equal(t, []string{string(capacityReasonBaselineUp)}, baselineMoves(f.decisions()))
-	up, ok := f.sink.decisions[len(f.sink.decisions)-1].Detail.(capacityStep)
+	up, ok := f.sink.decisions[len(f.sink.decisions)-1].Detail.(capacity.Detail)
 	require.True(t, ok)
 	require.Equal(t, 10*time.Millisecond, up.Decision.BaselineMovedFrom)
 	require.Equal(t, 16*time.Millisecond, up.Decision.Baseline)
@@ -460,6 +460,28 @@ func TestCapacityLimiterEnabledWhileFrozenStartsAtTheControllersRate(t *testing.
 	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
 	require.InDelta(t, 0.2*testHostRPS, f.bucketRPS(headers.CallerTypeOperator), 0.001)
 	require.Equal(t, 1, f.legacy.calls)
+
+	// The frozen decision records the rate the law tracked while the controller was off,
+	// so a trace can replay it; the next doesn't.
+	frozen := f.sink.decisions[len(f.sink.decisions)-1]
+	require.Equal(t, adaptive.ReasonFrozen, frozen.Reason)
+	require.Equal(t, capacity.Detail{Start: testHostRPS}, frozen.Detail)
+	f.allowAfter(time.Second)
+	require.Nil(t, f.sink.decisions[len(f.sink.decisions)-1].Detail)
+}
+
+func TestCapacityLimiterRecordsTheRateItTrackedWhileOff(t *testing.T) {
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameShadow)
+	f.allowAfter(0)
+	f.params.Capacity.Mode = adaptive.ModeNameDisabled
+	f.allowAfter(time.Second)
+	f.params.Capacity.Mode = adaptive.ModeNameShadow
+	f.allowAfter(time.Second)
+
+	require.Len(t, f.sink.decisions, 2, "none while off")
+	step, ok := f.sink.decisions[1].Detail.(capacity.Detail)
+	require.True(t, ok)
+	require.InDelta(t, testHostRPS, step.Start, 0, "the static rate the law tracked while off")
 }
 
 func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
@@ -469,6 +491,9 @@ func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
 	f.allowAfter(time.Second)
 
 	require.Len(t, f.sink.decisions, 2)
+	first, ok := f.sink.decisions[0].Detail.(capacity.Detail)
+	require.True(t, ok)
+	require.InDelta(t, testHostRPS, first.Start, 0, "the rate the law started at")
 	cut := f.sink.decisions[1]
 	require.Equal(t, capacityController, cut.Controller)
 	require.Equal(t, f.now, cut.Time)
@@ -479,7 +504,7 @@ func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
 	require.InDelta(t, 540, cut.Applied, 0.001)
 
 	// The detail is what the controller stepped on, so a trace can replay the step.
-	step, ok := cut.Detail.(capacityStep)
+	step, ok := cut.Detail.(capacity.Detail)
 	require.True(t, ok)
 	require.Equal(t, capacity.ModeOn, step.Envelope.Mode)
 	require.Equal(t, 30*time.Second, step.Envelope.DeliveryWindow)
@@ -488,6 +513,7 @@ func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
 	require.InDelta(t, 600, step.Signals.Throughput, 0.001)
 	require.Equal(t, 3*time.Second, step.Signals.Span)
 	require.Equal(t, capacity.ReasonLatency, step.Decision.Reason)
+	require.Zero(t, step.Start)
 }
 
 func TestCapacityLimiterReportsWhatItAppliesInShadowAndWhileFrozen(t *testing.T) {

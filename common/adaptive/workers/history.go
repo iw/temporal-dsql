@@ -11,6 +11,9 @@ import (
 	"go.temporal.io/server/common/signals"
 )
 
+// NamePrefix starts the name of each queue's controller, which ends with the queue's name.
+const NamePrefix = "worker_count_"
+
 type (
 	// Settings is the dynamic config of history's worker-count controllers, which every
 	// queue shares. Bounds are multiples of each queue's own worker count setting.
@@ -52,12 +55,6 @@ type (
 		queue    string
 		settings func() Settings
 		law      *Controller
-	}
-
-	// stepDetail is a step as its decision's detail, so a trace can replay it.
-	stepDetail struct {
-		Params  Params
-		Signals Signals
 	}
 )
 
@@ -148,7 +145,7 @@ func (h *HistoryQueues) SetShardCount(shards func() int) {
 }
 
 func (q *queueController) Name() string {
-	return "worker_count_" + q.queue
+	return NamePrefix + q.queue
 }
 
 func (q *queueController) Envelope(static int) adaptive.Envelope[int] {
@@ -182,5 +179,5 @@ func (q *queueController) Step(snap *signals.Snapshot, env adaptive.Envelope[int
 	backoff := signals.Backoff{Hold: s.BackoffHold, MaxErrorRatio: s.MaxErrorRatio, MaxQueuedRatio: s.MaxQueuedRatio, MinSamples: s.MinSamples}
 	in := Signals{Now: snap.Time, Delay: queue.DelayP90, Samples: queue.Samples, BackingOff: snap.PersistenceBackingOff(backoff)}
 	count, reason := q.law.Step(params, static, in)
-	return count, adaptive.Reason(reason), stepDetail{Params: params, Signals: in}
+	return count, adaptive.Reason(reason), Detail{Params: params, Signals: in, MaxStepFrac: env.MaxStepFrac}
 }

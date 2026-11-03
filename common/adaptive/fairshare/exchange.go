@@ -92,15 +92,6 @@ type (
 		received time.Time
 		demand   map[string]map[string]float64 // tokens a second, by limit and namespace
 	}
-
-	// stepDetail is a step as its decision's detail, so a trace can replay it.
-	stepDetail struct {
-		Class     string
-		Namespace string
-		Limit     float64
-		Params    Params
-		Demand    Demand
-	}
 )
 
 var _ calculator.ShareProvider = (*class)(nil)
@@ -404,7 +395,7 @@ func (e *Exchange) step(c *class, s Settings, now time.Time, frozen bool, namesp
 		Static:     equal,
 		Proposed:   proposed,
 		Applied:    applied,
-		Detail:     stepDetail{Class: c.name, Namespace: namespace, Limit: limit, Params: s.Params(), Demand: demand},
+		Detail:     Detail{Class: c.name, Namespace: namespace, Limit: limit, Params: s.Params(), Demand: demand},
 	})
 	return share{limit: limit, share: applied}, mode == adaptive.ModeOn && (had || reason != ReasonNoDemand)
 }
@@ -418,6 +409,10 @@ func (e *Exchange) forget(c *class, now time.Time, names map[string]struct{}) {
 		}
 		last.Time, last.Reason = now, adaptive.Reason(ReasonNoDemand)
 		last.Proposed, last.Applied = last.Static, last.Static
+		if detail, ok := last.Detail.(Detail); ok {
+			detail.Demand.Own, detail.Demand.Peers = 0, 0
+			last.Detail = detail
+		}
 		adaptive.Report(e.Handler, e.Sink, last)
 		delete(c.last, namespace)
 	}

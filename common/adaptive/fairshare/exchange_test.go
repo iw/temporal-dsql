@@ -55,7 +55,7 @@ func (r *decisionRecorder) last(namespace string) (adaptive.Decision, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, d := range slices.Backward(r.decisions) {
-		if d.Detail.(stepDetail).Namespace == namespace {
+		if d.Detail.(Detail).Namespace == namespace {
 			return d, true
 		}
 	}
@@ -347,6 +347,11 @@ func TestNamespaceWithoutDemandGoesBackToAnEqualShare(t *testing.T) {
 	d, _ := c.decisions.last("ns")
 	require.Equal(t, adaptive.Reason(ReasonNoDemand), d.Reason)
 	require.InDelta(t, d.Static, d.Applied, 1e-9)
+	// Its detail gives the share it reports, as a replay reads it.
+	detail := d.Detail.(Detail)
+	share, reason := Share(detail.Params, detail.Limit, detail.Demand)
+	require.Equal(t, ReasonNoDemand, reason)
+	require.InDelta(t, d.Proposed, share, 1e-9)
 }
 
 func TestDisabledControllerCountsNothingAndAppliesNothing(t *testing.T) {

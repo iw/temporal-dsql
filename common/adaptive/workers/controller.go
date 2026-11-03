@@ -38,6 +38,15 @@ type (
 		BackingOff bool
 	}
 
+	// Detail is a step as its decision's detail records it, so a trace can replay it:
+	// the law's parameters and signals, and the envelope's step limit, which holds the
+	// proposal as the signal plane drives it.
+	Detail struct {
+		Params      Params
+		Signals     Signals
+		MaxStepFrac float64
+	}
+
 	// Reason explains a step.
 	Reason string
 

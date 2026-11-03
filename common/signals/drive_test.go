@@ -124,6 +124,21 @@ func TestDrivenSettingReturnsToTheStaticValueWhenDisabled(t *testing.T) {
 	require.Nil(t, f.tick())
 }
 
+func TestDrivenSettingResetsWhenDisabledInShadow(t *testing.T) {
+	f := newDriveFixture(t, adaptive.ModeNameShadow)
+	f.tick()
+	f.ctrl.env.Mode = adaptive.ModeNameDisabled
+	require.NotNil(t, f.tick(), "the plane runs until a step resets the controller")
+	require.Equal(t, []int{100, 100}, f.ctrl.reset)
+	require.Nil(t, f.tick())
+
+	// Enabled again, it steps from the static value, not from what it proposed before.
+	f.ctrl.env.Mode = adaptive.ModeNameEnabled
+	f.ctrl.next = 400
+	f.tick()
+	require.Equal(t, []int{125}, f.got)
+}
+
 func TestDrivenSettingHoldsWhileFrozen(t *testing.T) {
 	f := newDriveFixture(t, adaptive.ModeNameEnabled)
 	f.tick()

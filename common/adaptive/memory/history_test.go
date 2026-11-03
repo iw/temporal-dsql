@@ -33,7 +33,7 @@ func TestCacheControllerStepsOnTheHostsMemory(t *testing.T) {
 	size, reason, detail := c.Step(snap, env, 256*mib)
 	require.Equal(t, int(settings.EventsCacheShare*float64(900*mib)), size, "the events cache's share of GOMEMLIMIT")
 	require.Equal(t, adaptive.Reason(ReasonBudget), reason)
-	require.Equal(t, stepDetail{
+	require.Equal(t, Detail[int]{
 		Params: Params[int]{
 			Min:          env.Min,
 			Max:          env.Max,
@@ -45,7 +45,8 @@ func TestCacheControllerStepsOnTheHostsMemory(t *testing.T) {
 			GrowFrac:     0.1,
 			Interval:     time.Minute,
 		},
-		Signals: Signals{Now: snap.Time, CgroupLimit: 1024 * mib, GoLimit: 900 * mib, HeapGoal: 400 * mib, HeapLive: 200 * mib},
+		Signals:     Signals{Now: snap.Time, CgroupLimit: 1024 * mib, GoLimit: 900 * mib, HeapGoal: 400 * mib, HeapLive: 200 * mib},
+		MaxStepFrac: 0.25,
 	}, detail)
 
 	history := &cacheController{cache: HistoryCache, settings: func() Settings { return settings }, law: New(1000 * mib)}

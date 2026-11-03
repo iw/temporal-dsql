@@ -44,6 +44,18 @@ type (
 		HeapLive             uint64 // the heap live after the last collection
 	}
 
+	// Detail is a step as its decision's detail records it, so a trace can replay it:
+	// the law's parameters and signals, and the envelope's step limit, which holds the
+	// proposal as the signal plane drives it. For the queues' pending-task limits, Shards
+	// is the host's shards, and Tasks what their queues may hold at their settings.
+	Detail[T Value] struct {
+		Params      Params[T]
+		Signals     Signals
+		MaxStepFrac float64
+		Shards      int `json:",omitempty"`
+		Tasks       int `json:",omitempty"`
+	}
+
 	// Reason explains a step.
 	Reason string
 

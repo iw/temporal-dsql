@@ -157,12 +157,12 @@ func (d *Driven[T]) staticChanged(value T) {
 	}
 }
 
-// active keeps the plane ticking while the controller runs, and until the setting is
-// back at its static value.
+// active keeps the plane ticking while the controller runs, and until a step has reset
+// it and the setting is back at its static value.
 func (d *Driven[T]) active() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.ctrl.Envelope(d.static).HostMode(d.hostKey) != adaptive.ModeOff || d.applied != d.static
+	return d.ctrl.Envelope(d.static).HostMode(d.hostKey) != adaptive.ModeOff || d.mode != adaptive.ModeOff || d.applied != d.static
 }
 
 func (d *Driven[T]) step(snap *Snapshot) {

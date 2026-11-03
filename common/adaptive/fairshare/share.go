@@ -29,6 +29,16 @@ type (
 		Members, Known int
 	}
 
+	// Detail is a step as its decision's detail records it, so a trace can replay it: the
+	// class of limit and the namespace, the namespace's limit across the cluster, and what
+	// Share took.
+	Detail struct {
+		Class, Namespace string
+		Limit            float64
+		Params           Params
+		Demand           Demand
+	}
+
 	// Reason explains a share.
 	Reason string
 )

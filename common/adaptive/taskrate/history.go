@@ -41,12 +41,6 @@ type (
 		law      *Controller
 	}
 
-	// stepDetail is a step as its decision's detail, so a trace can replay it.
-	stepDetail struct {
-		Params  Params
-		Signals Signals
-	}
-
 	// applier is the driven rate, as signals.Driven gives it.
 	applier interface {
 		Applying() (float64, bool)
@@ -182,7 +176,7 @@ func (c *controller) Step(snap *signals.Snapshot, env adaptive.Envelope[float64]
 		Calls:           snap.Persistence.Samples + snap.Persistence.Rejected,
 	}
 	rate, reason := c.law.Step(params, in)
-	return rate, adaptive.Reason(reason), stepDetail{Params: params, Signals: in}
+	return rate, adaptive.Reason(reason), Detail{Params: params, Signals: in, MaxStepFrac: env.MaxStepFrac}
 }
 
 // persistenceRate is the capacity controller's rate while it's enabled and its decision

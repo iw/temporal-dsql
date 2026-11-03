@@ -17,6 +17,10 @@ const (
 	EventsCache  = "events_cache"
 )
 
+// NamePrefix starts the name of each memory budget controller, which ends with what it
+// sizes.
+const NamePrefix = "memory_budget_"
+
 type (
 	// Settings is the dynamic config of history's memory budget controllers. Each cache's
 	// size setting is its cap, and MinMultiplier of it its floor. The queues' pending-task
@@ -48,12 +52,6 @@ type (
 		cache    string
 		settings func() Settings
 		law      *Controller[int]
-	}
-
-	// stepDetail is a step as its decision's detail, so a trace can replay it.
-	stepDetail struct {
-		Params  Params[int]
-		Signals Signals
 	}
 )
 
@@ -108,7 +106,7 @@ func DriveCache(
 }
 
 func (c *cacheController) Name() string {
-	return "memory_budget_" + c.cache
+	return NamePrefix + c.cache
 }
 
 func (c *cacheController) Envelope(static int) adaptive.Envelope[int] {
@@ -141,7 +139,7 @@ func (c *cacheController) Step(snap *signals.Snapshot, env adaptive.Envelope[int
 	}
 	in := memorySignals(snap)
 	size, reason := c.law.Step(params, in)
-	return size, adaptive.Reason(reason), stepDetail{Params: params, Signals: in}
+	return size, adaptive.Reason(reason), Detail[int]{Params: params, Signals: in, MaxStepFrac: env.MaxStepFrac}
 }
 
 // memorySignals reads the law's signals from a snapshot.

@@ -10,6 +10,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/clock"
+	"go.temporal.io/server/common/dynamicconfig"
+	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/persistence"
+	"go.temporal.io/server/common/primitives"
+	"go.uber.org/fx/fxtest"
 )
 
 const traceName = "history-history-1-42.jsonl"
@@ -71,6 +77,43 @@ func TestPlaneWritesSnapshotsAndDecisionsToATrace(t *testing.T) {
 	require.Equal(t, map[string]any{"P99": float64(200 * time.Millisecond)}, decision.Detail)
 
 	require.NotNil(t, records[3].Snapshot)
+}
+
+func TestPlaneOpensItsTraceAsTheServiceCreatesIt(t *testing.T) {
+	dir := t.TempDir()
+	dc := dynamicconfig.NewMemoryClient()
+	dc.OverrideSetting(Config, Settings{Enabled: true, Interval: time.Second, Windows: 3, TraceDirectory: dir, TraceMaxBytes: 1 << 20})
+	timeSource := clock.NewEventTimeSource().Update(time.Unix(1_700_000_000, 0).UTC())
+	plane := PlaneProvider(PlaneParams{
+		Lifecycle:   fxtest.NewLifecycle(t),
+		Collection:  dynamicconfig.NewCollection(dc, log.NewNoopLogger()),
+		ServiceName: primitives.HistoryService,
+		TimeSource:  timeSource,
+		Logger:      log.NewNoopLogger(),
+		Persistence: persistence.NoopHealthSignalAggregator,
+	})
+	plane.RecordDecision(adaptive.Decision{Controller: "persistence_capacity", Reason: "idle"})
+	plane.Stop()
+
+	files, err := filepath.Glob(filepath.Join(dir, "history-*.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	records := readTrace(t, files[0])
+	require.Len(t, records, 2)
+	require.NotNil(t, records[0].Header)
+	require.True(t, timeSource.Now().Equal(records[0].Header.Start))
+	require.NotNil(t, records[1].Decision, "a decision before the plane started")
+}
+
+func TestPlaneOpensItsTraceEarlyOnlyWhileEnabled(t *testing.T) {
+	f := newPlaneFixture(t, nil)
+	f.settings.Enabled = false
+	f.settings.TraceDirectory = t.TempDir()
+	f.plane.openTrace()
+	f.plane.Stop()
+
+	_, err := os.Stat(filepath.Join(f.settings.TraceDirectory, traceName))
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestTraceStopsAtItsCap(t *testing.T) {
