@@ -193,6 +193,7 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 		P99:            snap.P99,
 		ErrorRatio:     snap.ErrorRatio,
 		Throughput:     snap.Throughput,
+		Span:           snap.Span,
 		Samples:        snap.Samples,
 		Binding:        l.denied.Swap(false),
 		FactsReported:  snap.StoreReportsFacts,
@@ -237,6 +238,14 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 			tag.NewInt("throttled", snap.Throttled),
 			tag.NewInt("queued", snap.Queued),
 			tag.NewInt("acquired", snap.Acquired),
+		)
+	}
+	if d.Reason == capacity.ReasonRecover {
+		l.logger.Info("Persistence capacity controller returned its rate to what the store delivered after a cut.",
+			tag.NewStringTag("mode", mode.String()),
+			tag.Float64("proposedRPS", d.Proposed),
+			tag.Float64("deliveredRPS", d.Delivered),
+			tag.Float64("staticRPS", static),
 		)
 	}
 	if d.LatencyShadow && !l.lastShadow {
@@ -372,6 +381,7 @@ func capacityEnvelope(
 		MaxQueuedRatio:  p.MaxQueuedRatio,
 		MaxDecrease:     p.MaxDecrease,
 		DeliveryBackoff: p.DeliveryBackoff,
+		DeliveryWindow:  p.DeliveryWindow,
 		IncreaseFrac:    p.IncreaseFrac,
 		ProbeRamp:       p.ProbeRamp,
 		Cooldown:        max(p.Cooldown, 2*signalSpan),

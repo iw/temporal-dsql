@@ -122,6 +122,10 @@ type CapacityControllerParams struct {
 	MaxDecrease     float64
 	DeliveryBackoff float64
 	Cooldown        time.Duration
+	// DeliveryWindow: for this long after a cut, the controller keeps the most the
+	// store delivered. While healthy and binding, it returns at once to
+	// DeliveryBackoff x that, never above the rate before the cut. 0 turns it off.
+	DeliveryWindow time.Duration
 	// While healthy and binding: grow by IncreaseFrac per step; near the last
 	// overload point the step ramps up from 10% to 100% over ProbeRamp.
 	IncreaseFrac float64
@@ -158,6 +162,7 @@ var DefaultDynamicRateLimitingParams = DynamicRateLimitingParams{
 		MaxDecrease:     0.5,
 		DeliveryBackoff: 0.9,
 		Cooldown:        6 * time.Second,
+		DeliveryWindow:  30 * time.Second,
 		IncreaseFrac:    0.05,
 		ProbeRamp:       30 * time.Second,
 		BaselineWindow:  10 * time.Minute,
