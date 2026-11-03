@@ -52,9 +52,10 @@ func TestControllerStepsOnThePersistenceSnapshot(t *testing.T) {
 	rate, reason, detail := c.Step(snap, env, 9000)
 	require.InDelta(t, 1620, rate, 1e-9, "9000 x 0.9 x 200/1000")
 	require.Equal(t, adaptive.Reason(ReasonCoupled), reason)
-	require.Equal(t, stepDetail{
-		Params:  Params{Min: 180, Max: 9000, Headroom: 0.9, MinSamples: 100},
-		Signals: Signals{PersistenceRate: 9000, Attempts: 200, Calls: 1000},
+	require.Equal(t, Detail{
+		Params:      Params{Min: 180, Max: 9000, Headroom: 0.9, MinSamples: 100},
+		Signals:     Signals{PersistenceRate: 9000, Attempts: 200, Calls: 1000},
+		MaxStepFrac: 0.25,
 	}, detail)
 }
 

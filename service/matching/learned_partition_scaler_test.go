@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	enumspb "go.temporal.io/api/enums/v1"
 	persistencespb "go.temporal.io/server/api/persistence/v1"
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/partitions"
@@ -75,7 +76,9 @@ func newLearnedScalerTest(mode string) *learnedScalerTest {
 		},
 		writePartitions: func() int { return 4 },
 		key:             []byte("ns/tq/TASK_QUEUE_TYPE_ACTIVITY"),
+		namespace:       "ns",
 		taskQueue:       "tq",
+		taskQueueType:   enumspb.TASK_QUEUE_TYPE_ACTIVITY.String(),
 		law:             partitions.New(0),
 	}
 	return lt
@@ -128,9 +131,14 @@ func TestLearnedScalerProposesInShadowWhileTheSimpleScalerApplies(t *testing.T) 
 	require.InDelta(t, 4, d.Static, 0)
 	require.InDelta(t, 5, d.Proposed, 0)
 	require.InDelta(t, 4, d.Applied, 0)
-	detail, ok := d.Detail.(learnedStepDetail)
+	detail, ok := d.Detail.(partitions.Detail)
 	require.True(t, ok)
 	require.Equal(t, "tq", detail.TaskQueue)
+	require.Equal(t, "ns", detail.Namespace)
+	require.Equal(t, enumspb.TASK_QUEUE_TYPE_ACTIVITY.String(), detail.TaskQueueType)
+	require.False(t, detail.Held)
+	require.True(t, detail.Started, "the law's first step")
+	require.Zero(t, detail.Loaded)
 	require.True(t, detail.Params.Shadow)
 	require.InDelta(t, 1000, detail.Capacity, 0)
 
@@ -190,16 +198,26 @@ func TestLearnedScalerSizesFromTheTargetWhilePartitionsDrain(t *testing.T) {
 		Stats:          lt.stats(12, 900, 900),
 	})
 	require.Equal(t, 11, decision.NewTarget)
-	detail, ok := lt.lastDecision(t).Detail.(learnedStepDetail)
+	detail, ok := lt.lastDecision(t).Detail.(partitions.Detail)
 	require.True(t, ok)
 	require.Equal(t, 11, detail.Signals.Partitions)
 	require.Equal(t, 12, detail.Signals.Described)
 }
 
 func TestLearnedScalerTakesItsCapacityFromItsPrivateState(t *testing.T) {
-	lt := newLearnedScalerTest(adaptive.ModeNameEnabled)
+	lt := newLearnedScalerTest(adaptive.ModeNameShadow)
 
-	// At 500 tasks a second a partition, 1,800 a second needs 5 partitions.
+	// In shadow, the law steps without the private state's capacity.
+	lt.scaler.OnTasks(PartitionScalerInput{CurrentTarget: 4, PrivateState: learnedState(500), Stats: lt.stats(4, 1800, 1800)})
+	detail, ok := lt.lastDecision(t).Detail.(partitions.Detail)
+	require.True(t, ok)
+	require.True(t, detail.Started)
+	require.Zero(t, detail.Loaded)
+
+	// Enabled, it starts over from it: at 500 tasks a second a partition, 1,800 a second
+	// needs 5 partitions.
+	lt.settings.Mode = adaptive.ModeNameEnabled
+	lt.time.Advance(time.Minute)
 	decision := lt.scaler.OnTasks(PartitionScalerInput{
 		CurrentTarget: 4,
 		PrivateState:  learnedState(500),
@@ -208,6 +226,18 @@ func TestLearnedScalerTakesItsCapacityFromItsPrivateState(t *testing.T) {
 	require.Equal(t, 5, decision.NewTarget)
 	capacity, _ := learnedCapacity(decision.PrivateState)
 	require.InDelta(t, 500, capacity, 1e-9)
+	detail, ok = lt.lastDecision(t).Detail.(partitions.Detail)
+	require.True(t, ok)
+	require.True(t, detail.Started)
+	require.InDelta(t, 500, detail.Loaded, 0, "the step reports the capacity the law started from")
+
+	// Later steps don't.
+	lt.time.Advance(time.Minute)
+	lt.scaler.OnTasks(PartitionScalerInput{CurrentTarget: 5, PrivateState: decision.PrivateState, Stats: lt.stats(5, 1800, 1800)})
+	detail, ok = lt.lastDecision(t).Detail.(partitions.Detail)
+	require.True(t, ok)
+	require.False(t, detail.Started)
+	require.Zero(t, detail.Loaded)
 }
 
 func TestLearnedScalerHoldsWhileFrozenOrWithoutData(t *testing.T) {
@@ -246,6 +276,9 @@ func TestLearnedScalerHoldsWhileFrozenOrWithoutData(t *testing.T) {
 			require.Equal(t, PartitionScalerDecision{NoChange: true}, decision)
 			require.Equal(t, tc.reason, lt.lastDecision(t).Reason)
 			require.InDelta(t, 4, lt.lastDecision(t).Proposed, 0)
+			detail, ok := lt.lastDecision(t).Detail.(partitions.Detail)
+			require.True(t, ok)
+			require.True(t, detail.Held)
 		})
 	}
 }
@@ -258,7 +291,7 @@ func TestLearnedScalerHoldsItsPartitionsWhilePersistenceBacksOff(t *testing.T) {
 	require.Equal(t, 4, decision.NewTarget)
 	d := lt.lastDecision(t)
 	require.Equal(t, adaptive.Reason(partitions.ReasonBackoff), d.Reason)
-	detail, ok := d.Detail.(learnedStepDetail)
+	detail, ok := d.Detail.(partitions.Detail)
 	require.True(t, ok)
 	require.True(t, detail.Signals.BackingOff)
 }

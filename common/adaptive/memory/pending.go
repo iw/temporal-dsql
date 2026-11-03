@@ -50,15 +50,6 @@ type (
 	queueCounts struct {
 		maxCount, criticalCount dynamicconfig.IntPropertyFn
 	}
-
-	// pendingDetail is a step as its decision's detail, so a trace can replay it.
-	pendingDetail struct {
-		Params  Params[float64]
-		Signals Signals
-		// Shards is the host's shards, and Tasks what their queues may hold at their
-		// settings.
-		Shards, Tasks int
-	}
 )
 
 // NewQueueLimits returns the pending-task limits of history's queues, driven from the
@@ -108,7 +99,7 @@ func (l *QueueLimits) scaled(setting dynamicconfig.IntPropertyFn) dynamicconfig.
 }
 
 func (c *pendingController) Name() string {
-	return "memory_budget_" + PendingTasks
+	return NamePrefix + PendingTasks
 }
 
 // Envelope keeps the multiplier where no queue's critical count is below
@@ -144,7 +135,7 @@ func (c *pendingController) Step(snap *signals.Snapshot, env adaptive.Envelope[f
 	}
 	in := memorySignals(snap)
 	multiplier, reason := c.law.Step(params, in)
-	return multiplier, adaptive.Reason(reason), pendingDetail{Params: params, Signals: in, Shards: shards, Tasks: tasks}
+	return multiplier, adaptive.Reason(reason), Detail[float64]{Params: params, Signals: in, MaxStepFrac: env.MaxStepFrac, Shards: shards, Tasks: tasks}
 }
 
 // held is the host's shards, and the tasks their queues may hold at their settings.

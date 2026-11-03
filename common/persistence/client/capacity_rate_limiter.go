@@ -55,6 +55,7 @@ type capacityAwareRateLimiter struct {
 
 	mu         sync.Mutex // guards the fields below
 	ctrl       *capacity.Controller
+	start      float64 // the rate the law took other than by a step, until a decision reports it
 	mode       adaptive.Mode
 	lastReason capacity.Reason
 	lastShadow bool
@@ -91,6 +92,7 @@ func newCapacityAwareRateLimiter(
 		legacy:        legacy,
 		buckets:       make(map[int]*quotas.RateLimiterImpl, len(RequestPrioritiesOrdered)),
 		ctrl:          capacity.New(initial),
+		start:         initial,
 		mode:          adaptive.ModeOff,
 	}
 	if l.frozen == nil {
@@ -170,6 +172,11 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 		if mode == adaptive.ModeOn {
 			applied = l.ctrl.Rate()
 		}
+		var detail any
+		if l.start > 0 {
+			detail = capacity.Detail{Start: l.start}
+			l.start = 0
+		}
 		adaptive.Report(l.metrics, l.decisions, adaptive.Decision{
 			Controller: capacityController,
 			Time:       now,
@@ -178,6 +185,7 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 			Static:     static,
 			Proposed:   l.ctrl.Rate(),
 			Applied:    applied,
+			Detail:     detail,
 		})
 		return
 	}
@@ -207,6 +215,7 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 	}
 	l.setMode(mode, p)
 	if mode == adaptive.ModeOff {
+		l.start = static
 		return
 	}
 
@@ -221,8 +230,9 @@ func (l *capacityAwareRateLimiter) step(now time.Time, p dynamicconfig.DynamicRa
 		Static:     static,
 		Proposed:   d.Proposed,
 		Applied:    d.RPS,
-		Detail:     capacityStep{Envelope: env, Signals: inputs, Decision: d},
+		Detail:     capacity.Detail{Envelope: env, Signals: inputs, Decision: d, Start: l.start},
 	})
+	l.start = 0
 	if d.LatencyShadow {
 		adaptive.RecordDecision(l.metrics, capacityController, capacityReasonLatencyShadow)
 	}
@@ -304,14 +314,6 @@ func (l *capacityAwareRateLimiter) setMode(mode adaptive.Mode, p dynamicconfig.D
 		tag.NewStringTag("from", l.mode.String()), tag.NewStringTag("to", mode.String()),
 		tag.NewInt("rolloutPercent", p.Capacity.RolloutPercent))
 	l.mode = mode
-}
-
-// capacityStep is a step of the capacity controller, as its decision's Detail: what
-// capacity.Controller.Step took and returned, so a trace can replay it.
-type capacityStep struct {
-	Envelope capacity.Envelope
-	Signals  capacity.Signals
-	Decision capacity.Decision
 }
 
 // capacityReasonLatencyShadow tags a step where the latency law would have cut a

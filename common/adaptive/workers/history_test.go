@@ -32,9 +32,10 @@ func TestQueueControllerStepsOnItsQueuesDelay(t *testing.T) {
 	count, reason, detail := q.Step(snap, env, 512)
 	require.Equal(t, 640, count)
 	require.Equal(t, adaptive.Reason(ReasonGrow), reason)
-	require.Equal(t, stepDetail{
-		Params:  Params{Min: 256, Max: 1024, TargetDelay: settings.TargetDelay, GrowFrac: 0.25, ShrinkFrac: 0.05, IdleSteps: 30, MinSamples: 20, Cooldown: 3 * time.Second},
-		Signals: Signals{Now: snap.Time, Delay: 300 * time.Millisecond, Samples: 100},
+	require.Equal(t, Detail{
+		Params:      Params{Min: 256, Max: 1024, TargetDelay: settings.TargetDelay, GrowFrac: 0.25, ShrinkFrac: 0.05, IdleSteps: 30, MinSamples: 20, Cooldown: 3 * time.Second},
+		Signals:     Signals{Now: snap.Time, Delay: 300 * time.Millisecond, Samples: 100},
+		MaxStepFrac: 0.25,
 	}, detail)
 }
 

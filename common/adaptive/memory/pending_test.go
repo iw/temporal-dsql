@@ -91,7 +91,7 @@ func TestPendingControllerStepsOnTheHostsQueues(t *testing.T) {
 	multiplier, reason, detail := ctrl.Step(snap, env, 1)
 	require.InDelta(t, 0.2*256*mib/(2048*60000.0), multiplier, 1e-9)
 	require.Equal(t, adaptive.Reason(ReasonBudget), reason)
-	require.Equal(t, pendingDetail{
+	require.Equal(t, Detail[float64]{
 		Params: Params[float64]{
 			Min:          0.05,
 			Max:          1,
@@ -103,8 +103,9 @@ func TestPendingControllerStepsOnTheHostsQueues(t *testing.T) {
 			GrowFrac:     0.1,
 			Interval:     time.Minute,
 		},
-		Signals: Signals{Now: snap.Time, GoLimit: 256 * mib, HeapGoal: 100 * mib, HeapLive: 50 * mib},
-		Shards:  4,
-		Tasks:   60000,
+		Signals:     Signals{Now: snap.Time, GoLimit: 256 * mib, HeapGoal: 100 * mib, HeapLive: 50 * mib},
+		MaxStepFrac: 0.25,
+		Shards:      4,
+		Tasks:       60000,
 	}, detail)
 }
