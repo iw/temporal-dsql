@@ -162,7 +162,7 @@ On this branch, `common/signals` is the plane. Each service has one, off by defa
 
 Controllers report each step to the plane through `adaptive.Report`, and the next snapshot carries each controller's latest decision. The persistence capacity controller reports its steps, with the envelope and signals it stepped on. It still reads the persistence aggregator itself, on its own step.
 
-With `TraceDirectory` set, each service writes its snapshots and decisions to `<service>-<host>-<pid>.jsonl` in that directory, up to `TraceMaxBytes`, 1 GiB by default. Each line is one JSON object: a header that starts the file, a snapshot or a decision. Durations are in nanoseconds. The traces feed the offline replay and the system appreciation.
+With `TraceDirectory` set, each service writes its snapshots and decisions to `<service>-<host>-<pid>.jsonl` in that directory, up to `TraceMaxBytes`, 1 GiB by default. Each line is one JSON object: a header that starts the file, a snapshot or a decision. Durations are in nanoseconds. The traces feed the [offline replay](#offline-replay) and the system appreciation.
 
 ```yaml
 adaptive.signals:
@@ -390,7 +390,33 @@ Every controller ships disabled, is proven in shadow, and stays inside bounds an
 | Partition count | Rate-limited by `MaxRate` | Minutes |
 | Demand-aware share | Seconds-scale exchange | Tens of seconds |
 
-**Testing.** Controllers are pure functions of state, envelope and signals, so unit tests run on a fake clock. Recorded signal traces replay through them offline. Interactions between controllers need a discrete-event simulator, such as iw/tempdes, fed with production traces before any canary.
+**Testing.** Controllers are pure functions of state, envelope and signals, so unit tests run on a fake clock. Recorded signal traces replay through them offline, as the next section describes. Interactions between controllers need a discrete-event simulator, such as iw/tempdes, fed with production traces before any canary.
+
+## Offline replay
+
+Each decision in a trace carries, as its detail, what its law stepped on: the parameters, the signals and, for the controllers the plane drives, the envelope's step limit. `tools/adaptivereplay` feeds those details back through the laws. With the parameters a trace recorded, it gives back the recorded proposals step for step, which shows the trace holds everything the laws read. With other parameters, it shows what they would have proposed on the same signals.
+
+```bash
+go run ./cmd/tools/adaptivereplay -set worker_count.TargetDelay=250ms /var/tmp/temporal-signals/history-*.jsonl
+```
+
+For each controller, the report gives its steps, how many replayed as recorded, how often the proposal changed and turned back, its range as a share of the static value, and its reasons. `-csv` writes every step. [The tool's README](../../tools/adaptivereplay/README.md) describes its flags and output.
+
+**Keeping replay exact.** A law is a pure function of its state, parameters and signals, so a replay matches when it rebuilds the law's state as the host did. The trace records each time the host changed that state other than by a step:
+
+- The plane resets a controller it drives to the static value on each tick while the controller is off, and records nothing then. A tick without the controller's decision means its law started again. A controller turned off keeps the plane ticking until a step has reset it. So a law that comes back on starts from the static value, even when nothing else kept the plane running.
+- The persistence rate limiter starts its law at the static rate it reads as it starts, and holds the law at the static rate while the controller is off. The next decision records that rate as its detail's `Start`. A frozen decision has a detail only for `Start`.
+- Matching makes a new partition scaler each time it loads a task queue. When the controller is first enabled for the task queue, the scaler starts its law again from the capacity the task queue's state kept. The scaler's first step after either is marked `Started`, with that capacity as `Loaded`.
+- A frozen or held step keeps the value its law held, and the reason the host recorded.
+- While the plane is enabled, it opens its trace as soon as the service creates it, before its first tick. So the trace has the decisions controllers make while the host starts.
+
+Proposals match within a relative 1e-9. A law built where the compiler fuses multiply-adds can differ in the last bits from one built where it doesn't.
+
+**Limits.**
+
+- Replay is open-loop. A proposal under other parameters doesn't change the signals that follow. So a what-if shows direction and timing, as shadow mode does, but not where the system would have settled. Closing the loop needs the discrete-event simulator.
+- A recording opened on a running host, by setting the trace directory then, starts each law from its static value. Its first steps can differ from the recorded ones until the law's state catches up. To record from the start, enable the plane and set the directory before the host starts.
+- Fair share records a namespace's decision only when its mode or reason changes, or its share moves by `Deadband`. So its series holds those changes, not every step.
 
 ## What stays in dynamic config
 
