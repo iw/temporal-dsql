@@ -129,6 +129,7 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
 - A caller that waits and then gets a connection counts as queued. One whose deadline passes first gives up on the pool, and its call counts as a timeout.
 - The pacing wait fails only if the pool closes during it, at shutdown.
 - On DSQL, throttled facts come from DSQL's own refusals.
+- As a host starts, pgx opens all of a pool's connections at once. The pacing lets a burst through, 100 connections a process by default, then 10 a second. Callers that come before the pool has opened its connections wait for them, and count as queued too.
 
 ### 5. How the controller uses the facts
 
@@ -140,10 +141,18 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
   - It warns before deadlines expire, as latency did before.
   - Queued facts are read as a share of acquired facts, and that share is held to `MaxQueuedRatio`, 0.25 by default. At 0.25, a quarter of the pool's acquires found no idle connection. A cut reports the reason `queued`.
   - They aren't divided by store requests. One request can take several connections in turn, one for each transaction and one for each query outside a transaction, so that ratio has no fixed scale.
+  - Not while the host starts. For `QueuedGrace`, 30 s by default, after the controller's first step, the queued share doesn't cut. A host's first seconds bring a burst of start-up work, such as history reloading each shard's queues as it takes the shard, and that queues even on a pool that has opened its connections. Timeouts and throttled facts still cut during the grace, and a queue after it cuts as before. 0 turns the grace off.
 - **On a store that reports facts, latency isn't a trigger.** The controller relies on facts and Temporal's own timeouts.
   - The learned p99 law keeps running in shadow for comparison. When it would have cut, the step is logged, and counted as `latency-shadow` in `adaptive_controller_decisions`, which records every step's reason under the controller `persistence_capacity`.
   - If shadow runs show the facts miss nothing it catches, it goes for those stores.
   - Stores whose plugins report no facts keep it.
+
+**The grace comes from the [system appreciation](adaptive-appreciation.md#start-up-in-every-scenario).** On 3 November 2026, in 51 of the 66 host starts with 10 connections or more, the controller cut to half for `queued` as history took its shards, then held the cut as `idle` for the rest of the run.
+- The queues began when history took its first shards, 0.5–4.8 s after the host's last pool had opened. pgx opens a pool's connections at once, a host's pools held at most 74, within the pacing's burst, and each pool opened its first connection in 0.1–0.5 s. So the queues were history's start-up work, and counting queued facts only once a pool had opened its connections wouldn't have changed these starts.
+- Each of those queues ended within 10 s of the controller's first step.
+- Replayed with a 30 s grace, none of those starts cut, and 49 of the 51 hosts kept their static rate to the end of the run. The other two still cut for queues that came during the load, 32 s and 125 s after their hosts started. With 4 connections, the controller still cut to its floor for errors, 28–31 s after each host started rather than 25–28 s.
+- Graces of 10 and 15 s did the same. One of 5 s left 23 of the 51 start-up cuts, and one of 60 s also missed the queue 32 s after its host started.
+- The grace has a cost where a pool is short from the start. In the [simulator](#simulator-runs), timeouts cut instead, within the grace, and 0.14–0.17% of API calls failed, against none.
 
 ## What stays the same
 
@@ -156,7 +165,8 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
 - **Unit tests:**
   - the classification, for every row above;
   - the aggregator's fact counts per window;
-  - the controller cutting on throttled facts but not on contention.
+  - the controller cutting on throttled facts but not on contention;
+  - the controller leaving a queue out within its start-up grace, and cutting for one after it.
 - **Plugin tests:** each DSQL path reports its fact once, using the overlay and fake-driver technique from the October review.
 - **Simulator:** rerun on 30 October 2026, in [Simulator runs](#simulator-runs).
   - Without facts, the branch's controller reproduces the original outputs byte for byte, built as they were, without fused multiply-add. Go fuses multiply-adds on arm64, which moves trace A's proposed runs late in the run, for both controllers.
@@ -259,6 +269,13 @@ API errors as a share of API calls, across the six scenarios, or across the thre
 Over 30 variants of each scenario with facts, with the drop's level and its timing varied, mean API errors fell or held in 21 of the 24 cases. They rose by 0.08 points on trace B at 15 ms with nothing to report, and by 0.05 and 0.01 points at 60 ms with the 2-times pool. The throttling store's runs didn't change, and the short pools' API errors stayed at 0.
 
 The max-filter trusts delivered throughput, so it relies on fix 1. Before it, a binding limit's rejections count as delivered, and the filter returns to rates the store didn't deliver: on trace B at 15 ms, API errors rose from 18.1 to 28.7%.
+
+**With the start-up grace.** Later on 3 November 2026, the simulator was rerun with `QueuedGrace` at its default of 30 s. The simulator starts the controller with the load, so the grace covers each run's first 30 s. Only the pool that carries 90% of the load at rest changed, since it's short from the start:
+- with its queue left out, timeouts cut once, 12–17 s into the load, and 0.14–0.17% of API calls failed, against none;
+- goodput held, at 1,725–2,350 calls a second against 1,707–2,349, and queued facts cut once the grace had passed;
+- in shadow, the latency law would have cut on 20–23 steps, against at most one. At 15 ms, all 23 fell within the grace.
+
+The other runs' figures didn't change.
 
 ## Decisions
 
