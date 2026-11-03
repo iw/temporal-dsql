@@ -47,6 +47,8 @@ func PlaneProvider(params PlaneParams) *Plane {
 		Header{Service: string(params.ServiceName), Host: hostname, PID: os.Getpid()},
 		params.Logger,
 	)
+	// Controllers report to the plane as soon as it exists, and some step before it starts.
+	plane.openTrace()
 	params.Lifecycle.Append(fx.StartStopHook(plane.Start, plane.Stop))
 	return plane
 }
