@@ -337,13 +337,31 @@ func TestCapacityLimiterReadsQueuedFactsAsAShareOfAcquires(t *testing.T) {
 		P99: 10 * time.Millisecond, Samples: 1000, Throughput: 600, StoreReportsFacts: true,
 		Queued: 400, Acquired: 4000,
 	}
-	f.allowAfter(time.Second)
+	f.allowAfter(f.params.Capacity.QueuedGrace)
 	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
 
 	// Three tenths of the acquires waited.
 	f.signals.snapshot.Queued = 1200
 	f.allowAfter(time.Second)
 
+	require.InDelta(t, 540, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+	require.Equal(t, []string{"idle", "idle", "queued"}, f.decisions())
+}
+
+func TestCapacityLimiterLeavesQueuedFactsOutWhileTheHostStarts(t *testing.T) {
+	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
+	f.signals.snapshot = persistence.HealthSnapshot{
+		P99: 10 * time.Millisecond, Samples: 1000, Throughput: 600, StoreReportsFacts: true,
+		Queued: 900, Acquired: 1000,
+	}
+
+	// The host's start-up work queues on the pool for its first steps.
+	f.allowAfter(0)
+	f.allowAfter(time.Second)
+	require.InDelta(t, testHostRPS, f.bucketRPS(headers.CallerTypeAPI), 0.001)
+
+	// The same queue, once the grace has passed, is the pool being short.
+	f.allowAfter(f.params.Capacity.QueuedGrace)
 	require.InDelta(t, 540, f.bucketRPS(headers.CallerTypeAPI), 0.001)
 	require.Equal(t, []string{"idle", "idle", "queued"}, f.decisions())
 }
@@ -508,6 +526,7 @@ func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, capacity.ModeOn, step.Envelope.Mode)
 	require.Equal(t, 30*time.Second, step.Envelope.DeliveryWindow)
+	require.Equal(t, 30*time.Second, step.Envelope.QueuedGrace)
 	require.InDelta(t, 2, step.Envelope.BaselineAlert, 0.001)
 	require.Equal(t, 200*time.Millisecond, step.Signals.P99)
 	require.InDelta(t, 600, step.Signals.Throughput, 0.001)

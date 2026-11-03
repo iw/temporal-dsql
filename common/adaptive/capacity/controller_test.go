@@ -43,15 +43,81 @@ func TestThrottledFactsAndTimeoutsShareTheErrorRatio(t *testing.T) {
 func TestQueuedFactsCut(t *testing.T) {
 	c := New(1000)
 	env := DefaultEnvelope(1000)
-	s := withFacts(0, 10*time.Millisecond, true)
+	c.Step(env, 1000, withFacts(0, 10*time.Millisecond, false)) // the host starts
+	s := withFacts(env.QueuedGrace, 10*time.Millisecond, true)
 	s.QueuedRatio = 0.2
 	if d := c.Step(env, 1000, s); d.Reason == ReasonQueued {
 		t.Fatalf("queueing under MaxQueuedRatio must not cut, got %+v", d)
 	}
-	s = withFacts(time.Second, 10*time.Millisecond, true)
+	s = withFacts(env.QueuedGrace+time.Second, 10*time.Millisecond, true)
 	s.QueuedRatio = 0.4
 	if d := c.Step(env, 1000, s); d.Reason != ReasonQueued || d.Proposed >= 1000 {
 		t.Fatalf("expected a cut for queueing on the plugin's pool, got %+v", d)
+	}
+}
+
+func TestQueuedFactsDontCutForStartUpWork(t *testing.T) {
+	env := DefaultEnvelope(1000)
+	queued := func(at time.Duration) Signals {
+		s := withFacts(at, 10*time.Millisecond, false)
+		s.QueuedRatio, s.Throughput = 0.9, 200
+		return s
+	}
+
+	// As the host starts, its pool opens connections and its shards reload their
+	// queues, so most acquires wait.
+	c := New(1000)
+	for _, at := range []time.Duration{0, time.Second, env.QueuedGrace - time.Second} {
+		if d := c.Step(env, 1000, queued(at)); d.Reason != ReasonIdle || d.Proposed != 1000 {
+			t.Fatalf("a queue within QueuedGrace of the first step must not cut, at %v got %+v", at, d)
+		}
+	}
+	// A queue that lasts past the grace does.
+	if d := c.Step(env, 1000, queued(env.QueuedGrace)); d.Reason != ReasonQueued || d.Proposed != 500 {
+		t.Fatalf("expected a cut for a queue past QueuedGrace, got %+v", d)
+	}
+
+	// The grace leaves timeouts and throttling to cut as before.
+	c = New(1000)
+	s := queued(0)
+	s.ErrorRatio = 0.05
+	if d := c.Step(env, 1000, s); d.Reason != ReasonErrors {
+		t.Fatalf("expected timeouts to cut within QueuedGrace, got %+v", d)
+	}
+	c = New(1000)
+	s = queued(0)
+	s.ThrottledRatio = 0.05
+	if d := c.Step(env, 1000, s); d.Reason != ReasonThrottled {
+		t.Fatalf("expected throttling to cut within QueuedGrace, got %+v", d)
+	}
+
+	// 0 turns the grace off.
+	env.QueuedGrace = 0
+	c = New(1000)
+	if d := c.Step(env, 1000, queued(0)); d.Reason != ReasonQueued {
+		t.Fatalf("expected the first step to cut without a grace, got %+v", d)
+	}
+}
+
+func TestQueuedGraceRunsFromTheFirstStepWhileNotOff(t *testing.T) {
+	env := DefaultEnvelope(1000)
+	off := env
+	off.Mode = ModeOff
+	queued := withFacts(time.Hour, 10*time.Millisecond, false)
+	queued.QueuedRatio = 0.9
+
+	// Off since the host started, so the grace starts when the controller does.
+	c := New(1000)
+	c.Step(off, 1000, withFacts(0, 10*time.Millisecond, false))
+	if d := c.Step(env, 1000, queued); d.Reason != ReasonIdle {
+		t.Fatalf("expected the grace to run from the first step while not off, got %+v", d)
+	}
+
+	// Switched off and on again later, it has had its grace.
+	c.Step(off, 1000, withFacts(2*time.Hour, 10*time.Millisecond, false))
+	queued.Now = t0.Add(2*time.Hour + time.Second)
+	if d := c.Step(env, 1000, queued); d.Reason != ReasonQueued {
+		t.Fatalf("expected no second grace, got %+v", d)
 	}
 }
 

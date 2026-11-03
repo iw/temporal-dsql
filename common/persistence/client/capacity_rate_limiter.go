@@ -409,6 +409,7 @@ func capacityEnvelope(
 		LatencyFloor:    p.LatencyFloor,
 		MaxErrorRatio:   p.MaxErrorRatio,
 		MaxQueuedRatio:  p.MaxQueuedRatio,
+		QueuedGrace:     p.QueuedGrace,
 		MaxDecrease:     p.MaxDecrease,
 		DeliveryBackoff: p.DeliveryBackoff,
 		DeliveryWindow:  p.DeliveryWindow,

@@ -75,6 +75,12 @@ type Envelope struct {
 	// short.
 	MaxQueuedRatio float64
 
+	// QueuedGrace is how long after the controller's first step the queued share
+	// doesn't trigger a decrease. A host's first seconds bring a burst of start-up
+	// work, such as history reloading each shard's queues as it takes the shard,
+	// which queues on a pool sized for the load that follows. 0 turns it off.
+	QueuedGrace time.Duration
+
 	// MaxDecrease is the smallest multiplicative factor applied in one
 	// decision (0.5 = at most halve). DeliveryBackoff is the fraction of
 	// measured throughput to cut to on overload.
@@ -121,6 +127,7 @@ func DefaultEnvelope(staticRPS float64) Envelope {
 		LatencyFloor:    2 * time.Millisecond,
 		MaxErrorRatio:   0.01,
 		MaxQueuedRatio:  0.25,
+		QueuedGrace:     30 * time.Second,
 		MaxDecrease:     0.5,
 		DeliveryBackoff: 0.9,
 		DeliveryWindow:  30 * time.Second,
@@ -215,6 +222,7 @@ type Detail struct {
 // owner calls Step from a single ticker goroutine and publishes RPS atomically.
 type Controller struct {
 	rate         float64
+	started      time.Time // the first step while not off, which QueuedGrace runs from
 	lastDecrease time.Time
 	lastBadRate  float64 // capacity estimate when overload was last detected
 	baseline     windowMin
@@ -247,6 +255,9 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 		c.rate = staticRPS
 		return Decision{RPS: staticRPS, Proposed: staticRPS, Reason: ReasonOff}
 	}
+	if c.started.IsZero() {
+		c.started = s.Now
+	}
 
 	d := Decision{Reason: ReasonNoData}
 	if s.Samples >= env.MinSamples && s.P99 > 0 {
@@ -259,7 +270,8 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 
 		errorsHigh := s.ErrorRatio > env.MaxErrorRatio
 		throttledHigh := !errorsHigh && s.ThrottledRatio > 0 && s.ErrorRatio+s.ThrottledRatio > env.MaxErrorRatio
-		queuedHigh := env.MaxQueuedRatio > 0 && s.QueuedRatio > env.MaxQueuedRatio
+		queuedHigh := env.MaxQueuedRatio > 0 && s.QueuedRatio > env.MaxQueuedRatio &&
+			s.Now.Sub(c.started) >= env.QueuedGrace
 		factsHigh := errorsHigh || throttledHigh || queuedHigh
 		latencyHigh := s.P99 > target
 		if s.FactsReported {
