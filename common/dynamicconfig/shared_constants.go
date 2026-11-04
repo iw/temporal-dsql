@@ -117,6 +117,10 @@ type CapacityControllerParams struct {
 	// for a free connection, which forces a decrease. It applies only to stores
 	// whose plugins report queued facts.
 	MaxQueuedRatio float64
+	// QueuedGrace: for this long after the controller's first step, the queued
+	// share doesn't force a decrease, so a host's start-up work doesn't cut the
+	// rate. 0 turns it off.
+	QueuedGrace time.Duration
 	// On overload: cut to DeliveryBackoff x delivered throughput, never below
 	// MaxDecrease x current rate in one step, at most once per Cooldown.
 	MaxDecrease     float64
@@ -163,6 +167,7 @@ var DefaultDynamicRateLimitingParams = DynamicRateLimitingParams{
 		LatencyFloor:    2 * time.Millisecond,
 		MaxErrorRatio:   0.01,
 		MaxQueuedRatio:  0.25,
+		QueuedGrace:     30 * time.Second,
 		MaxDecrease:     0.5,
 		DeliveryBackoff: 0.9,
 		Cooldown:        6 * time.Second,
