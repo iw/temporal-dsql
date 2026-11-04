@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/adaptive/memory"
 	"go.temporal.io/server/common/adaptive/taskrate"
 	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -27,7 +28,7 @@ type (
 		// For start-up: the capacity controller's QueuedGrace.
 		grace time.Duration
 		// The controllers' modes, where the scenario varies them.
-		capacity, taskRate, workers string
+		capacity, taskRate, workers, memory string
 	}
 )
 
@@ -102,6 +103,16 @@ var scenarios = []scenarioDef{
 		build: surge,
 	},
 	{
+		name: "memory-pressure",
+		about: "one host in the cluster's region, with a 512 MiB GOMEMLIMIT and history's cache at its 1000 MiB default: " +
+			"5 workflows/s and 20 tasks/s for 600 s, and from 120 s, 224 MiB more heap for 120 s and 60,000 reloaded tasks",
+		variants: []variant{
+			{name: "mem", about: "the memory budget enabled", memory: adaptive.ModeNameEnabled},
+			{name: "shadow", about: "the memory budget in shadow", memory: adaptive.ModeNameShadow},
+		},
+		build: memoryPressure,
+	},
+	{
 		name:     "fleet-start",
 		about:    "4 hosts of 500 connections start within 2 s on shared pacing, for 3 h: poolsim's pgxpool-fleet-start",
 		variants: []variant{{name: "default"}},
@@ -169,6 +180,19 @@ func rigNetwork() Network {
 		Jitter:    0.1,
 		Connect:   Range{Min: 140 * time.Millisecond, Max: 170 * time.Millisecond},
 		Cancel:    60 * time.Millisecond,
+	}
+}
+
+// regionNetwork is a host in the cluster's region: 1 ms to the database and 2 ms at the
+// database for each statement, so a write takes about 24 ms.
+func regionNetwork() Network {
+	return Network{
+		RoundTrip: time.Millisecond,
+		Server:    2 * time.Millisecond,
+		Pipelined: 2 * time.Millisecond,
+		Jitter:    0.1,
+		Connect:   Range{Min: 20 * time.Millisecond, Max: 40 * time.Millisecond},
+		Cancel:    2 * time.Millisecond,
 	}
 }
 
@@ -298,6 +322,10 @@ func (c *Controllers) setModes(v variant) {
 		c.WorkerCount = workercount.DefaultSettings
 		c.WorkerCount.Mode = v.workers
 	}
+	if v.memory != "" {
+		c.Memory = memory.DefaultSettings
+		c.Memory.Mode = v.memory
+	}
 }
 
 // slowStore is the appreciation's slow store, on a host whose pool binds while the store
@@ -376,6 +404,54 @@ func busyQueue(v variant) Scenario {
 			{Duration: 90 * time.Second, Rate: 60},
 			{At: 90 * time.Second, Duration: 450 * time.Second, Rate: 5},
 		}},
+	}
+}
+
+// memoryPressure is the appreciation's 512 MiB GOMEMLIMIT, with history's cache limited
+// by size at its default, and each shard's queues limited to 10,000 pending tasks. The
+// host is in the cluster's region, so its 16 shards drain a backlog in a minute or two.
+// The cache's budget is 0.3 of the limit, about 0.15 of its setting, as in the
+// appreciation. The pending tasks' budget is about 0.16 of their limits, above the
+// appreciation's 0.14, since the model's host has two queues to history's several. From
+// 120 s another part of the process takes 224 MiB for 120 s while a backlog of tasks
+// reloads, so the heap presses on the limit.
+func memoryPressure(v variant) Scenario {
+	host := Host{
+		Pool:     servicePool(64),
+		Gate:     true,
+		Read:     PipelinedRead,
+		Pacing:   localPacing(),
+		History:  historyModel(),
+		Workers:  Workers{Pollers: 32, Steps: 1},
+		Capacity: capacityParams(adaptive.ModeNameShadow),
+		Memory: Memory{
+			Limit:     512 << 20,
+			Base:      96 << 20,
+			TaskBytes: 2 << 10,
+			Extra:     Extra{At: 120 * time.Second, Duration: 120 * time.Second, Bytes: 224 << 20},
+		},
+	}
+	// history.hostLevelCacheMaxSizeBytes's default.
+	host.History.CacheMaxBytes = 256000 * 4 * 1024
+	host.History.CacheEntryBytes = 64 << 10
+	host.History.MaxPendingTasks = 10000
+	host.History.CriticalPendingTasks = 9000
+	host.Controllers.setModes(v)
+	return Scenario{
+		Name:     "memory-pressure",
+		Seed:     1,
+		Duration: 600 * time.Second,
+		Drain:    30 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  regionNetwork(),
+		Hosts:    1,
+		Host:     host,
+		Signals:  signalWindows(),
+		Load: Load{
+			Reload:    Reload{Tasks: 60000, At: 120 * time.Second, Over: 10 * time.Second},
+			Tasks:     []Phase{{Duration: 600 * time.Second, Rate: 20}},
+			Workflows: []Phase{{Duration: 600 * time.Second, Rate: 5}},
+		},
 	}
 }
 

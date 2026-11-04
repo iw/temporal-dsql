@@ -50,6 +50,8 @@ type (
 		Store         StoreStats
 		Pool          PoolStats
 		PoolLoad      PoolLoadStats
+		Memory        MemoryStats
+		Cache         CacheStats
 		// Decisions are the host's controllers' decisions, in the order they made them.
 		Decisions Decisions
 	}

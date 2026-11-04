@@ -20,11 +20,16 @@ const (
 	queueWindows = 10
 )
 
-// taskQueue is one of history's task queues: a scheduler whose workers take its tasks
-// first in, first out, the delays its tasks waited for a worker, and its rescheduler.
+// taskQueue is one of history's task queues: each shard's reader, which loads the tasks
+// the shard writes while its pending tasks are under the limit; a scheduler whose
+// workers take its tasks first in, first out; the delays its tasks waited for a worker;
+// and its rescheduler.
 type taskQueue struct {
 	h           *history
 	name        string
+	maxPending  func() int // a shard's pending-task limit; 0 sets none
+	loaded      []int
+	stored      []fifo[*task]
 	workers     int
 	busy        int
 	waiting     fifo[*task]
@@ -34,13 +39,44 @@ type taskQueue struct {
 
 func newTaskQueue(h *history, name string, seed uint64, host string) *taskQueue {
 	q := &taskQueue{
-		h:       h,
-		name:    name,
-		workers: h.cfg.Workers,
-		delays:  windowedSamples{size: queueWindow, windows: make([]sampleWindow, queueWindows)},
+		h:          h,
+		name:       name,
+		maxPending: func() int { return h.cfg.MaxPendingTasks },
+		loaded:     make([]int, h.cfg.Shards),
+		stored:     make([]fifo[*task], h.cfg.Shards),
+		workers:    h.cfg.Workers,
+		delays:     windowedSamples{size: queueWindow, windows: make([]sampleWindow, queueWindows)},
 	}
 	q.rescheduler = newRescheduler(h.l, seed, host+"/"+name, h.trySubmit)
 	return q
+}
+
+// load is a task the shard wrote. The shard's reader loads it in turn, after the tasks
+// the shard wrote before it.
+func (q *taskQueue) load(t *task) {
+	q.stored[t.shard].push(t)
+	q.h.stored++
+	q.fill(t.shard)
+}
+
+// unload ends a completed task's time in memory, which lets the shard's reader load more.
+func (q *taskQueue) unload(shard int) {
+	q.loaded[shard]--
+	q.h.loaded--
+	q.fill(shard)
+}
+
+// fill is the shard's reader: it loads the shard's tasks, oldest first, and submits them
+// while the shard's pending tasks are under the limit, and leaves the rest in the store.
+func (q *taskQueue) fill(shard int) {
+	limit := q.maxPending()
+	for q.stored[shard].len() > 0 && (limit <= 0 || q.loaded[shard] < limit) {
+		t, _ := q.stored[shard].pop()
+		q.h.stored--
+		q.loaded[shard]++
+		q.h.loaded++
+		q.h.submit(t)
+	}
 }
 
 // add gives a task to a free worker, or queues it.

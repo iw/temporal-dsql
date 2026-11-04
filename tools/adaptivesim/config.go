@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.temporal.io/server/common/adaptive/memory"
 	"go.temporal.io/server/common/adaptive/taskrate"
 	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -81,6 +82,7 @@ type (
 		Workers      Workers
 		Capacity     Capacity
 		Controllers  Controllers
+		Memory       Memory
 	}
 
 	// Controllers are the dynamic config of the host's controllers that step on the
@@ -89,6 +91,7 @@ type (
 	Controllers struct {
 		TaskRate    taskrate.Settings
 		WorkerCount workercount.Settings
+		Memory      memory.Settings
 	}
 
 	// Pool is the plugin's pgxpool.
@@ -145,6 +148,33 @@ type (
 		// shadow mode off. Its own limit is the static persistence rate, and the task rate
 		// controller holds tasks to its rate on top while it's enabled.
 		SchedulerRateLimiter bool
+		// CacheMaxBytes limits the workflow cache by size, as history.cacheSizeBasedLimit
+		// with history.hostLevelCacheMaxSizeBytes does; 0 leaves it unlimited. Each
+		// workflow's state takes CacheEntryBytes of it.
+		CacheMaxBytes, CacheEntryBytes int
+		// MaxPendingTasks and CriticalPendingTasks are each shard's queues' pending-task
+		// limits, history.queuePendingTasksMaxCount and
+		// history.queuePendingTaskCriticalCount. A shard's queue loads tasks only while it
+		// holds fewer than MaxPendingTasks; 0 sets no limit. The critical count only bounds
+		// the memory budget.
+		MaxPendingTasks, CriticalPendingTasks int
+	}
+
+	// Memory is the history process's heap against GOMEMLIMIT.
+	Memory struct {
+		// Limit is GOMEMLIMIT, in bytes; 0 sets none.
+		Limit int
+		// Base is the heap besides the workflow cache and the tasks the queues hold, and
+		// TaskBytes each task's.
+		Base, TaskBytes int
+		// Extra is more heap for a while, as another part of the process might take.
+		Extra Extra
+	}
+
+	// Extra is Bytes more heap from At for Duration after the run's start.
+	Extra struct {
+		At, Duration time.Duration
+		Bytes        int
 	}
 
 	// Backoff is an exponential backoff: Initial × Coefficient^n, at most Max.

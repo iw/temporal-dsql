@@ -3,6 +3,7 @@ package adaptivesim
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/capacity"
+	"go.temporal.io/server/common/adaptive/memory"
 	"go.temporal.io/server/common/adaptive/taskrate"
 	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/tools/adaptivereplay"
@@ -127,6 +129,7 @@ func TestTracesReplay(t *testing.T) {
 		{"slow-store", "cap-wrk"},
 		{"surge", "tsr"},
 		{"busy-queue", "wrk"},
+		{"memory-pressure", "mem"},
 	} {
 		dir := t.TempDir()
 		r := runScenario(t, run.scenario, run.variant, Options{TraceDir: dir})
@@ -311,6 +314,89 @@ func TestWorkerCountsBackOffAfterCapacityCuts(t *testing.T) {
 	require.Positive(t, cuts)
 }
 
+// The memory budget brings the cache and the pending tasks to their budgets in their first
+// seconds, a step of MaxStepFrac at a time, as the appreciation found. While another part
+// of the process presses the heap on GOMEMLIMIT, both shrink, the pending tasks to the
+// floor that keeps each queue's critical count at 1,250; once it has gone, both grow back
+// to their budgets. The heap stays under the limit, where in shadow the cache's setting
+// takes it past.
+func TestMemoryBudgetShrinksUnderPressureAndRecovers(t *testing.T) {
+	enabled := runScenario(t, "memory-pressure", "mem", Options{})
+	shadow := runScenario(t, "memory-pressure", "shadow", Options{})
+	sc, err := Lookup("memory-pressure", "mem")
+	require.NoError(t, err)
+	h, settings := enabled.Hosts[0], memory.DefaultSettings
+	pressed, released := sc.Host.Memory.Extra.At, sc.Host.Memory.Extra.At+sc.Host.Memory.Extra.Duration
+
+	cache := h.Decisions.Of(memory.NamePrefix + memory.HistoryCache)
+	pending := h.Decisions.Of(memory.NamePrefix + memory.PendingTasks)
+	cacheBudget := float64(int(settings.HistoryCacheShare * float64(sc.Host.Memory.Limit)))
+	pendingBudget := appliedAt(pending, time.Minute)
+	floor := 1250 / float64(sc.Host.History.CriticalPendingTasks)
+	require.InDelta(t, cacheBudget, appliedAt(cache, time.Minute), 1)
+	require.Greater(t, pendingBudget, floor)
+	require.Less(t, pendingBudget, 1.0)
+
+	for _, series := range []struct {
+		ds       Decisions
+		min, max float64
+		budget   float64
+	}{
+		{cache, settings.MinMultiplier * float64(sc.Host.History.CacheMaxBytes), float64(sc.Host.History.CacheMaxBytes), cacheBudget},
+		{pending, floor, 1, pendingBudget},
+	} {
+		steps, prev := 0, series.max
+		var shrunk, grown bool
+		for _, d := range series.ds {
+			require.GreaterOrEqual(t, d.Proposed, series.min-1e-9)
+			require.LessOrEqual(t, d.Proposed, series.max)
+			require.InDelta(t, d.Proposed, d.Applied, 1e-9)
+			at := d.Time.Sub(epoch)
+			if at <= 10*time.Second && d.Applied < prev {
+				require.GreaterOrEqual(t, d.Applied, (1-settings.MaxStepFrac)*prev*(1-1e-9), "it moves to its budget a step at a time")
+				steps++
+			}
+			prev = d.Applied
+			switch memory.Reason(d.Reason) {
+			case memory.ReasonPressure:
+				require.GreaterOrEqual(t, at, pressed)
+				require.Less(t, at, released)
+				shrunk = true
+			case memory.ReasonHeadroom:
+				require.GreaterOrEqual(t, at, released, "it grows back once the heap has room")
+				require.True(t, shrunk)
+				grown = true
+			default:
+			}
+		}
+		require.GreaterOrEqual(t, steps, 3)
+		require.True(t, grown)
+		require.Less(t, appliedAt(series.ds, released), series.budget)
+		require.InDelta(t, series.budget, series.ds[len(series.ds)-1].Applied, 1e-9, "it recovers its budget")
+	}
+	lowest := pendingBudget
+	for _, d := range pending {
+		lowest = min(lowest, d.Applied)
+	}
+	require.InDelta(t, floor, lowest, 1e-9, "the pending tasks shrink to the critical count's floor")
+	maxHeld := sc.Host.History.Shards * int(math.Round(pendingBudget*float64(sc.Host.History.MaxPendingTasks)))
+	require.LessOrEqual(t, h.Memory.PeakLoaded, maxHeld, "the queues hold no more than their budget")
+
+	off := shadow.Hosts[0]
+	for _, d := range off.Decisions {
+		require.InDelta(t, d.Static, d.Applied, 1e-9, "in shadow each value keeps its setting")
+	}
+	require.Zero(t, h.Memory.OverLimit)
+	require.Positive(t, off.Memory.OverLimit)
+	require.Less(t, h.Memory.PeakLive, off.Memory.PeakLive)
+	require.Less(t, h.Memory.Pressed, off.Memory.Pressed)
+	require.Less(t, h.Memory.PeakLoaded, off.Memory.PeakLoaded)
+	// At the same goodput.
+	require.Equal(t, h.Tasks.Arrived, h.Tasks.Completed)
+	require.Equal(t, off.Tasks.Completed, h.Tasks.Completed)
+	require.Equal(t, off.Workflows.Completed, h.Workflows.Completed)
+}
+
 func TestRunsAreDeterministic(t *testing.T) {
 	first := runScenario(t, "short-pool-burst", "base", Options{})
 	second := runScenario(t, "short-pool-burst", "base", Options{})
@@ -354,4 +440,5 @@ func TestTool(t *testing.T) {
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-capacity", "on"}, &out), "capacity mode")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-task-rate", "on"}, &out), "task-rate mode")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-workers", "on"}, &out), "workers mode")
+	require.ErrorContains(t, run([]string{"-scenario", "startup", "-memory", "on"}, &out), "memory mode")
 }

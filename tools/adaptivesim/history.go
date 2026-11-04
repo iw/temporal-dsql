@@ -91,9 +91,12 @@ type (
 		// runs, as its queue recorders do.
 		recording func() bool
 		shards    []shard
-		cached    map[int64]bool
-		stats     TaskStats
-		lat       []time.Duration
+		cache     *workflowCache
+		// loaded is the tasks the queues hold in memory, and stored those they left in the
+		// store while their shards' queues were at their pending-task limits.
+		loaded, stored int
+		stats          TaskStats
+		lat            []time.Duration
 		// started is when the host started, and reloadTotal how many tasks it reloads.
 		started     time.Time
 		reloadTotal int
@@ -144,7 +147,7 @@ func newHistory(l *loop, cfg History, c *client, h *health, seed uint64, name st
 		health:    h,
 		recording: func() bool { return false },
 		shards:    make([]shard, cfg.Shards),
-		cached:    make(map[int64]bool),
+		cache:     newWorkflowCache(cfg.CacheMaxBytes, cfg.CacheEntryBytes),
 	}
 	for _, queue := range queueNames {
 		hs.queues = append(hs.queues, newTaskQueue(hs, queue, seed, name))
@@ -159,7 +162,7 @@ func (h *history) arrive(t *task) {
 	if t.reload {
 		h.stats.ReloadArrived++
 	}
-	h.submit(t)
+	t.queue.load(t)
 }
 
 // submit gives a task to the scheduler, as the queue reader does. A task the scheduler
@@ -210,12 +213,12 @@ func (h *history) execute(wf int64, shard int, deadline time.Time, done func(fai
 	write := func() {
 		h.write(wf, shard, deadline, func(f failure) {
 			if f != ok {
-				delete(h.cached, wf)
+				h.cache.remove(wf)
 			}
 			done(f)
 		})
 	}
-	if h.cached[wf] {
+	if h.cache.get(wf) {
 		write()
 		return
 	}
@@ -224,7 +227,7 @@ func (h *history) execute(wf int64, shard int, deadline time.Time, done func(fai
 			done(f)
 			return
 		}
-		h.cached[wf] = true
+		h.cache.put(wf)
 		write()
 	})
 }
@@ -244,6 +247,7 @@ func (h *history) write(wf int64, shard int, deadline time.Time, done func(failu
 
 func (h *history) complete(t *task) {
 	now := h.l.now
+	t.queue.unload(t.shard)
 	h.stats.Completed++
 	h.lat = append(h.lat, now.Sub(t.arrived))
 	if t.reload {
@@ -380,7 +384,7 @@ func (w *workers) start(wf *workflow) {
 			w.l.after(w.cfg.RetryDelay, func() { w.start(wf) })
 			return
 		}
-		w.history.cached[wf.id] = true
+		w.history.cache.put(wf.id)
 		w.dispatch(wf)
 	})
 }

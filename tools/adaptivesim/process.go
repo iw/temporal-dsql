@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"go.temporal.io/server/common/adaptive/memory"
 	"go.temporal.io/server/common/adaptive/taskrate"
 	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -80,6 +81,7 @@ func (p *process) start() {
 	p.history = newHistory(l, h.History, p.client, p.health, p.seed, p.name)
 	p.history.recording = func() bool { return p.plane.signals.Latest() != nil }
 	p.source.history = p.history
+	p.source.heap = &processHeap{cfg: h.Memory, cache: p.history.cache, history: p.history}
 	p.drive(newCollection(h.Controllers))
 	p.history.started, p.history.reloadTotal = l.now, sc.Load.Reload.Tasks
 	p.workers = newWorkers(l, h.Workers, p.history)
@@ -109,6 +111,17 @@ func (p *process) drive(collection *dynamicconfig.Collection) {
 		count := queues.WorkerCount(q.name, staticSetting(h.History.Workers))
 		q.workers, _ = count(q.setWorkers)
 	}
+	if h.History.MaxPendingTasks > 0 {
+		queues.SetShardCount(func() int { return h.History.Shards })
+		maxCount := func() int { return h.History.MaxPendingTasks }
+		criticalCount := func() int { return h.History.CriticalPendingTasks }
+		for _, q := range p.history.queues {
+			q.maxPending, _ = queues.PendingTaskLimits(q.name, maxCount, criticalCount)
+		}
+	}
+	if h.History.CacheMaxBytes > 0 {
+		memory.DriveCache(p.plane.signals, collection, memory.HistoryCache, h.History.CacheMaxBytes, p.history.cache, metrics.NoopMetricsHandler)
+	}
 }
 
 // staticSetting is a setting that never changes.
@@ -120,6 +133,7 @@ func staticSetting[T any](value T) dynamicconfig.TypedSubscribable[T] {
 type hostSource struct {
 	health  *health
 	history *history
+	heap    *processHeap
 }
 
 func (s *hostSource) Read(now time.Time, windows int) signals.Snapshot {
@@ -129,6 +143,9 @@ func (s *hostSource) Read(now time.Time, windows int) signals.Snapshot {
 		for _, q := range s.history.queues {
 			snap.Queues[q.name] = q.signal(now, windows)
 		}
+	}
+	if s.heap != nil {
+		snap.Runtime, snap.Memory = s.heap.read(now)
 	}
 	return snap
 }
@@ -211,7 +228,7 @@ func (p *process) id() (int64, int) {
 func (p *process) newTask(reload bool) {
 	wf, shard := p.id()
 	if !reload {
-		p.history.cached[wf] = true
+		p.history.cache.put(wf)
 	}
 	p.history.arrive(&task{wf: wf, shard: shard, queue: p.history.queues[0], reload: reload})
 }
@@ -278,6 +295,8 @@ func (p *process) result() HostResult {
 			GateWaited:       p.store.gateWaited,
 		},
 		PoolLoad:  pl,
+		Memory:    p.source.heap.stats,
+		Cache:     p.history.cache.stats,
 		Decisions: p.plane.decisions,
 	}
 }

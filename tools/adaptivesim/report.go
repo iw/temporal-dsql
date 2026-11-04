@@ -18,6 +18,7 @@ func Report(w io.Writer, r *Result) error {
 	p := &printer{w: w}
 	p.printf("Scenario %s, seed %d: %s of load, then %s to drain\n\n", r.Scenario, r.Seed, r.Duration, r.Drain)
 	p.hosts(r)
+	p.memory(r)
 	p.connections(r)
 	p.decisions(r)
 	return p.err
@@ -107,6 +108,35 @@ func (p *printer) hosts(r *Result) {
 		p.table("Host\tReads ok / tried\tWrites ok / tried\tResourceExhausted\tRate limited\tGate refusals\tCut off\tAcquire timeouts", calls)
 	}
 	p.table("Host\tStarted\tConnections opened\tAcquires\tWaited\tQueued share\tCanceled acquires\tLifetime destroys", pool)
+}
+
+// memory is the hosts' heaps and workflow caches, for the hosts whose heap the model
+// counts.
+func (p *printer) memory(r *Result) {
+	var rows [][]string
+	for _, h := range r.Hosts {
+		m, c := h.Memory, h.Cache
+		if m.PeakLive == 0 {
+			continue
+		}
+		rows = append(rows, []string{
+			h.Name, mib(m.PeakLive), round(m.Pressed).String(), round(m.OverLimit).String(),
+			fmt.Sprint(m.PeakLoaded), fmt.Sprint(m.PeakStored),
+			fmt.Sprintf("%d / %d", c.Hits, c.Hits+c.Misses), fmt.Sprint(c.Evictions), mib(c.PeakBytes), mib(c.MaxBytes),
+		})
+	}
+	if len(rows) > 0 {
+		p.table("Host\tPeak heap\tPressed\tOver the limit\tPeak tasks held\tPeak tasks left in the store\t"+
+			"Cache hits / lookups\tEvictions\tPeak cache\tCache limit at end", rows)
+	}
+}
+
+// mib is a size in MiB.
+func mib(bytes int) string {
+	if bytes == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f MiB", float64(bytes)/(1<<20))
 }
 
 func (p *printer) connections(r *Result) {
