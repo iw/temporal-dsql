@@ -3,6 +3,7 @@ package adaptivesim
 import (
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strings"
 	"text/tabwriter"
@@ -18,7 +19,7 @@ func Report(w io.Writer, r *Result) error {
 	p.printf("Scenario %s, seed %d: %s of load, then %s to drain\n\n", r.Scenario, r.Seed, r.Duration, r.Drain)
 	p.hosts(r)
 	p.connections(r)
-	p.capacity(r)
+	p.decisions(r)
 	return p.err
 }
 
@@ -123,36 +124,63 @@ func (p *printer) connections(r *Result) {
 	p.printf("  peak %d attempts and %d opens in a second; at most %d open\n\n", peakAttempts, peakOpens, c.PeakOpen)
 }
 
-func (p *printer) capacity(r *Result) {
+func (p *printer) decisions(r *Result) {
 	var rows [][]string
 	for _, h := range r.Hosts {
-		if len(h.Decisions) == 0 {
-			continue
-		}
-		reasons := make(map[adaptive.Reason]int)
-		minApplied, minProposed := h.Decisions[0].Applied, h.Decisions[0].Proposed
-		firstCut := "-"
-		for _, d := range h.Decisions {
-			reasons[d.Reason]++
-			minApplied, minProposed = min(minApplied, d.Applied), min(minProposed, d.Proposed)
-			if firstCut == "-" && isCut(d.Reason) {
-				firstCut = fmt.Sprintf("%s at %s", d.Reason, round(d.Time.Sub(epoch)-h.Started))
-			}
-		}
-		rows = append(rows, []string{
-			h.Name, h.Decisions[0].Mode.String(), fmt.Sprint(len(h.Decisions)), firstCut,
-			fmt.Sprintf("%.0f", minProposed), fmt.Sprintf("%.0f", minApplied), formatReasons(reasons),
-		})
+		rows = append(rows, decisionRows(h.Name, h.Started, h.Decisions)...)
 	}
 	if len(rows) > 0 {
-		p.table("Host\tCapacity mode\tSteps\tFirst cut, after start\tLowest proposed\tLowest applied\tReasons", rows)
+		p.table("Host\tController\tMode\tDecisions\tFirst change, after start\tLowest proposed\tHighest proposed\tLast applied\tReasons", rows)
 	}
+}
+
+// decisionRows summarizes a host's decisions, a row for each controller, and for a
+// controller deciding for several keys, for each key.
+func decisionRows(host string, started time.Duration, ds Decisions) [][]string {
+	var rows [][]string
+	for _, s := range ds.series() {
+		first := s.decisions[0]
+		reasons := make(map[adaptive.Reason]int)
+		lowest, highest := first.Proposed, first.Proposed
+		change, prev := "-", first.Static
+		for _, d := range s.decisions {
+			reasons[d.Reason]++
+			lowest, highest = min(lowest, d.Proposed), max(highest, d.Proposed)
+			if change == "-" && d.Proposed != prev {
+				change = fmt.Sprintf("%s at %s", d.Reason, round(d.Time.Sub(epoch)-started))
+			}
+			prev = d.Proposed
+		}
+		name := s.controller
+		if s.key != "" {
+			name += " " + s.key
+		}
+		last := s.decisions[len(s.decisions)-1]
+		rows = append(rows, []string{
+			host, name, first.Mode.String(), fmt.Sprint(len(s.decisions)), change,
+			number(lowest), number(highest), number(last.Applied), formatReasons(reasons),
+		})
+	}
+	return rows
 }
 
 // isCut reports whether a capacity decision with this reason cut the rate.
 func isCut(reason adaptive.Reason) bool {
 	r := capacity.Reason(reason)
 	return r.Overloaded() && r != capacity.ReasonCooldown
+}
+
+// number formats a controller's value: a rate or a count to the unit, a multiplier to
+// three figures.
+func number(v float64) string {
+	switch a := math.Abs(v); {
+	case a >= 100:
+		return fmt.Sprintf("%.0f", v)
+	case a >= 10:
+		return fmt.Sprintf("%.1f", v)
+	default:
+		return fmt.Sprintf("%.3g", v)
+	}
 }
 
 func formatReasons(reasons map[adaptive.Reason]int) string {

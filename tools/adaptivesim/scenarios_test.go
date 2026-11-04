@@ -85,8 +85,9 @@ func TestShortPoolOverload(t *testing.T) {
 func TestStartupQueuedGrace(t *testing.T) {
 	grace := runScenario(t, "startup", "grace", Options{})
 	for _, h := range grace.Hosts {
-		require.NotEmpty(t, h.Decisions)
-		for _, d := range h.Decisions {
+		decisions := h.Decisions.Of(capacity.Name)
+		require.NotEmpty(t, decisions)
+		for _, d := range decisions {
 			require.False(t, capacity.Reason(d.Reason).Overloaded(), "%s cut at %s: %s", h.Name, d.Time, d.Reason)
 			require.InDelta(t, d.Static, d.Applied, 1e-9)
 		}
@@ -98,15 +99,17 @@ func TestStartupQueuedGrace(t *testing.T) {
 		require.NotNil(t, cut, h.Name)
 		require.Equal(t, adaptive.Reason(capacity.ReasonQueued), cut.Reason)
 		require.Less(t, cut.Time.Sub(epoch)-h.Started, 10*time.Second)
-		last := h.Decisions[len(h.Decisions)-1]
+		decisions := h.Decisions.Of(capacity.Name)
+		last := decisions[len(decisions)-1]
 		require.InEpsilon(t, last.Static/2, last.Applied, 0.05, "%s holds the cut", h.Name)
 	}
 }
 
 func firstCut(h HostResult) *adaptive.Decision {
-	for i, d := range h.Decisions {
+	decisions := h.Decisions.Of(capacity.Name)
+	for i, d := range decisions {
 		if isCut(d.Reason) {
-			return &h.Decisions[i]
+			return &decisions[i]
 		}
 	}
 	return nil
@@ -122,7 +125,7 @@ func TestTracesReplay(t *testing.T) {
 		dir := t.TempDir()
 		r := runScenario(t, run.scenario, run.variant, Options{TraceDir: dir})
 		for i, h := range r.Hosts {
-			path := filepath.Join(dir, fmt.Sprintf("%s-%s-%d.jsonl", traceService, h.Name, i+1))
+			path := filepath.Join(dir, fmt.Sprintf("%s-%s-%d.jsonl", historyService, h.Name, i+1))
 			f, err := os.Open(path)
 			require.NoError(t, err)
 			traces, err := adaptivereplay.Read(filepath.Base(path), f)
@@ -132,15 +135,24 @@ func TestTracesReplay(t *testing.T) {
 			require.Equal(t, h.Name, traces[0].Header.Host)
 			require.Positive(t, traces[0].Ticks)
 
-			replay, err := adaptivereplay.Run(traces[0], nil, nil, nil)
-			require.NoError(t, err)
-			require.Len(t, replay.Series, 1)
-			series := replay.Series[0]
-			require.Equal(t, capacity.Name, series.Controller)
-			require.Len(t, series.Steps, len(h.Decisions))
-			require.Equal(t, len(series.Steps), series.Matched(), "%s/%s %s", run.scenario, run.variant, h.Name)
+			requireReplays(t, traces[0], h.Decisions)
 		}
 	}
+}
+
+// requireReplays checks that a trace replays every decision a host recorded, each to the
+// proposal and reason the simulation recorded.
+func requireReplays(t *testing.T, trace *adaptivereplay.Trace, decisions Decisions) {
+	t.Helper()
+	replay, err := adaptivereplay.Run(trace, nil, nil, nil)
+	require.NoError(t, err)
+	require.Empty(t, replay.Unknown)
+	steps := 0
+	for _, series := range replay.Series {
+		steps += len(series.Steps)
+		require.Equal(t, len(series.Steps), series.Matched(), "%s %s %s", trace.Header.Host, series.Controller, series.Key)
+	}
+	require.Equal(t, len(decisions), steps, trace.Header.Host)
 }
 
 func TestRunsAreDeterministic(t *testing.T) {

@@ -6,7 +6,11 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/gate"
+	"go.temporal.io/server/common/signals"
 )
+
+// historyService is the service a history host's trace names.
+const historyService = "history"
 
 type (
 	// process is one history host: its plugin's pacing, pool and store, its persistence
@@ -15,9 +19,9 @@ type (
 	process struct {
 		w       *world
 		name    string
+		pid     int
 		seed    uint64
 		started time.Time
-		trace   *traceFile
 
 		pacer    *pacer
 		pool     *pool
@@ -63,7 +67,8 @@ func (p *process) start() {
 	p.pacer = newPacer(l, w.dsql, h.Pacing, w.shared, p.seed, p.name)
 	p.pool = newPool(l, h.Pool, sc.Network, p.pacer, w.dsql, p.seed, p.name)
 	p.store = newStore(l, h, sc.Network, p.pool, w.dsql, p.health, w.clock, p.seed, p.name)
-	p.plane = newPlane(l, sc.Signals, p.health, p.trace)
+	header := signals.Header{Service: historyService, Host: p.name, PID: p.pid}
+	p.plane = newPlane(l, sc.Signals, &hostSource{health: p.health}, header, w.opts.TraceDir, w.log)
 	p.limiter = newCapacityLimiter(h.Capacity, []byte(p.name), p.health, p.plane, l.now)
 	p.client = &client{l: l, limiter: p.limiter, health: p.health, store: p.store, retryDelay: h.History.RetryDelay}
 	p.history = newHistory(l, h.History, p.client, p.health)
@@ -79,6 +84,17 @@ func (p *process) start() {
 		p.history.stats.Backlog = p.history.stats.Arrived - p.history.stats.Completed
 	})
 }
+
+// hostSource is a history host's signals, as its plane reads them.
+type hostSource struct {
+	health *health
+}
+
+func (s *hostSource) Read(now time.Time, windows int) signals.Snapshot {
+	return signals.Snapshot{Persistence: s.health.snapshot(now, windows)}
+}
+
+func (s *hostSource) Idle() {}
 
 // startupPools opens the short-lived pools a process opens as it starts. Each takes its
 // connections at once, holds each for a round trip, and closes after Duration.
