@@ -14,11 +14,18 @@ import (
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/metrics/metricstest"
 	"go.temporal.io/server/common/persistence"
+	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/gate"
 	"go.temporal.io/server/common/testing/await"
 )
 
+// The gate's queues: writes and callers without a deadline, then reads.
+const (
+	priorityQueue = 0
+	readQueue     = 1
+)
+
 type gateResult struct {
-	ticket *gateTicket
+	ticket *gate.Ticket
 	err    error
 }
 
@@ -34,20 +41,20 @@ func acquireAsync(ctx context.Context, g *acquireGate) <-chan gateResult {
 
 func recordHolds(g *acquireGate, kind acquireKind, hold time.Duration, n int) {
 	for range n {
-		g.holds[kind].record(hold)
+		g.policy.RecordHold(kind, hold)
 	}
 }
 
 func queuedAt(g *acquireGate, queue int) int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.queues[queue].Len()
+	priority, reads := g.policy.Queued()
+	if queue == readQueue {
+		return reads
+	}
+	return priority
 }
 
 func heldAt(g *acquireGate) int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.held
+	return g.policy.Held()
 }
 
 func awaitQueued(t *testing.T, g *acquireGate, queue, n int) {
@@ -77,14 +84,14 @@ func TestGateServesWritesBeforeReads(t *testing.T) {
 	write := acquireAsync(withAcquireKind(ctx, acquireWrite), g)
 	awaitQueued(t, g, priorityQueue, 1)
 
-	held.release(true)
+	held.Release(true)
 	first := <-write
 	require.NoError(t, first.err)
 	require.Equal(t, 1, queuedAt(g, readQueue))
-	first.ticket.release(true)
+	first.ticket.Release(true)
 	second := <-read
 	require.NoError(t, second.err)
-	second.ticket.release(true)
+	second.ticket.Release(true)
 	require.Zero(t, heldAt(g))
 	require.Equal(t, int64(2), g.waited.Load())
 }
@@ -101,13 +108,13 @@ func TestGateQueuesCallsWithoutADeadlineWithWrites(t *testing.T) {
 	withoutDeadline := acquireAsync(t.Context(), g)
 	awaitQueued(t, g, priorityQueue, 1)
 
-	held.release(true)
+	held.Release(true)
 	first := <-withoutDeadline
 	require.NoError(t, first.err)
-	first.ticket.release(true)
+	first.ticket.Release(true)
 	second := <-withDeadline
 	require.NoError(t, second.err)
-	second.ticket.release(true)
+	second.ticket.Release(true)
 }
 
 func TestGateRefusesAtOnceACallerItCantServeInTime(t *testing.T) {
@@ -117,7 +124,7 @@ func TestGateRefusesAtOnceACallerItCantServeInTime(t *testing.T) {
 	recordHolds(g, acquireWrite, time.Second, 10)
 	held, err := g.acquire(t.Context())
 	require.NoError(t, err)
-	defer held.release(false)
+	defer held.Release(false)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
@@ -138,7 +145,7 @@ func TestGateRefusesAWaitingCallerWhileTimeIsLeft(t *testing.T) {
 	recordHolds(g, acquireRead, 150*time.Millisecond, 10)
 	held, err := g.acquire(t.Context())
 	require.NoError(t, err)
-	defer held.release(false)
+	defer held.Release(false)
 
 	// A 150 ms wait and 225 ms reserved fit in the 600 ms left, so the caller waits, and is
 	// refused when 225 ms are left.
@@ -167,7 +174,7 @@ func TestGateCanceledWaiterLeavesTheQueue(t *testing.T) {
 	require.NotErrorIs(t, canceled.err, errConnectThrottled)
 	require.Zero(t, queuedAt(g, priorityQueue))
 
-	held.release(true)
+	held.Release(true)
 	require.Zero(t, heldAt(g))
 }
 
@@ -178,52 +185,25 @@ func TestGateTicketRecordsTheHoldsOfUsedConnections(t *testing.T) {
 	unused, err := g.acquire(t.Context())
 	require.NoError(t, err)
 
-	used.release(true)
-	used.release(true)
-	unused.release(false)
+	used.Release(true)
+	used.Release(true)
+	unused.Release(false)
 	require.Zero(t, heldAt(g))
-	require.Equal(t, 1, g.holds[acquireWrite].count)
-	require.Zero(t, g.holds[acquireRead].count)
+	require.Equal(t, 1, g.policy.Holds(acquireWrite))
+	require.Zero(t, g.policy.Holds(acquireRead))
 }
 
 func TestGateSeedsAnEmptyEstimateFromTheOtherKind(t *testing.T) {
 	g := newAcquireGate(1, nil)
 	recordHolds(g, acquireWrite, 40*time.Millisecond, 3)
-	p90, mean := g.estimate(acquireRead)
+	p90, mean := g.policy.Estimate(acquireRead)
 	require.Equal(t, 40*time.Millisecond, p90)
 	require.Equal(t, 40*time.Millisecond, mean)
 
 	recordHolds(g, acquireRead, 5*time.Millisecond, 3)
-	p90, mean = g.estimate(acquireRead)
+	p90, mean = g.policy.Estimate(acquireRead)
 	require.Equal(t, 5*time.Millisecond, p90)
 	require.Equal(t, 5*time.Millisecond, mean)
-}
-
-func TestHoldTimesEstimate(t *testing.T) {
-	var h holdTimes
-	_, _, ok := h.estimate()
-	require.False(t, ok)
-	for i := 1; i <= 10; i++ {
-		h.record(time.Duration(i) * time.Millisecond)
-	}
-	p90, mean, ok := h.estimate()
-	require.True(t, ok)
-	require.Equal(t, 9*time.Millisecond, p90)
-	require.Equal(t, 5500*time.Microsecond, mean)
-}
-
-func TestHoldTimesKeepsTheMostRecent(t *testing.T) {
-	var h holdTimes
-	for range holdSamples {
-		h.record(time.Second)
-	}
-	for range holdSamples {
-		h.record(time.Millisecond)
-	}
-	p90, mean, ok := h.estimate()
-	require.True(t, ok)
-	require.Equal(t, time.Millisecond, p90)
-	require.Equal(t, time.Millisecond, mean)
 }
 
 func TestGateMetrics(t *testing.T) {
@@ -241,10 +221,10 @@ func TestGateMetrics(t *testing.T) {
 	require.ErrorIs(t, err, errGateRefused)
 	waiting := acquireAsync(t.Context(), g)
 	awaitQueued(t, g, priorityQueue, 1)
-	held.release(true)
+	held.Release(true)
 	admitted := <-waiting
 	require.NoError(t, admitted.err)
-	admitted.ticket.release(true)
+	admitted.ticket.Release(true)
 
 	snapshot := capture.Snapshot()
 	require.Len(t, snapshot["dsql_pool_gate_refusals_total"], 1)
@@ -267,10 +247,10 @@ func TestPoolConnectorRefusesThroughTheGate(t *testing.T) {
 	defer func() { require.NoError(t, sqlDB.Close()) }()
 
 	// Fill the gate, and give it holds that a caller with 100 ms left can't wait for.
-	var tickets []*gateTicket
+	var tickets []*gate.Ticket
 	defer func() {
 		for _, ticket := range tickets {
-			ticket.release(false)
+			ticket.Release(false)
 		}
 	}()
 	for range EphemeralPoolSize {
@@ -297,7 +277,7 @@ func TestPoolConnectorReleasesTheSlotWhenTheConnectFails(t *testing.T) {
 
 	require.ErrorIs(t, sqlDB.PingContext(t.Context()), cause)
 	require.Zero(t, heldAt(connector.gate))
-	require.Zero(t, connector.gate.holds[acquireRead].count, "a failed connect isn't a hold")
+	require.Zero(t, connector.gate.policy.Holds(acquireRead), "a failed connect isn't a hold")
 }
 
 func TestPoolConnectorCountsGateWaitsAsQueued(t *testing.T) {
