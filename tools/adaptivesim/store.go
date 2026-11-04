@@ -60,6 +60,7 @@ type (
 		health *health
 		read   ReadPath
 		txRTs  int
+		slow   Slow
 
 		// granted is what each caller waiting at the gate does once it has a slot.
 		granted    map[*gate.Waiter]func()
@@ -88,10 +89,11 @@ type (
 	}
 )
 
-func newStore(l *loop, h Host, net Network, p *pool, d *dsql, health *health, timeSource simClock, seed uint64, name string) *store {
+func newStore(l *loop, h Host, net Network, slow Slow, p *pool, d *dsql, health *health, timeSource simClock, seed uint64, name string) *store {
 	s := &store{
 		l:       l,
 		net:     net,
+		slow:    slow,
 		rng:     randoms(seed, name+"/store"),
 		pool:    p,
 		dsql:    d,
@@ -189,6 +191,9 @@ func (s *store) run(ls *lease, roundTrips int, server time.Duration, deadline ti
 	s.stats.Statements++
 	c := ls.c
 	d := jittered(s.rng, time.Duration(roundTrips)*(s.net.RoundTrip+server), s.net.Jitter)
+	if s.slow.holds(s.l.now) {
+		d += time.Duration(roundTrips) * s.slow.Delay
+	}
 	end := func(completed bool) {
 		c.onCut = nil
 		done(completed)

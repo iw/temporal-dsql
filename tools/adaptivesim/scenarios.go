@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/adaptive/memory"
+	"go.temporal.io/server/common/adaptive/taskrate"
+	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
 )
 
@@ -24,6 +27,8 @@ type (
 		gate bool
 		// For start-up: the capacity controller's QueuedGrace.
 		grace time.Duration
+		// The controllers' modes, where the scenario varies them.
+		capacity, taskRate, workers, memory string
 	}
 )
 
@@ -66,6 +71,46 @@ var scenarios = []scenarioDef{
 			{name: "no-grace", about: "QueuedGrace 0, as before #107"},
 		},
 		build: startup,
+	},
+	{
+		name: "slow-store",
+		about: "one host of 48 connections and 128 shards, the store's replies 40 ms later from 60 s to 150 s: " +
+			"80 tasks/s and 10 workflows/s for 240 s, with the scheduler's rate limiter on",
+		variants: []variant{
+			{name: "cap", about: "the capacity controller enabled, the task scheduler rate in shadow", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameShadow},
+			{name: "cap-tsr", about: "both enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled},
+			{name: "cap-wrk", about: "the capacity controller and the worker counts enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameShadow, workers: adaptive.ModeNameEnabled},
+		},
+		build: slowStore,
+	},
+	{
+		name:  "busy-queue",
+		about: "one host whose queues have 8 workers each: 60 tasks/s for 90 s, then 5 tasks/s until 540 s",
+		variants: []variant{
+			{name: "wrk", about: "the worker counts enabled", workers: adaptive.ModeNameEnabled},
+			{name: "shadow", about: "the worker counts in shadow", workers: adaptive.ModeNameShadow},
+		},
+		build: busyQueue,
+	},
+	{
+		name: "surge",
+		about: "one host whose static persistence rate is 100/s: 50 tasks/s, 120/s from 60 s to 120 s, " +
+			"and 5 workflows/s, for 240 s, with the scheduler's rate limiter on and the capacity controller in shadow",
+		variants: []variant{
+			{name: "tsr", about: "the task scheduler rate enabled", taskRate: adaptive.ModeNameEnabled},
+			{name: "shadow", about: "the task scheduler rate in shadow", taskRate: adaptive.ModeNameShadow},
+		},
+		build: surge,
+	},
+	{
+		name: "memory-pressure",
+		about: "one host in the cluster's region, with a 512 MiB GOMEMLIMIT and history's cache at its 1000 MiB default: " +
+			"5 workflows/s and 20 tasks/s for 600 s, and from 120 s, 224 MiB more heap for 120 s and 60,000 reloaded tasks",
+		variants: []variant{
+			{name: "mem", about: "the memory budget enabled", memory: adaptive.ModeNameEnabled},
+			{name: "shadow", about: "the memory budget in shadow", memory: adaptive.ModeNameShadow},
+		},
+		build: memoryPressure,
 	},
 	{
 		name:     "fleet-start",
@@ -135,6 +180,19 @@ func rigNetwork() Network {
 		Jitter:    0.1,
 		Connect:   Range{Min: 140 * time.Millisecond, Max: 170 * time.Millisecond},
 		Cancel:    60 * time.Millisecond,
+	}
+}
+
+// regionNetwork is a host in the cluster's region: 1 ms to the database and 2 ms at the
+// database for each statement, so a write takes about 24 ms.
+func regionNetwork() Network {
+	return Network{
+		RoundTrip: time.Millisecond,
+		Server:    2 * time.Millisecond,
+		Pipelined: 2 * time.Millisecond,
+		Jitter:    0.1,
+		Connect:   Range{Min: 20 * time.Millisecond, Max: 40 * time.Millisecond},
+		Cancel:    2 * time.Millisecond,
 	}
 }
 
@@ -228,6 +286,171 @@ func startup(v variant) Scenario {
 		Load: Load{
 			Reload: Reload{Tasks: 100, At: 2 * time.Second},
 			Tasks:  []Phase{{Duration: 90 * time.Second, Rate: 30}},
+		},
+	}
+}
+
+// taskHost is a host for the task scheduler rate: the plugin's path, enough shards that
+// the shards' writes don't bind first, and the scheduler's rate limiter on.
+func taskHost(conns, shards int, static float64, v variant) Host {
+	host := Host{
+		Pool:     servicePool(conns),
+		Gate:     true,
+		Read:     PipelinedRead,
+		Pacing:   localPacing(),
+		History:  historyModel(),
+		Workers:  Workers{Pollers: 32, Steps: 2, Process: 50 * time.Millisecond, RetryDelay: 10 * time.Second},
+		Capacity: capacityParams(v.capacity),
+	}
+	if v.capacity == "" {
+		host.Capacity = capacityParams(adaptive.ModeNameShadow)
+	}
+	host.Capacity.Static = static
+	host.History.Shards = shards
+	host.History.SchedulerRateLimiter = true
+	host.Controllers.setModes(v)
+	return host
+}
+
+// setModes sets the modes a variant gives the controllers that step on the plane.
+func (c *Controllers) setModes(v variant) {
+	if v.taskRate != "" {
+		c.TaskRate = taskrate.DefaultSettings
+		c.TaskRate.Mode = v.taskRate
+	}
+	if v.workers != "" {
+		c.WorkerCount = workercount.DefaultSettings
+		c.WorkerCount.Mode = v.workers
+	}
+	if v.memory != "" {
+		c.Memory = memory.DefaultSettings
+		c.Memory.Mode = v.memory
+	}
+}
+
+// slowStore is the appreciation's slow store, on a host whose pool binds while the store
+// is slow and whose static persistence rate is close enough to the load for the capacity
+// controller's cuts to bind: it cuts, and the task scheduler rate follows it.
+func slowStore(v variant) Scenario {
+	return Scenario{
+		Name:     "slow-store",
+		Seed:     1,
+		Duration: 240 * time.Second,
+		Drain:    60 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    1,
+		Host:     taskHost(48, 128, 300, v),
+		Signals:  signalWindows(),
+		Slow:     Slow{At: 60 * time.Second, Duration: 90 * time.Second, Delay: 40 * time.Millisecond},
+		Load: Load{
+			Tasks:     []Phase{{Duration: 240 * time.Second, Rate: 80}},
+			Workflows: []Phase{{Duration: 240 * time.Second, Rate: 10}},
+		},
+	}
+}
+
+// surge is a surge of tasks past the host's static persistence rate. The scheduler holds
+// the tasks over the task scheduler rate until the surge ends, where without it they fail
+// on the persistence rate limit and back off.
+func surge(v variant) Scenario {
+	return Scenario{
+		Name:     "surge",
+		Seed:     1,
+		Duration: 240 * time.Second,
+		Drain:    120 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    1,
+		Host:     taskHost(64, 64, 100, v),
+		Signals:  signalWindows(),
+		Load: Load{
+			Tasks: []Phase{
+				{Duration: 60 * time.Second, Rate: 50},
+				{At: 60 * time.Second, Duration: 60 * time.Second, Rate: 120},
+				{At: 120 * time.Second, Duration: 120 * time.Second, Rate: 50},
+			},
+			Workflows: []Phase{{Duration: 240 * time.Second, Rate: 5}},
+		},
+	}
+}
+
+// busyQueue is a queue whose workers bind for a while, then sit idle: its worker count
+// grows to twice its setting, then shrinks to half. The setting is low, 8, so that the
+// workers bind before the shards and the pool do; at history's default of 512 they don't.
+func busyQueue(v variant) Scenario {
+	host := Host{
+		Pool:     servicePool(64),
+		Gate:     true,
+		Read:     PipelinedRead,
+		Pacing:   localPacing(),
+		History:  historyModel(),
+		Workers:  Workers{Pollers: 32, Steps: 1},
+		Capacity: capacityParams(adaptive.ModeNameShadow),
+	}
+	host.History.Shards = 64
+	host.History.Workers = 8
+	host.Controllers.setModes(v)
+	return Scenario{
+		Name:     "busy-queue",
+		Seed:     1,
+		Duration: 540 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    1,
+		Host:     host,
+		Signals:  signalWindows(),
+		Load: Load{Tasks: []Phase{
+			{Duration: 90 * time.Second, Rate: 60},
+			{At: 90 * time.Second, Duration: 450 * time.Second, Rate: 5},
+		}},
+	}
+}
+
+// memoryPressure is the appreciation's 512 MiB GOMEMLIMIT, with history's cache limited
+// by size at its default, and each shard's queues limited to 10,000 pending tasks. The
+// host is in the cluster's region, so its 16 shards drain a backlog in a minute or two.
+// The cache's budget is 0.3 of the limit, about 0.15 of its setting, as in the
+// appreciation. The pending tasks' budget is about 0.16 of their limits, above the
+// appreciation's 0.14, since the model's host has two queues to history's several. From
+// 120 s another part of the process takes 224 MiB for 120 s while a backlog of tasks
+// reloads, so the heap presses on the limit.
+func memoryPressure(v variant) Scenario {
+	host := Host{
+		Pool:     servicePool(64),
+		Gate:     true,
+		Read:     PipelinedRead,
+		Pacing:   localPacing(),
+		History:  historyModel(),
+		Workers:  Workers{Pollers: 32, Steps: 1},
+		Capacity: capacityParams(adaptive.ModeNameShadow),
+		Memory: Memory{
+			Limit:     512 << 20,
+			Base:      96 << 20,
+			TaskBytes: 2 << 10,
+			Extra:     Extra{At: 120 * time.Second, Duration: 120 * time.Second, Bytes: 224 << 20},
+		},
+	}
+	// history.hostLevelCacheMaxSizeBytes's default.
+	host.History.CacheMaxBytes = 256000 * 4 * 1024
+	host.History.CacheEntryBytes = 64 << 10
+	host.History.MaxPendingTasks = 10000
+	host.History.CriticalPendingTasks = 9000
+	host.Controllers.setModes(v)
+	return Scenario{
+		Name:     "memory-pressure",
+		Seed:     1,
+		Duration: 600 * time.Second,
+		Drain:    30 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  regionNetwork(),
+		Hosts:    1,
+		Host:     host,
+		Signals:  signalWindows(),
+		Load: Load{
+			Reload:    Reload{Tasks: 60000, At: 120 * time.Second, Over: 10 * time.Second},
+			Tasks:     []Phase{{Duration: 600 * time.Second, Rate: 20}},
+			Workflows: []Phase{{Duration: 600 * time.Second, Rate: 5}},
 		},
 	}
 }

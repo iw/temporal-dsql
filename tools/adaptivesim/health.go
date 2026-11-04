@@ -116,7 +116,7 @@ func (h *health) snapshot(now time.Time, windows int) persistence.HealthSnapshot
 		}
 	}
 	span := time.Duration(n-1)*h.size + time.Duration(now.UnixNano()-cur*int64(h.size))
-	p99 := h.latency.quantileRecent(0.99, windows, now)
+	p99, _ := h.latency.quantileRecent(0.99, windows, now)
 	snap := persistence.HealthSnapshot{
 		P99:               time.Duration(p99 * float64(time.Millisecond)),
 		Samples:           int(counts.total),
@@ -139,7 +139,7 @@ func (h *health) snapshot(now time.Time, windows int) persistence.HealthSnapshot
 		snap.Throughput = float64(delivered) / span.Seconds()
 	}
 	if counts.attempts > 0 {
-		p90 := h.schedule.quantileRecent(0.90, windows, now)
+		p90, _ := h.schedule.quantileRecent(0.90, windows, now)
 		snap.ScheduleP90 = time.Duration(p90 * float64(time.Millisecond))
 	}
 	return snap
@@ -160,8 +160,8 @@ func (w *windowedSamples) record(v float64, at time.Time) {
 }
 
 // quantileRecent is the q-quantile over the newest n windows that ended after
-// now - n×size, or 0 without samples.
-func (w *windowedSamples) quantileRecent(q float64, n int, now time.Time) float64 {
+// now - n×size, and how many samples it covers, or 0 without samples.
+func (w *windowedSamples) quantileRecent(q float64, n int, now time.Time) (float64, int) {
 	cutoff := now.Add(-time.Duration(n) * w.size)
 	var merged []float64
 	idx := w.head
@@ -173,9 +173,9 @@ func (w *windowedSamples) quantileRecent(q float64, n int, now time.Time) float6
 		idx = (idx - 1 + len(w.windows)) % len(w.windows)
 	}
 	if len(merged) == 0 {
-		return 0
+		return 0, 0
 	}
 	slices.Sort(merged)
 	rank := int(math.Ceil(q*float64(len(merged)))) - 1
-	return merged[min(max(rank, 0), len(merged)-1)]
+	return merged[min(max(rank, 0), len(merged)-1)], len(merged)
 }

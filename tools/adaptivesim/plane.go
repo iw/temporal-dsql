@@ -1,43 +1,53 @@
 package adaptivesim
 
 import (
-	"bufio"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/common/signals"
 )
 
-// traceService is the service a host's trace names.
-const traceService = "history"
-
 type (
-	// plane is a host's signal plane: a snapshot of its persistence health every tick, and
-	// its controllers' decisions, kept for the run's result and written to a trace in the
-	// signal plane's format (common/signals/trace.go), so tools/adaptivereplay can replay
-	// the run.
+	// plane is a simulated host's signal plane: the real signals.Plane, which reads the
+	// host's signals from the simulation and is ticked on simulated time. The controllers
+	// that step on its snapshots subscribe to it through signals.Drive, as they do on a
+	// real host, and it writes its trace with the real trace writer, so
+	// tools/adaptivereplay reads it. It also keeps each decision for the run's result.
 	plane struct {
 		l         *loop
 		interval  time.Duration
-		windows   int
-		health    *health
-		trace     *traceFile
+		signals   *signals.Plane
 		decisions []adaptive.Decision
 	}
 
-	traceFile struct {
-		file *os.File
-		buf  *bufio.Writer
-		err  error
+	// runLog is the logger the simulated planes write to. It keeps their errors, such as
+	// a trace file that can't be written, so a run can return them.
+	runLog struct {
+		log.Logger
+		errs []error
 	}
 )
 
-func newPlane(l *loop, cfg Signals, h *health, trace *traceFile) *plane {
-	return &plane{l: l, interval: cfg.PlaneInterval, windows: cfg.PlaneWindows, health: h, trace: trace}
+var _ adaptive.DecisionSink = (*plane)(nil)
+
+// newPlane returns a host's plane. Its trace, when traceDir is set, is named as the
+// signal plane names its files, from header.
+func newPlane(l *loop, cfg Signals, source signals.Source, header signals.Header, traceDir string, logger log.Logger) *plane {
+	pl := &plane{l: l, interval: cfg.PlaneInterval}
+	settings := signals.Settings{
+		Enabled:        cfg.PlaneInterval > 0,
+		Interval:       cfg.PlaneInterval,
+		Windows:        cfg.PlaneWindows,
+		TraceDirectory: traceDir,
+		TraceMaxBytes:  signals.DefaultSettings.TraceMaxBytes,
+	}
+	pl.signals = signals.NewPlane(func() signals.Settings { return settings }, source, pl, simClock{l: l}, header, logger)
+	return pl
 }
 
 func (pl *plane) start() {
@@ -47,52 +57,38 @@ func (pl *plane) start() {
 }
 
 func (pl *plane) tick() {
-	snap := &signals.Snapshot{Time: pl.l.now, Persistence: pl.health.snapshot(pl.l.now, max(1, pl.windows))}
-	pl.trace.write(signals.Record{Snapshot: snap})
+	pl.signals.Tick(pl.l.now)
 	pl.l.after(pl.interval, pl.tick)
 }
 
-// recordDecision keeps a controller's decision, and writes it to the trace.
-func (pl *plane) recordDecision(d adaptive.Decision) {
+// RecordDecision keeps a decision the plane passes on, for the run's result.
+func (pl *plane) RecordDecision(d adaptive.Decision) {
 	pl.decisions = append(pl.decisions, d)
-	pl.trace.write(signals.Record{Decision: &d})
 }
 
-// openTrace opens a host's trace file in dir, named as the signal plane names its files,
-// and writes its header.
-func openTrace(dir string, header signals.Header) (*traceFile, error) {
-	name := filepath.Join(dir, fmt.Sprintf("%s-%s-%d.jsonl", header.Service, header.Host, header.PID))
-	file, err := os.Create(name)
-	if err != nil {
-		return nil, err
-	}
-	t := &traceFile{file: file, buf: bufio.NewWriterSize(file, 64<<10)}
-	t.write(signals.Record{Header: &header})
-	return t, t.err
+// report reports a decision of a controller that doesn't step on the plane's snapshots,
+// as the persistence rate limiter reports its capacity controller's.
+func (pl *plane) report(d adaptive.Decision) {
+	pl.signals.RecordDecision(d)
 }
 
-// write writes a record. A nil trace writes nothing.
-func (t *traceFile) write(rec signals.Record) {
-	if t == nil || t.err != nil {
-		return
-	}
-	line, err := json.Marshal(rec)
-	if err == nil {
-		line = append(line, '\n')
-		_, err = t.buf.Write(line)
-	}
-	t.err = err
+// stop closes the plane's trace.
+func (pl *plane) stop() {
+	pl.signals.Stop()
 }
 
-func (t *traceFile) close() error {
-	if t == nil {
-		return nil
+func newRunLog() *runLog {
+	return &runLog{Logger: log.NewNoopLogger()}
+}
+
+func (r *runLog) Error(msg string, tags ...tag.Tag) {
+	parts := []string{msg}
+	for _, t := range tags {
+		parts = append(parts, fmt.Sprintf("%s=%v", t.Key(), t.Value()))
 	}
-	if err := t.buf.Flush(); err != nil && t.err == nil {
-		t.err = err
-	}
-	if err := t.file.Close(); err != nil && t.err == nil {
-		t.err = err
-	}
-	return t.err
+	r.errs = append(r.errs, errors.New(strings.Join(parts, " ")))
+}
+
+func (r *runLog) err() error {
+	return errors.Join(r.errs...)
 }

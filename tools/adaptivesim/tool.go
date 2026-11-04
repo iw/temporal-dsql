@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/adaptive/memory"
+	"go.temporal.io/server/common/adaptive/taskrate"
+	workercount "go.temporal.io/server/common/adaptive/workers"
 )
 
 // RunTool runs the tool with its command-line arguments.
@@ -24,8 +27,12 @@ func run(args []string, stdout io.Writer) error {
 	list := fs.Bool("list", false, "list the scenarios and their variants")
 	seed := fs.Uint64("seed", 0, "the run's random `seed`, in place of the scenario's")
 	traceDir := fs.String("trace", "", "write each host's signal plane trace to this `directory`, for tools/adaptivereplay")
-	mode := fs.String("capacity", "", "run the capacity controller in this `mode`: disabled, shadow or enabled")
-	grace := fs.Duration("queued-grace", -1, "set the capacity controller's QueuedGrace to this `duration`")
+	var o overrides
+	fs.StringVar(&o.capacity, "capacity", "", "run the capacity controller in this `mode`: disabled, shadow or enabled")
+	fs.DurationVar(&o.grace, "queued-grace", -1, "set the capacity controller's QueuedGrace to this `duration`")
+	fs.StringVar(&o.taskRate, "task-rate", "", "run the task scheduler rate controller in this `mode`")
+	fs.StringVar(&o.workers, "workers", "", "run the worker count controllers in this `mode`")
+	fs.StringVar(&o.memory, "memory", "", "run the memory budget controllers in this `mode`")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(fs.Output(), "Usage: adaptivesim -scenario name [flags]\n\n"+
 			"Simulates history's adaptive plane on a coarse model of its DSQL store.\n\n")
@@ -52,7 +59,7 @@ func run(args []string, stdout io.Writer) error {
 	if *seed != 0 {
 		sc.Seed = *seed
 	}
-	if err := override(&sc, *mode, *grace); err != nil {
+	if err := o.apply(&sc); err != nil {
 		return err
 	}
 	if *traceDir != "" {
@@ -72,18 +79,60 @@ func run(args []string, stdout io.Writer) error {
 	return err
 }
 
-func override(sc *Scenario, mode string, grace time.Duration) error {
+// overrides are the controllers' settings the command line sets.
+type overrides struct {
+	capacity, taskRate, workers, memory string
+	grace                               time.Duration
+}
+
+func (o overrides) apply(sc *Scenario) error {
 	params := &sc.Host.Capacity.Params
-	switch mode {
-	case "":
-	case adaptive.ModeNameDisabled, adaptive.ModeNameShadow, adaptive.ModeNameEnabled:
+	if o.capacity != "" {
+		if err := checkMode("capacity", o.capacity); err != nil {
+			return err
+		}
 		params.Enabled = true
-		params.Capacity.Mode = mode
-	default:
-		return fmt.Errorf("capacity mode %q isn't disabled, shadow or enabled", mode)
+		params.Capacity.Mode = o.capacity
 	}
-	if grace >= 0 {
-		params.Capacity.QueuedGrace = grace
+	if o.grace >= 0 {
+		params.Capacity.QueuedGrace = o.grace
+	}
+	c := &sc.Host.Controllers
+	if o.taskRate != "" {
+		if err := checkMode("task-rate", o.taskRate); err != nil {
+			return err
+		}
+		if c.TaskRate == (taskrate.Settings{}) {
+			c.TaskRate = taskrate.DefaultSettings
+		}
+		c.TaskRate.Mode = o.taskRate
+	}
+	if o.workers != "" {
+		if err := checkMode("workers", o.workers); err != nil {
+			return err
+		}
+		if c.WorkerCount == (workercount.Settings{}) {
+			c.WorkerCount = workercount.DefaultSettings
+		}
+		c.WorkerCount.Mode = o.workers
+	}
+	if o.memory != "" {
+		if err := checkMode("memory", o.memory); err != nil {
+			return err
+		}
+		if c.Memory == (memory.Settings{}) {
+			c.Memory = memory.DefaultSettings
+		}
+		c.Memory.Mode = o.memory
 	}
 	return nil
+}
+
+func checkMode(controller, mode string) error {
+	switch mode {
+	case adaptive.ModeNameDisabled, adaptive.ModeNameShadow, adaptive.ModeNameEnabled:
+		return nil
+	default:
+		return fmt.Errorf("%s mode %q isn't disabled, shadow or enabled", controller, mode)
+	}
 }

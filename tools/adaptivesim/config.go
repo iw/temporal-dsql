@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"go.temporal.io/server/common/adaptive/memory"
+	"go.temporal.io/server/common/adaptive/taskrate"
+	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
 )
 
@@ -24,6 +27,14 @@ type (
 		Host        Host
 		Signals     Signals
 		Load        Load
+		// Slow holds back each of the store's replies.
+		Slow Slow
+	}
+
+	// Slow holds back each of the store's replies by Delay, from At for Duration after the
+	// run's start, as the appreciation's proxy did for the slow store.
+	Slow struct {
+		At, Duration, Delay time.Duration
 	}
 
 	// Cluster is DSQL's side of the connections, shared by every host.
@@ -70,6 +81,17 @@ type (
 		History      History
 		Workers      Workers
 		Capacity     Capacity
+		Controllers  Controllers
+		Memory       Memory
+	}
+
+	// Controllers are the dynamic config of the host's controllers that step on the
+	// signal plane's snapshots. A zero setting is its controller's default, which leaves it
+	// disabled.
+	Controllers struct {
+		TaskRate    taskrate.Settings
+		WorkerCount workercount.Settings
+		Memory      memory.Settings
 	}
 
 	// Pool is the plugin's pgxpool.
@@ -104,7 +126,8 @@ type (
 	History struct {
 		// Shards is how many shards the host owns. A shard's writes run one at a time.
 		Shards int
-		// Workers is how many task attempts the task scheduler runs at once.
+		// Workers is how many task attempts each queue's scheduler runs at once: its worker
+		// count setting, which the worker count controllers drive.
 		Workers int
 		// Deadline is each task attempt's and each API call's deadline.
 		Deadline time.Duration
@@ -121,6 +144,37 @@ type (
 		ImmediateAttempts  int
 		UnavailableBackoff Backoff
 		ExhaustedBackoff   Backoff
+		// SchedulerRateLimiter turns history's task scheduler rate limiter on, with its
+		// shadow mode off. Its own limit is the static persistence rate, and the task rate
+		// controller holds tasks to its rate on top while it's enabled.
+		SchedulerRateLimiter bool
+		// CacheMaxBytes limits the workflow cache by size, as history.cacheSizeBasedLimit
+		// with history.hostLevelCacheMaxSizeBytes does; 0 leaves it unlimited. Each
+		// workflow's state takes CacheEntryBytes of it.
+		CacheMaxBytes, CacheEntryBytes int
+		// MaxPendingTasks and CriticalPendingTasks are each shard's queues' pending-task
+		// limits, history.queuePendingTasksMaxCount and
+		// history.queuePendingTaskCriticalCount. A shard's queue loads tasks only while it
+		// holds fewer than MaxPendingTasks; 0 sets no limit. The critical count only bounds
+		// the memory budget.
+		MaxPendingTasks, CriticalPendingTasks int
+	}
+
+	// Memory is the history process's heap against GOMEMLIMIT.
+	Memory struct {
+		// Limit is GOMEMLIMIT, in bytes; 0 sets none.
+		Limit int
+		// Base is the heap besides the workflow cache and the tasks the queues hold, and
+		// TaskBytes each task's.
+		Base, TaskBytes int
+		// Extra is more heap for a while, as another part of the process might take.
+		Extra Extra
+	}
+
+	// Extra is Bytes more heap from At for Duration after the run's start.
+	Extra struct {
+		At, Duration time.Duration
+		Bytes        int
 	}
 
 	// Backoff is an exponential backoff: Initial × Coefficient^n, at most Max.
@@ -270,6 +324,12 @@ func (ld *Load) validate(h *Host) error {
 		errs = append(errs, errors.New("a pool load needs a Burst and MaxInUse"))
 	}
 	return errors.Join(errs...)
+}
+
+// holds reports whether the store's replies are held back at now.
+func (s Slow) holds(now time.Time) bool {
+	at := now.Sub(epoch)
+	return s.Delay > 0 && at >= s.At && at < s.At+s.Duration
 }
 
 // delay is the backoff's nth delay, from 0.

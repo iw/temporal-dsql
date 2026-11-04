@@ -76,29 +76,37 @@ func (c *client) attempt(o op, deadline time.Time, n int, done func(failure)) {
 }
 
 type (
-	// history is a history host's task processing: a scheduler with Workers task workers,
-	// shards whose writes run one at a time, and a cache of the workflows whose state it
-	// has read.
+	// history is a history host's task processing: its task queues, each with a scheduler
+	// of its own workers and a rescheduler for the tasks the scheduler refuses; the
+	// schedulers' rate limiter, while it's on; shards whose writes run one at a time; and
+	// a cache of the workflows whose state it has read.
 	history struct {
-		l      *loop
-		cfg    History
-		client *client
-		health *health
-		shards []shard
-		busy   int
-		queue  fifo[*task]
-		cached map[int64]bool
-		stats  TaskStats
-		lat    []time.Duration
+		l         *loop
+		cfg       History
+		client    *client
+		health    *health
+		scheduler *schedulerLimiter // nil while the scheduler's rate limiter is off
+		queues    []*taskQueue
+		// recording reports whether the plane keeps the queues' delays: it does once it
+		// runs, as its queue recorders do.
+		recording func() bool
+		shards    []shard
+		cache     *workflowCache
+		// loaded is the tasks the queues hold in memory, and stored those they left in the
+		// store while their shards' queues were at their pending-task limits.
+		loaded, stored int
+		stats          TaskStats
+		lat            []time.Duration
 		// started is when the host started, and reloadTotal how many tasks it reloads.
 		started     time.Time
 		reloadTotal int
 	}
 
-	// task is one of history's tasks, for a workflow of its own.
+	// task is one of history's tasks, for a workflow of its own, in one of the queues.
 	task struct {
 		wf               int64
 		shard            int
+		queue            *taskQueue
 		arrived, queued  time.Time
 		attempts, denied int
 		reload           bool
@@ -120,6 +128,8 @@ type (
 	// and how long they took from arrival to completion.
 	TaskStats struct {
 		Arrived, Completed, Attempts, Failed int
+		// Throttled counts the submissions the scheduler's rate limiter refused.
+		Throttled int
 		// The reload's tasks, and when the last of them completed, after the host started.
 		ReloadArrived, ReloadCompleted int
 		ReloadCleared                  time.Duration
@@ -129,8 +139,20 @@ type (
 	}
 )
 
-func newHistory(l *loop, cfg History, c *client, h *health) *history {
-	return &history{l: l, cfg: cfg, client: c, health: h, shards: make([]shard, cfg.Shards), cached: make(map[int64]bool)}
+func newHistory(l *loop, cfg History, c *client, h *health, seed uint64, name string) *history {
+	hs := &history{
+		l:         l,
+		cfg:       cfg,
+		client:    c,
+		health:    h,
+		recording: func() bool { return false },
+		shards:    make([]shard, cfg.Shards),
+		cache:     newWorkflowCache(cfg.CacheMaxBytes, cfg.CacheEntryBytes),
+	}
+	for _, queue := range queueNames {
+		hs.queues = append(hs.queues, newTaskQueue(hs, queue, seed, name))
+	}
+	return hs
 }
 
 // arrive adds a task.
@@ -140,24 +162,39 @@ func (h *history) arrive(t *task) {
 	if t.reload {
 		h.stats.ReloadArrived++
 	}
-	h.submit(t)
+	t.queue.load(t)
 }
 
+// submit gives a task to the scheduler, as the queue reader does. A task the scheduler
+// refuses waits in the rescheduler for its executable's reschedule backoff,
+// UnavailableBackoff at its attempt.
 func (h *history) submit(t *task) {
-	t.queued = h.l.now
-	if h.busy < h.cfg.Workers {
-		h.busy++
-		h.l.soon(func() { h.run(t) })
-		return
+	if !h.trySubmit(t) {
+		t.queue.rescheduler.add(t, h.l.now.Add(h.cfg.UnavailableBackoff.delay(t.attempts)))
 	}
-	h.queue.push(t)
+}
+
+// trySubmit is the scheduler's TrySubmit: the rate limiter refuses the task, or one of
+// its queue's workers runs it once one is free.
+func (h *history) trySubmit(t *task) bool {
+	if h.scheduler != nil && !h.scheduler.allow(h.l.now) {
+		h.stats.Throttled++
+		return false
+	}
+	t.queued = h.l.now
+	t.queue.add(t)
+	return true
 }
 
 // run is a task attempt: read the workflow's state if it isn't cached, then write, within
 // the attempt's deadline.
 func (h *history) run(t *task) {
 	now := h.l.now
-	h.health.recordSchedule(now, now.Sub(t.queued))
+	wait := now.Sub(t.queued)
+	h.health.recordSchedule(now, wait)
+	if h.recording() {
+		t.queue.delays.record(float64(wait)/float64(time.Millisecond), now)
+	}
 	t.attempts++
 	h.stats.Attempts++
 	h.execute(t.wf, t.shard, now.Add(h.cfg.Deadline), func(f failure) {
@@ -166,7 +203,7 @@ func (h *history) run(t *task) {
 		} else {
 			h.fail(t, f)
 		}
-		h.free()
+		t.queue.free()
 	})
 }
 
@@ -176,12 +213,12 @@ func (h *history) execute(wf int64, shard int, deadline time.Time, done func(fai
 	write := func() {
 		h.write(wf, shard, deadline, func(f failure) {
 			if f != ok {
-				delete(h.cached, wf)
+				h.cache.remove(wf)
 			}
 			done(f)
 		})
 	}
-	if h.cached[wf] {
+	if h.cache.get(wf) {
 		write()
 		return
 	}
@@ -190,7 +227,7 @@ func (h *history) execute(wf int64, shard int, deadline time.Time, done func(fai
 			done(f)
 			return
 		}
-		h.cached[wf] = true
+		h.cache.put(wf)
 		write()
 	})
 }
@@ -210,6 +247,7 @@ func (h *history) write(wf int64, shard int, deadline time.Time, done func(failu
 
 func (h *history) complete(t *task) {
 	now := h.l.now
+	t.queue.unload(t.shard)
 	h.stats.Completed++
 	h.lat = append(h.lat, now.Sub(t.arrived))
 	if t.reload {
@@ -242,15 +280,6 @@ func (h *history) fail(t *task, f failure) {
 		return
 	}
 	h.l.after(delay, func() { h.submit(t) })
-}
-
-// free ends an attempt, and gives its worker the next task.
-func (h *history) free() {
-	if t, ok := h.queue.pop(); ok {
-		h.l.soon(func() { h.run(t) })
-		return
-	}
-	h.busy--
 }
 
 // lock takes a shard's write lock, first in, first out, or gives up at the deadline.
@@ -355,7 +384,7 @@ func (w *workers) start(wf *workflow) {
 			w.l.after(w.cfg.RetryDelay, func() { w.start(wf) })
 			return
 		}
-		w.history.cached[wf.id] = true
+		w.history.cache.put(wf.id)
 		w.dispatch(wf)
 	})
 }

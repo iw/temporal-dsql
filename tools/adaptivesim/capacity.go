@@ -109,7 +109,7 @@ func (c *capacityLimiter) step(now time.Time, p dynamicconfig.DynamicRateLimitin
 		c.start = static
 		return
 	}
-	c.plane.recordDecision(adaptive.Decision{
+	c.plane.report(adaptive.Decision{
 		Controller: capacity.Name,
 		Time:       now,
 		Mode:       mode,

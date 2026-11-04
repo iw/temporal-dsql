@@ -4,15 +4,15 @@
 runs the signal plane, the adaptive controllers and their actuators closed-loop on
 simulated time, over a coarse model of history, its workers, the DSQL plugin's pool and
 DSQL itself. It's written in Go so that it runs the real code where that matters: the
-persistence capacity controller (`common/adaptive/capacity`) and the pool gate's admission
-policy (`common/persistence/sql/sqlplugin/dsql/gate`). The service, its connections and its
-store are models, kept coarse, since the simulator's job is the whole loop.
+signal plane (`common/signals`), the adaptive controllers (`common/adaptive/...`) and the
+pool gate's admission policy (`common/persistence/sql/sqlplugin/dsql/gate`). The service,
+its connections and its store are models, kept coarse, since the simulator's job is the
+whole loop.
 
 [Offline replay](../../docs/dsql/adaptive-behaviour.md#offline-replay) runs the laws
 open-loop on recorded signals, so a proposal doesn't change the signals that follow.
 `adaptivesim` closes that loop: the controller's decisions change the simulated limits, and
-the simulated service answers. This first cut wires the capacity controller; the
-[others](#adding-controllers) join the same way.
+the simulated service answers. The [controllers](#controllers) say which are wired.
 
 ## Run
 
@@ -30,15 +30,21 @@ go run ./cmd/tools/adaptivereplay /tmp/adaptivesim/*.jsonl
 - `-seed n` runs with another random seed. A run with the same scenario and seed gives
   the same result.
 - `-capacity mode` runs the capacity controller `disabled`, in `shadow` or `enabled`, and
-  `-queued-grace duration` sets its `QueuedGrace`.
+  `-queued-grace duration` sets its `QueuedGrace`. `-task-rate mode`, `-workers mode` and
+  `-memory mode` do the same for the task scheduler rate, the worker counts and the
+  memory budget.
 - `-trace dir` writes each host's signal plane trace to the directory, in the signal
   plane's format and with its file names, such as `history-history-1-1.jsonl`, for
   `tools/adaptivereplay`. Write traces outside the repository.
 
 The report gives, for each host, its tasks and how many completed, its persistence calls,
-the gate's refusals and the queries cut off at their deadlines, its pool's connections and
-acquires, and its capacity controller's steps. Then come the cluster's connection attempts:
-the pools' dials and pgx's cancel requests, the connections opened, and DSQL's rejections.
+the gate's refusals and the queries cut off at their deadlines, and its pool's connections
+and acquires. For a host whose heap the model counts, it gives the heap's peak, how long the
+heap pressed on its limit and passed it, the tasks the queues held and left in the store,
+and the workflow cache's hits and size. Then come the cluster's connection attempts: the pools' dials and pgx's
+cancel requests, the connections opened, and DSQL's rejections. Last come the controllers'
+decisions, a row for each controller on each host: its mode, how many decisions it made,
+its first change, the range of its proposals, and its reasons.
 
 `go test ./tools/adaptivesim` runs the scenarios below as seeded tests, in a couple of
 seconds, with no AWS.
@@ -52,6 +58,10 @@ seconds, with no AWS.
 | `startup` | `grace`, `no-grace` | Finding 1: four hosts of 64 connections start within 10 s, and each reloads 100 tasks as it takes its shards, with the capacity controller enabled. `no-grace` sets `QueuedGrace` to 0, as the appreciation ran |
 | `fleet-start` | | `tools/poolsim`'s `pgxpool-fleet-start.yaml`, for the [cross-check](#cross-check-with-poolsim) |
 | `workflows` | | Two hosts run 10 workflows/s each through 32 pollers a host, on the plugin's current path |
+| `slow-store` | `cap`, `cap-tsr`, `cap-wrk` | The appreciation's slow store: one host of 48 connections, whose static persistence rate is 300/s, runs 80 tasks/s and 10 workflows/s for 240 s, and the store's replies come 40 ms later from 60 s to 150 s. `cap` enables the capacity controller with the task scheduler rate in shadow; `cap-tsr` enables both; `cap-wrk` enables the capacity controller and the worker counts |
+| `surge` | `tsr`, `shadow` | One host whose static persistence rate is 100/s runs 50 tasks/s, 120/s from 60 s to 120 s, and 5 workflows/s, with the capacity controller in shadow and the task scheduler rate enabled or in shadow |
+| `busy-queue` | `wrk`, `shadow` | One host whose queues have 8 workers each, so that the workers bind first, runs 60 tasks/s for 90 s, then 5 tasks/s until 540 s, with the worker counts enabled or in shadow |
+| `memory-pressure` | `mem`, `shadow` | The appreciation's 512 MiB `GOMEMLIMIT`, with history's cache at its 1000 MiB default and each shard's queues limited to 10,000 pending tasks, on one host in the cluster's region: 5 workflows/s and 20 tasks/s for 600 s, and from 120 s, 224 MiB more heap for 120 s while 60,000 tasks reload, with the memory budget enabled or in shadow |
 
 The short pool's variants are the rig's: `base` is the plugin's path before the gate, with
 the common store reading a workflow in nine queries; `gate` adds the gate; `pipeline` reads
@@ -80,7 +90,8 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
 - **The gate.** The plugin's own `gate.Policy`, on simulated time. A caller waits for its
   grant or for its give-up time.
 - **Statements.** Each round trip takes the round trip plus the store's time, spread by
-  10% either way. A statement still running at its deadline is cut off: pgx closes the
+  10% either way. A slow store holds back each reply by a further delay, as the
+  appreciation's proxy did. A statement still running at its deadline is cut off: pgx closes the
   connection and dials a cancel request on a connection of its own (`pgconn.asyncClose`),
   which the plugin's pacing doesn't see. The cancel request and the pool's replacement
   connection both count against DSQL's admission.
@@ -107,16 +118,47 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
   `StepInterval` as `capacityAwareRateLimiter` steps it, with the envelope that dynamic
   config gives it. Enabled, its rate sets the limiter's rate and burst. Its decisions carry
   the detail the real limiter records.
-- **History.** A scheduler of 512 task workers; 16 shards, each writing one task at a time
-  (`history.shardIOConcurrency` = 1); a 3 s deadline for each attempt, covering its read
-  and its write; a cache of the workflows it has read, which a failed attempt clears. A
-  task that fails with `Unavailable` is resubmitted at once until its tenth attempt, then
-  after 1 s × 1.1ⁿ; one that fails with `ResourceExhausted` is resubmitted at once the
-  first time, then after 3 s × 1.5ⁿ.
+- **History.** Two task queues, transfer and timer, each with a scheduler of 512 workers,
+  which take its tasks first in, first out; the model's tasks are transfer tasks. 16
+  shards, each writing one task at a time (`history.shardIOConcurrency` = 1); a 3 s
+  deadline for each attempt, covering its read and its write; a cache of the workflows'
+  state, which a failed attempt clears. A task that fails with `Unavailable` is
+  resubmitted at once until its tenth attempt, then after 1 s × 1.1ⁿ; one that fails with
+  `ResourceExhausted` is resubmitted at once the first time, then after 3 s × 1.5ⁿ.
+- **The workflow cache.** Least recently used out. Where a scenario limits it by size, as
+  `history.cacheSizeBasedLimit` does, each workflow's state takes the same size, and the
+  cache evicts past its limit; otherwise it keeps every workflow.
+- **The queues' readers.** Where a scenario sets a pending-task limit, each shard's queue
+  loads the tasks the shard writes while it holds fewer than the limit, and leaves the rest
+  in the store, first in, first out, until its tasks complete. A task stays loaded from
+  its load to its completion, through its retries.
+- **The heap**, as the runtime reports it against `GOMEMLIMIT`: the rest of the process, the
+  workflow cache and the loaded tasks, each a fixed size, and a scenario's extra heap for a
+  while. The heap goal is twice the live heap, at the default `GOGC`, held under the
+  limit, so the heap's pressure on the limit is the live heap's share of the goal.
+- **The scheduler's rate limiter**, where a scenario turns it on, as
+  `history.taskSchedulerEnableRateLimiter` does: its own limit is the static persistence
+  rate, with a burst of twice that, and the task scheduler rate holds tasks to its own
+  rate on top while it's enabled. A task the limiter refuses waits in its queue's
+  rescheduler for 1 s × 1.1ⁿ, then goes back to the scheduler in time order; when the
+  scheduler refuses it again, the rescheduler tries again 1–3 s later.
 - **Workers.** A fixed number of pollers, 32 a host. A workflow is a start, then a few
   tasks, each held by a poller until history has written the worker's response.
-- **The signal plane.** A snapshot of persistence health every second, over the newest 3
-  windows, and each controller decision, written as the signal plane writes its trace.
+- **The signal plane.** The real `signals.Plane`, ticked every second on simulated time.
+  It reads the host's signals through a `signals.Source`, takes a snapshot over the newest
+  3 windows, steps the controllers that `signals.Drive` subscribes to it, and writes its
+  trace with the service's trace writer. Every controller's decisions go through it.
+- **The task scheduler rate.** The real controller, driven by `taskrate.DriveRate` as the
+  service drives it, steps on each snapshot: the capacity controller's rate while that's
+  enabled and recent, otherwise the static rate, times attempts per call.
+- **The worker counts.** The real controllers, one a queue, from
+  `workers.NewHistoryQueues` as history wires them. Each sizes its queue's pool from the
+  queue's p90 delay, which the plane reads over 1 s windows as its queue recorders keep
+  it, with exact quantiles. A pool that shrinks stops each worker over the new count once
+  its task ends.
+- **The memory budget.** The real controllers, as history wires them: `memory.DriveCache`
+  resizes the workflow cache, and `workers.HistoryQueues.PendingTaskLimits` scales each
+  queue's pending-task limit by one multiplier, from the heap's signals in each snapshot.
 
 ## What it doesn't model
 
@@ -130,8 +172,13 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
 - **Connections in detail.** No TLS or IAM, and no ping failures. A connection DSQL cuts
   off while idle leaves the pool at once, rather than at its next ping. poolsim models more
   of pgxpool and of deployments.
-- **The host.** Snapshots carry no RPC, runtime, memory or per-queue signals.
-- **The other controllers.** This first cut wires only the capacity controller.
+- **The host.** Snapshots carry no RPC signals, and their runtime and memory signals are
+  the heap model's: the heap goal moves at once with the live heap, collections cost
+  nothing, and a heap over its limit slows nothing. There's no cgroup limit.
+- **The rest of history's memory.** No events cache, no cache TTL, and no mitigator that
+  unloads tasks past a queue's critical count: a smaller limit stops the reader loading,
+  and the tasks already loaded stay.
+- **The other controllers.** See [Controllers](#controllers).
 
 ## Calibration against the local rig
 
@@ -210,31 +257,72 @@ own burst of 1,000 admits both.
 
 - **`tools/adaptivereplay`** replays recorded traces through the laws, open-loop, for what
   other parameters would have proposed on the same signals. `adaptivesim` writes the same
-  trace format, so its runs replay too; its tests check that every capacity step replays to
-  the proposal and reason it recorded.
+  trace format, so its runs replay too; its tests check that every controller's steps
+  replay to the proposals and reasons they recorded.
 - **`tools/poolsim`** stays dedicated to connection management: pgxpool, DSQL's admission
   and pacing strategies at fleet scale, deployments and outages. `adaptivesim` keeps a
   smaller connection model of its own, checked against poolsim's above.
 - **iw/tempdes** simulates upstream Temporal 1.31.0, in Rust, and stays free of DSQL and of
   the controllers.
 
-## Adding controllers
+## Controllers
 
-Each controller joins as an actuator on the simulated service: it reads the plane's
-snapshots and sets one of the model's knobs.
+Each controller is an actuator on the simulated service: it reads the plane's snapshots, or
+for capacity the calls, and sets one of the model's knobs.
 
-| Controller | Package | What it would drive in the model | Status |
+| Controller | Package | What it drives in the model | Status |
 |---|---|---|---|
 | Persistence capacity | `common/adaptive/capacity` | The persistence rate limiter's rate | Wired |
-| Task scheduler rate | `common/adaptive/taskrate` | A rate on history's task attempts | Not yet |
-| Worker counts | `common/adaptive/workers` | `History.Workers`, the scheduler's workers | Not yet |
-| Memory budget | `common/adaptive/memory` | The workflow cache's size and the queues' pending-task limits; the model's cache has no limit yet | Not yet |
+| Task scheduler rate | `common/adaptive/taskrate` | The scheduler rate limiter's rate on history's task attempts | Wired |
+| Worker counts | `common/adaptive/workers` | Each queue's scheduler workers, from `History.Workers` | Wired |
+| Memory budget | `common/adaptive/memory` | The workflow cache's size limit, from `History.CacheMaxBytes`, and each shard's queues' pending-task limits, from `History.MaxPendingTasks` | Wired |
 | Partition scaler | `common/adaptive/partitions` | Matching's partitions; needs a model of matching | Not yet |
 | Fair share | `common/adaptive/fairshare` | Frontends' namespace shares; needs frontends | Not yet |
 
 The capacity controller steps from the calls, as its limiter does. The others are driven by
-`signals.Drive`, which steps a `signals.Controller` on each of the plane's snapshots. In
-`adaptivesim`, such a controller steps on the snapshot `plane.tick` takes and sets its knob,
-and its decisions go to `plane.recordDecision`, so they reach the trace. The snapshot has to
-carry what the law reads first: the scheduler's p90 wait is there, but the per-queue delays,
-the runtime and the memory signals aren't yet.
+`signals.Drive` or `signals.DriveFunc`, which step a `signals.Controller` on each of the
+plane's snapshots, as they do in the service, and report each decision to the plane, which
+writes it to the trace. A host's dynamic config is a static collection of the scenario's
+controller settings.
+
+## What the runs show
+
+- **Through a surge, the task scheduler rate keeps the tasks in the scheduler.** In
+  `surge`, with the rate enabled, the persistence rate limiter refused 20 calls, the
+  workflows' p99 was 982 ms, and the tasks made 16,216 attempts. In shadow, it refused
+  7,234, the workflows' p99 was 1m42s, and the tasks made 22,094 attempts. The backlog
+  cleared in both.
+- **The task scheduler rate follows each capacity cut, and with both enabled the cut
+  stays.** In `slow-store`, the capacity controller cuts from 300/s to about 80/s while the
+  store is slow, and the task scheduler rate follows within a few seconds. With the task rate in
+  shadow (`cap`), tasks fail on the persistence limit until the store recovers, the limit
+  binds, and capacity probes back up: every task completes. With both enabled
+  (`cap-tsr`), the task scheduler rate keeps persistence's calls at its `Headroom`, 90% of
+  capacity's rate, so the persistence limit doesn't bind once the store recovers. Capacity
+  holds its cut as `idle` for the rest of the load, the task rate stays at about 42/s
+  against 80 tasks arriving a second, and 6,648 tasks are still waiting when the load
+  ends. A rate that isn't binding says nothing about the store, which is why `idle` holds;
+  here the task rate is what keeps it from binding. In the appreciation, the task rate
+  stayed far above the tasks' rate except in the short pool, so this didn't show there.
+- **A busy queue's worker count grows, then shrinks.** In `busy-queue`, the transfer
+  queue's count grows from 8 to 16 by 11 s, which serves the 60 tasks a second: the tasks'
+  p99 was 1.8 s, against 55 s with the count in shadow. At 16 workers its tasks wait
+  under a quarter of the target, which counts as idle, so it shrinks a worker every 30 s
+  from 48 s on, while still busy, and reaches 4 at 6m18s. The idle timer queue reaches 4
+  sooner.
+- **The memory budget holds the heap under its limit, and gives way to the rest of the
+  process.** In `memory-pressure`, the budget takes the cache from 1000 MiB to its share of
+  the limit, 153.6 MiB or 0.15 of its setting as in the appreciation, and the pending tasks
+  to 0.164 of their limits, a quarter at a time in the first 7 s. At 2:00 the extra heap
+  and the reload take the live heap to 0.93 of its goal, so both shrink: the cache to
+  115.2 MiB, and the pending tasks to their floor of 0.139, where each queue's critical
+  count is 1,250. At 3:00 the cache shrinks again, to 86.4 MiB. Once the extra heap goes at
+  4:00, both grow back 10% a minute, the pending tasks to their budget by 5:00 and the
+  cache by 10:00. The heap peaked at 479 MiB, and the queues held at most 22,224 tasks. In
+  shadow, the cache grows to its 1000 MiB setting: the heap peaked at 1,414 MiB and passed
+  the limit for 8m30s, and the queues held 53,633 tasks. Both cleared the reload at 3m32s
+  and completed every task, and the smaller cache made 0.8% more reads.
+- **The worker counts back off while persistence does.** In `slow-store`'s `cap-wrk`, the
+  counts shrink from 512 every 30 s until the store slows at 60 s, then hold as `backoff`
+  after each capacity cut and while calls are throttled or rejected, until 3m39s. They
+  shrink again from 4m9s. At 512 workers the pools never bind, as in the appreciation.

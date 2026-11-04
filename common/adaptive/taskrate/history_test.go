@@ -7,7 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/capacity"
+	"go.temporal.io/server/common/clock"
+	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/headers"
+	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/quotas"
 	"go.temporal.io/server/common/signals"
@@ -58,6 +62,42 @@ func TestControllerStepsOnThePersistenceSnapshot(t *testing.T) {
 		MaxStepFrac: 0.25,
 	}, detail)
 }
+
+func TestDriveRateStepsOnThePlane(t *testing.T) {
+	settings := DefaultSettings
+	settings.Mode = adaptive.ModeNameEnabled
+	settings.MaxStepFrac = 0
+	collection := dynamicconfig.NewCollection(dynamicconfig.StaticClient{Config.Key(): settings}, log.NewNoopLogger())
+	timeSource := clock.NewEventTimeSource().Update(time.Unix(1_700_000_000, 0))
+	source := &snapshotSource{Snapshot: signals.Snapshot{
+		Persistence: persistence.HealthSnapshot{Samples: 900, Rejected: 100, ScheduleSamples: 200},
+	}}
+	plane := signals.NewPlane(
+		func() signals.Settings { return signals.Settings{Enabled: true, Interval: time.Second, Windows: 3} },
+		source, nil, timeSource, signals.Header{}, log.NewNoopLogger(),
+	)
+	defer plane.Stop()
+	driven := DriveRate(plane, collection, func() float64 { return 9000 }, metrics.NoopMetricsHandler)
+	defer driven.Stop()
+
+	_, on := driven.Applying()
+	require.False(t, on, "the rate applies from the controller's first step")
+
+	plane.RecordDecision(adaptive.Decision{Controller: capacity.Name, Time: timeSource.Now(), Mode: adaptive.ModeOn, Applied: 2000})
+	plane.Tick(timeSource.Now())
+	rate, on := driven.Applying()
+	require.True(t, on)
+	require.InDelta(t, 360, rate, 1e-9, "2000 x 0.9 x 200/1000")
+}
+
+// snapshotSource is a host whose signals are a fixed snapshot.
+type snapshotSource struct {
+	signals.Snapshot
+}
+
+func (s *snapshotSource) Read(time.Time, int) signals.Snapshot { return s.Snapshot }
+
+func (s *snapshotSource) Idle() {}
 
 // fixedRate is a driven rate.
 type fixedRate struct {
