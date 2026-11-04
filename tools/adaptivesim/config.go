@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive/memory"
+	"go.temporal.io/server/common/adaptive/partitions"
 	"go.temporal.io/server/common/adaptive/taskrate"
 	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -29,6 +30,38 @@ type (
 		Load        Load
 		// Slow holds back each of the store's replies.
 		Slow Slow
+		// Matching, when it has pollers, runs the hosts' workflows through matching.
+		Matching Matching
+	}
+
+	// Matching is the matching service, on one host of its own, and the SDK worker that
+	// polls it. With it, the workflow tasks and activities of each workflow the hosts start
+	// go through matching's task queues to the worker's pollers, and history records each
+	// as started and writes each response.
+	Matching struct {
+		// Partitions is each task queue's partitions while the partition scaler doesn't
+		// size them, matching.numTaskqueueWritePartitions and
+		// matching.numTaskqueueReadPartitions; 0 leaves their default of 4.
+		Partitions int
+		// PartitionRate is the tasks a second each partition dispatches at most, standing
+		// for what its matching host can do; 0 sets no limit.
+		PartitionRate float64
+		// WorkflowPollers and ActivityPollers are the worker's pollers.
+		WorkflowPollers, ActivityPollers int
+		// Activities is how many activities each workflow runs after its first workflow
+		// task, each followed by a workflow task. Timer, when set, is a timer the workflow
+		// then sleeps on before its last workflow task.
+		Activities int
+		Timer      time.Duration
+		// Process is how long the worker takes over a workflow task before it responds,
+		// and Activity how long an activity runs.
+		Process, Activity time.Duration
+		// RetryDelay is how long a task that history couldn't record or whose response
+		// failed waits before it goes back to matching, standing in for its timeout.
+		RetryDelay time.Duration
+		// Scaler is the partition scaler's dynamic config, matching.partitionScalerController;
+		// zero leaves it disabled.
+		Scaler partitions.Settings
 	}
 
 	// Slow holds back each of the store's replies by Delay, from At for Duration after the
@@ -294,7 +327,7 @@ func (sc *Scenario) validate() error {
 	if sc.Signals.Window < 100*time.Millisecond || sc.Signals.Windows < 1 || sc.Signals.PlaneInterval < 0 {
 		errs = append(errs, errors.New("the signals need a Window of at least 100 ms, and Windows"))
 	}
-	errs = append(errs, sc.Host.validate(), sc.Load.validate(&sc.Host))
+	errs = append(errs, sc.Host.validate(), sc.Load.validate(&sc.Host, &sc.Matching))
 	return errors.Join(errs...)
 }
 
@@ -315,15 +348,23 @@ func (h *Host) validate() error {
 	return errors.Join(errs...)
 }
 
-func (ld *Load) validate(h *Host) error {
+func (ld *Load) validate(h *Host, m *Matching) error {
 	var errs []error
-	if len(ld.Workflows) > 0 && (h.Workers.Pollers < 1 || h.Workers.Steps < 1) {
-		errs = append(errs, errors.New("a workflow load needs Workers.Pollers and Workers.Steps"))
+	if len(ld.Workflows) > 0 && !m.on() && (h.Workers.Pollers < 1 || h.Workers.Steps < 1) {
+		errs = append(errs, errors.New("a workflow load needs Workers.Pollers and Workers.Steps, or Matching"))
+	}
+	if m.on() && m.Activities > 0 && m.ActivityPollers < 1 {
+		errs = append(errs, errors.New("matching needs ActivityPollers for its workflows' activities"))
 	}
 	if ld.Pool.Every > 0 && (ld.Pool.Burst < 1 || ld.Pool.MaxInUse < 1) {
 		errs = append(errs, errors.New("a pool load needs a Burst and MaxInUse"))
 	}
 	return errors.Join(errs...)
+}
+
+// on reports whether the workflows run through matching.
+func (m *Matching) on() bool {
+	return m.WorkflowPollers > 0
 }
 
 // holds reports whether the store's replies are held back at now.

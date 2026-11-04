@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/adaptive/partitions"
 )
 
 // epoch is when every run starts, so runs are reproducible to the nanosecond.
@@ -27,6 +28,9 @@ type (
 		dsql   *dsql
 		shared *tokenBucket
 		hosts  []*process
+		// matching and worker run the workflows through matching, when the scenario has it.
+		matching *matchingHost
+		worker   *worker
 	}
 
 	// Result is what a run did.
@@ -37,6 +41,8 @@ type (
 		Drain       time.Duration
 		Hosts       []HostResult
 		Connections ConnectionResult
+		// Matching is what the matching host did, when the workflows ran through it.
+		Matching *MatchingResult
 	}
 
 	// HostResult is what one history host did.
@@ -92,6 +98,11 @@ func Run(sc Scenario, opts Options) (*Result, error) {
 	if sc.Host.Pacing.Shared {
 		w.shared = newTokenBucket(sc.Host.Pacing.Rate, sc.Host.Pacing.Burst, epoch)
 	}
+	if sc.Matching.on() {
+		w.matching = newMatchingHost(w, sc.Hosts+1)
+		w.worker = newWorker(l, sc.Matching, w.matching)
+		w.matching.start()
+	}
 	starts := randoms(sc.Seed, "starts")
 	for i := range sc.Hosts {
 		p := &process{w: w, name: fmt.Sprintf("history-%d", i+1), pid: i + 1, seed: sc.Seed}
@@ -113,6 +124,9 @@ func (w *world) stop() {
 			p.plane.stop()
 		}
 	}
+	if w.matching != nil {
+		w.matching.plane.stop()
+	}
 }
 
 func (w *world) result() *Result {
@@ -128,6 +142,9 @@ func (w *world) result() *Result {
 		r.Connections.Total.add(c)
 	}
 	r.Connections.PeakOpen = w.dsql.peakOpen
+	if w.matching != nil {
+		r.Matching = w.matching.result()
+	}
 	return r
 }
 
@@ -161,7 +178,10 @@ func (ds Decisions) series() []decisionSeries {
 }
 
 // decisionKey is what a controller decides for, when it decides for several things.
-func decisionKey(adaptive.Decision) string {
+func decisionKey(d adaptive.Decision) string {
+	if detail, ok := d.Detail.(partitions.Detail); ok {
+		return detail.Namespace + "/" + detail.TaskQueue + "/" + detail.TaskQueueType
+	}
 	return ""
 }
 

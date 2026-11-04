@@ -19,6 +19,7 @@ func Report(w io.Writer, r *Result) error {
 	p.printf("Scenario %s, seed %d: %s of load, then %s to drain\n\n", r.Scenario, r.Seed, r.Duration, r.Drain)
 	p.hosts(r)
 	p.memory(r)
+	p.matching(r)
 	p.connections(r)
 	p.decisions(r)
 	return p.err
@@ -139,6 +140,26 @@ func mib(bytes int) string {
 	return fmt.Sprintf("%.1f MiB", float64(bytes)/(1<<20))
 }
 
+// matching is the task queues of the matching host, when the workflows ran through it.
+func (p *printer) matching(r *Result) {
+	if r.Matching == nil {
+		return
+	}
+	var rows [][]string
+	for _, q := range r.Matching.Queues {
+		if q.Added == 0 {
+			continue
+		}
+		rows = append(rows, []string{
+			q.Name, fmt.Sprint(q.Added), fmt.Sprint(q.Dispatched), fmt.Sprint(q.PeakBacklog), round(q.PeakWait).String(),
+			fmt.Sprintf("%d / %d", q.Read, q.Write), fmt.Sprint(q.MostRead),
+		})
+	}
+	if len(rows) > 0 {
+		p.table("Task queue\tAdded\tDispatched\tPeak backlog\tLongest wait\tRead / write partitions at end\tMost read partitions", rows)
+	}
+}
+
 func (p *printer) connections(r *Result) {
 	c := r.Connections
 	peakAttempts, peakOpens := 0, 0
@@ -158,6 +179,9 @@ func (p *printer) decisions(r *Result) {
 	var rows [][]string
 	for _, h := range r.Hosts {
 		rows = append(rows, decisionRows(h.Name, h.Started, h.Decisions)...)
+	}
+	if m := r.Matching; m != nil {
+		rows = append(rows, decisionRows(m.Name, 0, m.Decisions)...)
 	}
 	if len(rows) > 0 {
 		p.table("Host\tController\tMode\tDecisions\tFirst change, after start\tLowest proposed\tHighest proposed\tLast applied\tReasons", rows)

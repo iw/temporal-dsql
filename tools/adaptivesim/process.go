@@ -235,6 +235,10 @@ func (p *process) newTask(reload bool) {
 
 func (p *process) newWorkflow() {
 	wf, shard := p.id()
+	if p.w.worker != nil {
+		p.w.worker.start(&flow{id: wf, shard: shard, host: p})
+		return
+	}
 	p.workers.start(&workflow{id: wf, shard: shard})
 }
 

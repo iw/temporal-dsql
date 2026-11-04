@@ -13,6 +13,7 @@ import (
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/capacity"
 	"go.temporal.io/server/common/adaptive/memory"
+	"go.temporal.io/server/common/adaptive/partitions"
 	"go.temporal.io/server/common/adaptive/taskrate"
 	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/tools/adaptivereplay"
@@ -134,26 +135,46 @@ func TestTracesReplay(t *testing.T) {
 		{"surge", "tsr"},
 		{"busy-queue", "wrk"},
 		{"memory-pressure", "mem"},
+		{"partitions", "partitions"},
+		{"partitions", "pollers"},
 	} {
 		t.Run(run.scenario+"/"+run.variant, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			r := runScenario(t, run.scenario, run.variant, Options{TraceDir: dir})
-			for i, h := range r.Hosts {
-				path := filepath.Join(dir, fmt.Sprintf("%s-%s-%d.jsonl", historyService, h.Name, i+1))
+			for _, h := range tracedHosts(r) {
+				path := filepath.Join(dir, fmt.Sprintf("%s-%s-%d.jsonl", h.service, h.name, h.pid))
 				f, err := os.Open(path)
 				require.NoError(t, err)
 				traces, err := adaptivereplay.Read(filepath.Base(path), f)
 				require.NoError(t, f.Close())
 				require.NoError(t, err)
 				require.Len(t, traces, 1)
-				require.Equal(t, h.Name, traces[0].Header.Host)
+				require.Equal(t, h.name, traces[0].Header.Host)
 				require.Positive(t, traces[0].Ticks)
 
-				requireReplays(t, traces[0], h.Decisions)
+				requireReplays(t, traces[0], h.decisions)
 			}
 		})
 	}
+}
+
+// tracedHost is a host whose plane wrote a trace, and the decisions it recorded.
+type tracedHost struct {
+	service, name string
+	pid           int
+	decisions     Decisions
+}
+
+func tracedHosts(r *Result) []tracedHost {
+	var hosts []tracedHost
+	for i, h := range r.Hosts {
+		hosts = append(hosts, tracedHost{service: historyService, name: h.Name, pid: i + 1, decisions: h.Decisions})
+	}
+	if m := r.Matching; m != nil {
+		hosts = append(hosts, tracedHost{service: matchingService, name: m.Name, pid: m.PID, decisions: m.Decisions})
+	}
+	return hosts
 }
 
 // requireReplays checks that a trace replays every decision a host recorded, each to the
@@ -456,4 +477,117 @@ func TestTool(t *testing.T) {
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-task-rate", "on"}, &out), "task-rate mode")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-workers", "on"}, &out), "workers mode")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-memory", "on"}, &out), "memory mode")
+	require.ErrorContains(t, run([]string{"-scenario", "partitions", "-partitions", "on"}, &out), "partitions mode")
+	require.ErrorContains(t, run([]string{"-scenario", "startup", "-partitions", "enabled"}, &out), "through matching")
+}
+
+// partitionDecisions are the matching host's partition scaler decisions for the workflow
+// task queue, with their details.
+func partitionDecisions(t *testing.T, r *Result) ([]adaptive.Decision, []partitions.Detail) {
+	t.Helper()
+	require.NotNil(t, r.Matching)
+	var ds []adaptive.Decision
+	var details []partitions.Detail
+	for _, d := range r.Matching.Decisions.Of(partitions.Name) {
+		detail, ok := d.Detail.(partitions.Detail)
+		require.True(t, ok)
+		if detail.TaskQueueType == "Workflow" {
+			ds = append(ds, d)
+			details = append(details, detail)
+		}
+	}
+	require.NotEmpty(t, ds)
+	return ds, details
+}
+
+// firstTrial is the index of the first decision that starts a trial: one more partition
+// than the step saw, for the reason trial.
+func firstTrial(t *testing.T, ds []adaptive.Decision, details []partitions.Detail) int {
+	t.Helper()
+	for i, d := range ds {
+		if d.Reason == adaptive.Reason(partitions.ReasonTrial) && d.Proposed > float64(details[i].Signals.Partitions) {
+			return i
+		}
+	}
+	require.Fail(t, "no trial")
+	return -1
+}
+
+// A workflow task queue whose partitions each dispatch at most 15 tasks a second, while
+// 80 a second arrive: the scaler's trial adds a partition, dispatch rises with it, so the
+// trial measures each partition's capacity as 15 a second, and the partitions grow to
+// dispatch the add rate. In shadow the partitions stay at 4 and the backlog grows.
+func TestPartitionScalerKeepsATrialThatRaisesDispatch(t *testing.T) {
+	t.Parallel()
+	r := runScenario(t, "partitions", "partitions", Options{})
+	sc, err := Lookup("partitions", "partitions")
+	require.NoError(t, err)
+	settings := sc.Matching.Scaler
+	ds, details := partitionDecisions(t, r)
+
+	i := firstTrial(t, ds, details)
+	trial, at := ds[i], details[i].Signals
+	require.Equal(t, 4, at.Partitions)
+	require.InDelta(t, trial.Proposed, trial.Applied, 0)
+	require.GreaterOrEqual(t, at.AddRate, settings.MinRate)
+	require.Greater(t, at.AddRate, at.DispatchRate*(1+settings.BehindRatio))
+
+	learned := -1
+	for j := i + 1; j < len(ds); j++ {
+		require.NotEqual(t, adaptive.Reason(partitions.ReasonNoGain), ds[j].Reason)
+		if learned < 0 && ds[j].Reason == adaptive.Reason(partitions.ReasonLearned) {
+			learned = j
+		}
+	}
+	require.Positive(t, learned, "the trial raised dispatch")
+	require.GreaterOrEqual(t, ds[learned].Time.Sub(trial.Time), settings.TrialWindow)
+	require.InDelta(t, sc.Matching.PartitionRate, details[learned].Capacity, 0.01)
+	require.Greater(t, ds[learned].Applied, trial.Applied)
+
+	q := r.Matching.Queues[0]
+	require.GreaterOrEqual(t, q.Read, 6)
+	require.Equal(t, q.Added, q.Dispatched)
+	wf := r.Hosts[0].Workflows
+	require.Equal(t, wf.Started, wf.Completed)
+
+	shadow := runScenario(t, "partitions", "shadow", Options{})
+	ds, details = partitionDecisions(t, shadow)
+	firstTrial(t, ds, details) // proposed, not applied
+	for _, d := range ds {
+		require.InDelta(t, d.Static, d.Applied, 0)
+	}
+	require.Equal(t, 4, shadow.Matching.Queues[0].Read)
+	require.Less(t, shadow.Hosts[0].Workflows.Completed, wf.Completed)
+	require.Greater(t, shadow.Matching.Queues[0].PeakBacklog, q.PeakBacklog)
+}
+
+// The same add rate where 14 pollers hold dispatch back: the trial's partition raises
+// nothing, so the scaler undoes it once its window has passed, keeps the capacity it
+// started from, and runs no trial for NoGainHold.
+func TestPartitionScalerUndoesATrialThatDoesNot(t *testing.T) {
+	t.Parallel()
+	r := runScenario(t, "partitions", "pollers", Options{})
+	sc, err := Lookup("partitions", "pollers")
+	require.NoError(t, err)
+	settings := sc.Matching.Scaler
+	ds, details := partitionDecisions(t, r)
+
+	i := firstTrial(t, ds, details)
+	trial := ds[i]
+	require.InDelta(t, trial.Proposed, trial.Applied, 0)
+	undone := -1
+	for j := i + 1; j < len(ds); j++ {
+		require.NotEqual(t, adaptive.Reason(partitions.ReasonLearned), ds[j].Reason)
+		if undone < 0 && ds[j].Reason == adaptive.Reason(partitions.ReasonNoGain) {
+			undone = j
+		}
+	}
+	require.Positive(t, undone, "the trial was undone")
+	require.GreaterOrEqual(t, ds[undone].Time.Sub(trial.Time), settings.TrialWindow)
+	require.InDelta(t, float64(details[i].Signals.Partitions), ds[undone].Applied, 0)
+	for j := undone; j < len(ds); j++ {
+		require.InDelta(t, settings.InitialCapacity, details[j].Capacity, 0)
+		require.LessOrEqual(t, ds[j].Proposed, float64(details[j].Signals.Partitions), "no trial within NoGainHold")
+	}
+	require.Equal(t, 4, r.Matching.Queues[0].Read)
 }

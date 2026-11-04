@@ -7,6 +7,7 @@ import (
 
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/memory"
+	"go.temporal.io/server/common/adaptive/partitions"
 	"go.temporal.io/server/common/adaptive/taskrate"
 	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -28,7 +29,11 @@ type (
 		// For start-up: the capacity controller's QueuedGrace.
 		grace time.Duration
 		// The controllers' modes, where the scenario varies them.
-		capacity, taskRate, workers, memory string
+		capacity, taskRate, workers, memory, partitions string
+		// For the partition scaler: each partition's dispatch limit, and the worker's
+		// workflow pollers.
+		partitionRate float64
+		pollers       int
 	}
 )
 
@@ -111,6 +116,17 @@ var scenarios = []scenarioDef{
 			{name: "shadow", about: "the memory budget in shadow", memory: adaptive.ModeNameShadow},
 		},
 		build: memoryPressure,
+	},
+	{
+		name: "partitions",
+		about: "one host of 128 shards in the local rig: 80 workflows/s for 360 s, each a single workflow task, " +
+			"through a workflow task queue of 4 partitions",
+		variants: []variant{
+			{name: "partitions", about: "each partition dispatches at most 15 tasks/s, with 32 pollers; the partition scaler enabled", partitions: adaptive.ModeNameEnabled, partitionRate: 15, pollers: 32},
+			{name: "pollers", about: "no partition limit, with 14 pollers; the partition scaler enabled", partitions: adaptive.ModeNameEnabled, pollers: 14},
+			{name: "shadow", about: "each partition dispatches at most 15 tasks/s, with 32 pollers; the partition scaler in shadow", partitions: adaptive.ModeNameShadow, partitionRate: 15, pollers: 32},
+		},
+		build: partitionScaling,
 	},
 	{
 		name:     "fleet-start",
@@ -533,4 +549,41 @@ func describe() string {
 		}
 	}
 	return b.String()
+}
+
+// partitionScaling is a task queue whose add rate passes the 50 tasks a second the
+// partition scaler's trials need, which the appreciation never reached. Each workflow is a
+// single workflow task, so the workflow task queue's add rate is the start rate. Either
+// the partitions or the pollers hold dispatch back, and the scaler's trial shows which.
+func partitionScaling(v variant) Scenario {
+	host := Host{
+		Pool:     servicePool(64),
+		Gate:     true,
+		Read:     PipelinedRead,
+		Pacing:   localPacing(),
+		History:  historyModel(),
+		Capacity: capacityParams(adaptive.ModeNameShadow),
+	}
+	host.History.Shards = 128
+	scaler := partitions.DefaultSettings
+	scaler.Mode = v.partitions
+	return Scenario{
+		Name:     "partitions",
+		Seed:     1,
+		Duration: 360 * time.Second,
+		Drain:    60 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    1,
+		Host:     host,
+		Signals:  signalWindows(),
+		Load:     Load{Workflows: []Phase{{Duration: 360 * time.Second, Rate: 80}}},
+		Matching: Matching{
+			PartitionRate:   v.partitionRate,
+			WorkflowPollers: v.pollers,
+			Process:         10 * time.Millisecond,
+			RetryDelay:      10 * time.Second,
+			Scaler:          scaler,
+		},
+	}
 }

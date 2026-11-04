@@ -30,18 +30,22 @@ go run ./cmd/tools/adaptivereplay /tmp/adaptivesim/*.jsonl
 - `-seed n` runs with another random seed. A run with the same scenario and seed gives
   the same result.
 - `-capacity mode` runs the capacity controller `disabled`, in `shadow` or `enabled`, and
-  `-queued-grace duration` sets its `QueuedGrace`. `-task-rate mode`, `-workers mode` and
-  `-memory mode` do the same for the task scheduler rate, the worker counts and the
-  memory budget.
+  `-queued-grace duration` sets its `QueuedGrace`. `-task-rate mode`, `-workers mode`,
+  `-memory mode` and `-partitions mode` do the same for the task scheduler rate, the
+  worker counts, the memory budget and the partition scaler. The partition scaler needs a
+  scenario whose workflows run through matching.
 - `-trace dir` writes each host's signal plane trace to the directory, in the signal
-  plane's format and with its file names, such as `history-history-1-1.jsonl`, for
-  `tools/adaptivereplay`. Write traces outside the repository.
+  plane's format and with its file names, such as `history-history-1-1.jsonl` and
+  `matching-matching-1-2.jsonl`, for `tools/adaptivereplay`. Write traces outside the
+  repository.
 
 The report gives, for each host, its tasks and how many completed, its persistence calls,
 the gate's refusals and the queries cut off at their deadlines, and its pool's connections
 and acquires. For a host whose heap the model counts, it gives the heap's peak, how long the
 heap pressed on its limit and passed it, the tasks the queues held and left in the store,
-and the workflow cache's hits and size. Then come the cluster's connection attempts: the pools' dials and pgx's
+and the workflow cache's hits and size. Where the workflows run through matching, it gives
+each of matching's task queues: the tasks added and dispatched, the most waiting at once,
+the longest wait, and its partitions. Then come the cluster's connection attempts: the pools' dials and pgx's
 cancel requests, the connections opened, and DSQL's rejections. Last come the controllers'
 decisions, a row for each controller on each host: its mode, how many decisions it made,
 its first change, the range of its proposals, and its reasons.
@@ -61,6 +65,7 @@ seconds, with no AWS.
 | `slow-store` | `cap`, `cap-tsr`, `cap-wrk` | The appreciation's slow store: one host of 48 connections, whose static persistence rate is 300/s, runs 80 tasks/s and 10 workflows/s for 240 s, and the store's replies come 40 ms later from 60 s to 150 s. `cap` enables the capacity controller with the task scheduler rate in shadow; `cap-tsr` enables both; `cap-wrk` enables the capacity controller and the worker counts |
 | `surge` | `tsr`, `shadow` | One host whose static persistence rate is 100/s runs 50 tasks/s, 120/s from 60 s to 120 s, and 5 workflows/s, with the capacity controller in shadow and the task scheduler rate enabled or in shadow |
 | `busy-queue` | `wrk`, `shadow` | One host whose queues have 8 workers each, so that the workers bind first, runs 60 tasks/s for 90 s, then 5 tasks/s until 540 s, with the worker counts enabled or in shadow |
+| `partitions` | `partitions`, `pollers`, `shadow` | A workflow task queue whose add rate passes the 50 tasks/s the partition scaler's trials need, which the appreciation never reached: one host of 128 shards in the local rig starts 80 workflows/s for 360 s, each a single workflow task, through matching's 4 partitions. In `partitions`, each partition dispatches at most 15 tasks/s and 32 pollers wait; in `pollers`, the partitions have no limit and 14 pollers wait. The scaler is enabled, or in shadow in `shadow`, which is `partitions`' host |
 | `memory-pressure` | `mem`, `shadow` | The appreciation's 512 MiB `GOMEMLIMIT`, with history's cache at its 1000 MiB default and each shard's queues limited to 10,000 pending tasks, on one host in the cluster's region: 5 workflows/s and 20 tasks/s for 600 s, and from 120 s, 224 MiB more heap for 120 s while 60,000 tasks reload, with the memory budget enabled or in shadow |
 
 The short pool's variants are the rig's: `base` is the plugin's path before the gate, with
@@ -142,8 +147,29 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
   rate on top while it's enabled. A task the limiter refuses waits in its queue's
   rescheduler for 1 s × 1.1ⁿ, then goes back to the scheduler in time order; when the
   scheduler refuses it again, the rescheduler tries again 1–3 s later.
-- **Workers.** A fixed number of pollers, 32 a host. A workflow is a start, then a few
-  tasks, each held by a poller until history has written the worker's response.
+- **Workers.** Without matching, a fixed number of pollers, 32 a host. A workflow is a
+  start, then a few tasks, each held by a poller until history has written the worker's
+  response.
+- **Matching**, where a scenario runs the workflows through it: one host with a workflow and
+  an activity task queue. History adds each workflow task and activity with a transfer
+  task, which reads the workflow's state if it isn't cached and writes nothing; a
+  workflow's timer is a timer task that writes when it fires. Matching adds each task to a
+  write partition picked at random. Pollers wait on the task queue and take tasks from the
+  read partitions in turn; with `PartitionRate`, each partition dispatches at most that
+  many tasks a second. Each partition counts its tasks added and dispatched in matching's
+  task trackers, 5 s buckets over 30 s.
+- **The SDK worker**, with matching: workflow and activity pollers, each held from a task's
+  dispatch until history has recorded it as started, one of history's writes. The worker
+  then processes the task and responds, which history writes too. A workflow is a start,
+  a workflow task, then for each of its activities the activity and a workflow task, then,
+  with a timer, the timer and a last workflow task. With one activity and a 1 s timer, as
+  the appreciation's workflows ran, that's 10 writes.
+- **Matching's scale manager**, for each task queue, as `scaleManager` runs it with its
+  defaults: every 23 s, with 5% jitter, it describes the partitions when the scaler wants
+  their stats and calls the scaler; it applies a new target outside a 3 s cooldown,
+  with every partition dynamic config gave counted as having a backlog when managed
+  scaling starts; tasks go to `max(target, read − shrink)` partitions, and from 15 s after
+  the target changes, a partition above it that's drained stops being read.
 - **The signal plane.** The real `signals.Plane`, ticked every second on simulated time.
   It reads the host's signals through a `signals.Source`, takes a snapshot over the newest
   3 windows, steps the controllers that `signals.Drive` subscribes to it, and writes its
@@ -159,6 +185,13 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
 - **The memory budget.** The real controllers, as history wires them: `memory.DriveCache`
   resizes the workflow cache, and `workers.HistoryQueues.PendingTaskLimits` scales each
   queue's pending-task limit by one multiplier, from the heap's signals in each snapshot.
+- **The partition scaler.** The real `partitions.Controller` for each task queue, in a
+  mirror of matching's learned scaler, which is unexported: it steps on each describe's
+  stats with the settings the task queue's dynamic config gives, holds without stats or a
+  snapshot from matching's own plane, and reports each decision with the learned scaler's
+  detail. `matching.partitionScaler`, the simple scaler it falls back to, stays at its
+  default, disabled, so while the controller doesn't apply its target, dynamic config
+  sizes the partitions.
 
 ## What it doesn't model
 
@@ -168,7 +201,12 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
   controller is off or in shadow, it's the static rate; the existing per-priority health
   limiters aren't modeled. Freezing isn't simulated.
 - **The rest of the service.** Only history's execution store is modeled: no frontend,
-  matching, visibility or history events reads, and a workflow is a coarse chain of tasks.
+  visibility or history events reads, and a workflow is a coarse chain of tasks.
+- **Matching in detail.** No sticky queues, so every workflow task goes through the task
+  queue's partitions: a workflow adds three where the appreciation's added about one. No
+  forwarding between partitions, no backlog in the store, no task queue rate limits, and
+  the scale manager calls the scaler only on its interval, not also when a batch of
+  tasks has arrived.
 - **Connections in detail.** No TLS or IAM, and no ping failures. A connection DSQL cuts
   off while idle leaves the pool at once, rather than at its next ping. poolsim models more
   of pgxpool and of deployments.
@@ -276,14 +314,15 @@ for capacity the calls, and sets one of the model's knobs.
 | Task scheduler rate | `common/adaptive/taskrate` | The scheduler rate limiter's rate on history's task attempts | Wired |
 | Worker counts | `common/adaptive/workers` | Each queue's scheduler workers, from `History.Workers` | Wired |
 | Memory budget | `common/adaptive/memory` | The workflow cache's size limit, from `History.CacheMaxBytes`, and each shard's queues' pending-task limits, from `History.MaxPendingTasks` | Wired |
-| Partition scaler | `common/adaptive/partitions` | Matching's partitions; needs a model of matching | Not yet |
+| Partition scaler | `common/adaptive/partitions` | Each of matching's task queues' partitions, from `Matching.Partitions` | Wired |
 | Fair share | `common/adaptive/fairshare` | Frontends' namespace shares; needs frontends | Not yet |
 
 The capacity controller steps from the calls, as its limiter does. The others are driven by
 `signals.Drive` or `signals.DriveFunc`, which step a `signals.Controller` on each of the
 plane's snapshots, as they do in the service, and report each decision to the plane, which
-writes it to the trace. A host's dynamic config is a static collection of the scenario's
-controller settings.
+writes it to the trace. The partition scaler steps each time matching's scale manager
+describes a task queue's partitions, and reports to matching's plane. A host's dynamic
+config is a static collection of the scenario's controller settings.
 
 ## What the runs show
 
@@ -322,6 +361,18 @@ controller settings.
   shadow, the cache grows to its 1000 MiB setting: the heap peaked at 1,414 MiB and passed
   the limit for 8m30s, and the queues held 53,633 tasks. Both cleared the reload at 3m32s
   and completed every task, and the smaller cache made 0.8% more reads.
+- **The partition scaler keeps a trial that raises dispatch, and undoes one that
+  doesn't.** In `partitions`, 80 tasks a second arrive at a workflow task queue whose 4
+  partitions dispatch 60. The scaler adds a fifth as a trial at 1m30s, and dispatch rises
+  to 75 a second. At 3m49s, once its 2-minute window has passed, it keeps it: the rise
+  measures each partition's capacity as 15 a second, its limit. It then sizes the
+  partitions from the add rate and that capacity, 6 at once and 7 at 4m58s. The backlog
+  peaks at 2,501 tasks, and every workflow completes, with a p99 of 41 s. In shadow, the
+  partitions stay at 4, the backlog reaches 7,204, and 25,151 of the 28,800 workflows
+  complete. In `pollers`, 14 pollers dispatch about 57 a second however many partitions
+  there are. The trial at 1m30s raises nothing, so at 3m47s the scaler undoes it, keeps
+  the 1,000 a second it started from, and runs no trial for the rest of the run, within
+  its 10-minute hold.
 - **The worker counts back off while persistence does.** In `slow-store`'s `cap-wrk`, the
   counts shrink from 512 every 30 s until the store slows at 60 s, then hold as `backoff`
   after each capacity cut and while calls are throttled or rejected, until 3m39s. They

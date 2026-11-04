@@ -198,6 +198,15 @@ func (q *fifo[T]) push(v T) { q.items = append(q.items, v) }
 
 func (q *fifo[T]) len() int { return len(q.items) - q.head }
 
+// peek returns the oldest item, without taking it.
+func (q *fifo[T]) peek() (T, bool) {
+	var zero T
+	if q.head == len(q.items) {
+		return zero, false
+	}
+	return q.items[q.head], true
+}
+
 func (q *fifo[T]) pop() (T, bool) {
 	var zero T
 	if q.head == len(q.items) {
