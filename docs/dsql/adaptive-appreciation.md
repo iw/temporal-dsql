@@ -283,7 +283,7 @@ Outside the short pool, enabling the controllers, alone or together, changed no 
 ## What it doesn't cover
 
 - **The store's own limits.** From one laptop, history's writes to each shard reach their limit long before DSQL does. No call of history's was throttled or saw a refused connection, so the cuts for throttled facts still have no live evidence.
-- **Load a laptop can't reach.** That's the last part of the appreciation, in a discrete-event simulator. [`tools/adaptivesim`](adaptive-behaviour.md#closed-loop-simulation) runs the controllers closed-loop on a coarse model of history and its store; its first cut wires the capacity controller.
+- **Load a laptop can't reach.** That's the last part of the appreciation, in a discrete-event simulator. [`tools/adaptivesim`](adaptive-behaviour.md#closed-loop-simulation) runs the controllers closed-loop on a coarse model of history and its store. So far it runs four of the six: persistence capacity, the task scheduler rate, the worker counts and the memory budget.
 - **One run per config.** Each config ran once, so a difference smaller than the one between a scenario's `shadow` and `shadow2` runs is noise.
 - **Disabled.** Outside the baseline, `shadow` stood in for disabled.
 - **One machine.** The four processes shared one laptop's CPU and memory, and one network path to the cluster.

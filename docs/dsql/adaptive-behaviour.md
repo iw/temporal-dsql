@@ -420,13 +420,13 @@ Proposals match within a relative 1e-9. A law built where the compiler fuses mul
 
 ## Closed-loop simulation
 
-`tools/adaptivesim` closes the loop that replay leaves open. It's a discrete-event simulator of history on its DSQL store, kept coarse: the plugin's pool, gate and connection pacing, DSQL's connection admission and limits, history's task scheduler and its writes to each shard, and the workers' pollers. On that model it runs the signal plane and the controllers on simulated time, so a controller's decisions change the limits the simulated service runs under, and the signals that follow. The capacity controller and the gate's admission policy are the real code. The first cut wires only the capacity controller; the others join as actuators on the same model.
+`tools/adaptivesim` closes the loop that replay leaves open. It's a discrete-event simulator of history on its DSQL store, kept coarse: the plugin's pool, gate and connection pacing, DSQL's connection admission and limits, history's task queues, their schedulers and its writes to each shard, its workflow cache and heap, and the workers' pollers. On that model it runs the signal plane and the controllers on simulated time, so a controller's decisions change the limits the simulated service runs under, and the signals that follow. The signal plane, the controllers and the gate's admission policy are the real code. It runs the persistence capacity controller, the task scheduler rate, the worker counts and the memory budget, each disabled, in shadow or enabled. The partition scaler and fair share need models of matching and of the frontends, which it doesn't have yet.
 
 ```bash
 go run ./cmd/tools/adaptivesim -scenario startup -variant no-grace -trace /tmp/adaptivesim
 ```
 
-Its scenarios reproduce the appreciation's [short pool](adaptive-appreciation.md#short-pool) and start-up findings as seeded tests that run in seconds, and its traces replay through `tools/adaptivereplay`. [The tool's README](../../tools/adaptivesim/README.md) describes what it models and what it leaves out, its calibration against the short pool's local rig, and a cross-check with `tools/poolsim`.
+Its scenarios reproduce the appreciation's [short pool](adaptive-appreciation.md#short-pool) and start-up findings, and show each controller it runs act in the loop and recover, as seeded tests that run in seconds. Its traces replay through `tools/adaptivereplay`. [The tool's README](../../tools/adaptivesim/README.md) describes what it models and what it leaves out, its calibration against the short pool's local rig, and a cross-check with `tools/poolsim`.
 
 ## What stays in dynamic config
 
