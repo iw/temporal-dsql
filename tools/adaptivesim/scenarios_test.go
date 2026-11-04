@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/capacity"
+	"go.temporal.io/server/common/adaptive/taskrate"
 	"go.temporal.io/server/tools/adaptivereplay"
 )
 
@@ -121,6 +122,8 @@ func TestTracesReplay(t *testing.T) {
 	for _, run := range []struct{ scenario, variant string }{
 		{"startup", "no-grace"},
 		{"short-pool-overload", "pipeline-gate"},
+		{"slow-store", "cap-tsr"},
+		{"surge", "tsr"},
 	} {
 		dir := t.TempDir()
 		r := runScenario(t, run.scenario, run.variant, Options{TraceDir: dir})
@@ -153,6 +156,79 @@ func requireReplays(t *testing.T, trace *adaptivereplay.Trace, decisions Decisio
 		require.Equal(t, len(series.Steps), series.Matched(), "%s %s %s", trace.Header.Host, series.Controller, series.Key)
 	}
 	require.Equal(t, len(decisions), steps, trace.Header.Host)
+}
+
+// The task scheduler rate steps on the capacity controller's rate each second, as the
+// appreciation found, unsmoothed: each coupled step reads the rate of capacity's latest
+// decision, and the task rate falls within a few steps of capacity's first cut.
+func TestTaskRateFollowsCapacity(t *testing.T) {
+	for _, variant := range []string{"cap", "cap-tsr"} {
+		r := runScenario(t, "slow-store", variant, Options{})
+		h := r.Hosts[0]
+		rates := h.Decisions.Of(taskrate.Name)
+		require.NotEmpty(t, rates)
+
+		// The host's decisions are in the order the plane recorded them, so the latest
+		// capacity decision before a task rate step is the one its snapshot carried.
+		var latest *adaptive.Decision
+		for i, d := range h.Decisions {
+			if d.Controller == capacity.Name {
+				latest = &h.Decisions[i]
+				continue
+			}
+			if d.Controller != taskrate.Name {
+				continue
+			}
+			require.GreaterOrEqual(t, d.Proposed, 0.02*d.Static, variant)
+			require.LessOrEqual(t, d.Proposed, d.Static, variant)
+			if d.Reason != adaptive.Reason(taskrate.ReasonCoupled) {
+				continue
+			}
+			detail := d.Detail.(taskrate.Detail)
+			require.NotNil(t, latest)
+			require.InDelta(t, latest.Applied, detail.Signals.PersistenceRate, 1e-9, "%s at %s", variant, d.Time)
+		}
+		cut := firstCut(h)
+		require.NotNil(t, cut, variant)
+		before := proposedAt(rates, cut.Time)
+		after := proposedAt(rates, cut.Time.Add(3*time.Second))
+		require.Less(t, after, before, "%s: the task rate falls within 3 s of the cut at %s", variant, cut.Time)
+	}
+}
+
+// proposedAt is the proposal of the latest decision at or before at.
+func proposedAt(ds Decisions, at time.Time) float64 {
+	proposed := ds[0].Proposed
+	for _, d := range ds {
+		if d.Time.After(at) {
+			break
+		}
+		proposed = d.Proposed
+	}
+	return proposed
+}
+
+// Through a surge past the static persistence rate, the task scheduler rate holds the
+// tasks over its rate in the scheduler: the persistence rate limiter refuses almost
+// nothing, the workflows' calls keep their share, and the backlog clears.
+func TestTaskRateHoldsTasksInTheScheduler(t *testing.T) {
+	enabled := runScenario(t, "surge", "tsr", Options{})
+	shadow := runScenario(t, "surge", "shadow", Options{})
+	held, unheld := enabled.Hosts[0], shadow.Hosts[0]
+
+	for _, h := range []HostResult{held, unheld} {
+		require.Equal(t, h.Tasks.Arrived, h.Tasks.Completed, "the backlog clears")
+		for _, d := range h.Decisions.Of(taskrate.Name) {
+			require.GreaterOrEqual(t, d.Proposed, 0.02*d.Static)
+			require.LessOrEqual(t, d.Proposed, d.Static)
+		}
+	}
+	require.Positive(t, held.Tasks.Throttled)
+	limited := func(h HostResult) int { return h.Reads.Limited + h.Writes.Limited }
+	require.Less(t, limited(held)*20, limited(unheld), "the persistence rate limiter refuses far fewer calls")
+	require.Less(t, held.Tasks.Attempts, unheld.Tasks.Attempts)
+	require.Less(t, held.Tasks.Backlog, unheld.Tasks.Backlog)
+	require.Less(t, held.Workflows.P99*10, unheld.Workflows.P99, "the workflows' calls keep their share")
 }
 
 func TestRunsAreDeterministic(t *testing.T) {
@@ -196,4 +272,5 @@ func TestTool(t *testing.T) {
 	require.ErrorContains(t, run([]string{"-scenario", "nonesuch"}, &out), "no scenario")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-variant", "nonesuch"}, &out), "no variant")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-capacity", "on"}, &out), "capacity mode")
+	require.ErrorContains(t, run([]string{"-scenario", "startup", "-task-rate", "on"}, &out), "task-rate mode")
 }

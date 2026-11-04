@@ -76,20 +76,23 @@ func (c *client) attempt(o op, deadline time.Time, n int, done func(failure)) {
 }
 
 type (
-	// history is a history host's task processing: a scheduler with Workers task workers,
-	// shards whose writes run one at a time, and a cache of the workflows whose state it
-	// has read.
+	// history is a history host's task processing: a scheduler with Workers task workers
+	// and, while it's on, a rate limiter; a rescheduler for the tasks the scheduler
+	// refuses; shards whose writes run one at a time; and a cache of the workflows whose
+	// state it has read.
 	history struct {
-		l      *loop
-		cfg    History
-		client *client
-		health *health
-		shards []shard
-		busy   int
-		queue  fifo[*task]
-		cached map[int64]bool
-		stats  TaskStats
-		lat    []time.Duration
+		l           *loop
+		cfg         History
+		client      *client
+		health      *health
+		scheduler   *schedulerLimiter // nil while the scheduler's rate limiter is off
+		rescheduler *rescheduler
+		shards      []shard
+		busy        int
+		queue       fifo[*task]
+		cached      map[int64]bool
+		stats       TaskStats
+		lat         []time.Duration
 		// started is when the host started, and reloadTotal how many tasks it reloads.
 		started     time.Time
 		reloadTotal int
@@ -120,6 +123,8 @@ type (
 	// and how long they took from arrival to completion.
 	TaskStats struct {
 		Arrived, Completed, Attempts, Failed int
+		// Throttled counts the submissions the scheduler's rate limiter refused.
+		Throttled int
 		// The reload's tasks, and when the last of them completed, after the host started.
 		ReloadArrived, ReloadCompleted int
 		ReloadCleared                  time.Duration
@@ -129,8 +134,10 @@ type (
 	}
 )
 
-func newHistory(l *loop, cfg History, c *client, h *health) *history {
-	return &history{l: l, cfg: cfg, client: c, health: h, shards: make([]shard, cfg.Shards), cached: make(map[int64]bool)}
+func newHistory(l *loop, cfg History, c *client, h *health, seed uint64, name string) *history {
+	hs := &history{l: l, cfg: cfg, client: c, health: h, shards: make([]shard, cfg.Shards), cached: make(map[int64]bool)}
+	hs.rescheduler = newRescheduler(l, seed, name, hs.trySubmit)
+	return hs
 }
 
 // arrive adds a task.
@@ -143,14 +150,30 @@ func (h *history) arrive(t *task) {
 	h.submit(t)
 }
 
+// submit gives a task to the scheduler, as the queue reader does. A task the scheduler
+// refuses waits in the rescheduler for its executable's reschedule backoff,
+// UnavailableBackoff at its attempt.
 func (h *history) submit(t *task) {
+	if !h.trySubmit(t) {
+		h.rescheduler.add(t, h.l.now.Add(h.cfg.UnavailableBackoff.delay(t.attempts)))
+	}
+}
+
+// trySubmit is the scheduler's TrySubmit: its rate limiter refuses the task, or a worker
+// runs it once one is free.
+func (h *history) trySubmit(t *task) bool {
+	if h.scheduler != nil && !h.scheduler.allow(h.l.now) {
+		h.stats.Throttled++
+		return false
+	}
 	t.queued = h.l.now
 	if h.busy < h.cfg.Workers {
 		h.busy++
 		h.l.soon(func() { h.run(t) })
-		return
+		return true
 	}
 	h.queue.push(t)
+	return true
 }
 
 // run is a task attempt: read the workflow's state if it isn't cached, then write, within

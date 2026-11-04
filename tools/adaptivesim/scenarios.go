@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/adaptive/taskrate"
 	"go.temporal.io/server/common/dynamicconfig"
 )
 
@@ -24,6 +25,9 @@ type (
 		gate bool
 		// For start-up: the capacity controller's QueuedGrace.
 		grace time.Duration
+		// The capacity and task scheduler rate controllers' modes, where the scenario
+		// varies them.
+		capacity, taskRate string
 	}
 )
 
@@ -66,6 +70,26 @@ var scenarios = []scenarioDef{
 			{name: "no-grace", about: "QueuedGrace 0, as before #107"},
 		},
 		build: startup,
+	},
+	{
+		name: "slow-store",
+		about: "one host of 48 connections and 128 shards, the store's replies 40 ms later from 60 s to 150 s: " +
+			"80 tasks/s and 10 workflows/s for 240 s, with the scheduler's rate limiter on",
+		variants: []variant{
+			{name: "cap", about: "the capacity controller enabled, the task scheduler rate in shadow", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameShadow},
+			{name: "cap-tsr", about: "both enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled},
+		},
+		build: slowStore,
+	},
+	{
+		name: "surge",
+		about: "one host whose static persistence rate is 100/s: 50 tasks/s, 120/s from 60 s to 120 s, " +
+			"and 5 workflows/s, for 240 s, with the scheduler's rate limiter on and the capacity controller in shadow",
+		variants: []variant{
+			{name: "tsr", about: "the task scheduler rate enabled", taskRate: adaptive.ModeNameEnabled},
+			{name: "shadow", about: "the task scheduler rate in shadow", taskRate: adaptive.ModeNameShadow},
+		},
+		build: surge,
 	},
 	{
 		name:     "fleet-start",
@@ -228,6 +252,76 @@ func startup(v variant) Scenario {
 		Load: Load{
 			Reload: Reload{Tasks: 100, At: 2 * time.Second},
 			Tasks:  []Phase{{Duration: 90 * time.Second, Rate: 30}},
+		},
+	}
+}
+
+// taskHost is a host for the task scheduler rate: the plugin's path, enough shards that
+// the shards' writes don't bind first, and the scheduler's rate limiter on.
+func taskHost(conns, shards int, static float64, v variant) Host {
+	host := Host{
+		Pool:     servicePool(conns),
+		Gate:     true,
+		Read:     PipelinedRead,
+		Pacing:   localPacing(),
+		History:  historyModel(),
+		Workers:  Workers{Pollers: 32, Steps: 2, Process: 50 * time.Millisecond, RetryDelay: 10 * time.Second},
+		Capacity: capacityParams(v.capacity),
+	}
+	if v.capacity == "" {
+		host.Capacity = capacityParams(adaptive.ModeNameShadow)
+	}
+	host.Capacity.Static = static
+	host.History.Shards = shards
+	host.History.SchedulerRateLimiter = true
+	host.Controllers.TaskRate = taskrate.DefaultSettings
+	host.Controllers.TaskRate.Mode = v.taskRate
+	return host
+}
+
+// slowStore is the appreciation's slow store, on a host whose pool binds while the store
+// is slow and whose static persistence rate is close enough to the load for the capacity
+// controller's cuts to bind: it cuts, and the task scheduler rate follows it.
+func slowStore(v variant) Scenario {
+	return Scenario{
+		Name:     "slow-store",
+		Seed:     1,
+		Duration: 240 * time.Second,
+		Drain:    60 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    1,
+		Host:     taskHost(48, 128, 300, v),
+		Signals:  signalWindows(),
+		Slow:     Slow{At: 60 * time.Second, Duration: 90 * time.Second, Delay: 40 * time.Millisecond},
+		Load: Load{
+			Tasks:     []Phase{{Duration: 240 * time.Second, Rate: 80}},
+			Workflows: []Phase{{Duration: 240 * time.Second, Rate: 10}},
+		},
+	}
+}
+
+// surge is a surge of tasks past the host's static persistence rate. The scheduler holds
+// the tasks over the task scheduler rate until the surge ends, where without it they fail
+// on the persistence rate limit and back off.
+func surge(v variant) Scenario {
+	return Scenario{
+		Name:     "surge",
+		Seed:     1,
+		Duration: 240 * time.Second,
+		Drain:    120 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    1,
+		Host:     taskHost(64, 64, 100, v),
+		Signals:  signalWindows(),
+		Load: Load{
+			Tasks: []Phase{
+				{Duration: 60 * time.Second, Rate: 50},
+				{At: 60 * time.Second, Duration: 60 * time.Second, Rate: 120},
+				{At: 120 * time.Second, Duration: 120 * time.Second, Rate: 50},
+			},
+			Workflows: []Phase{{Duration: 240 * time.Second, Rate: 5}},
 		},
 	}
 }

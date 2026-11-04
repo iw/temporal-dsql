@@ -67,13 +67,13 @@ func (p *printer) hosts(r *Result) {
 			}
 			tasks = append(tasks, []string{
 				h.Name, fmt.Sprint(t.Arrived), fmt.Sprint(t.Completed), fmt.Sprint(t.Backlog), cleared,
-				round(t.P50).String(), round(t.P99).String(), fmt.Sprint(t.Attempts),
+				round(t.P50).String(), round(t.P99).String(), fmt.Sprint(t.Attempts), fmt.Sprint(t.Throttled),
 			})
 		}
 		if wf := h.Workflows; wf.Started > 0 {
 			tasks = append(tasks, []string{
 				h.Name + " workflows", fmt.Sprint(wf.Started), fmt.Sprint(wf.Completed), "-", "-",
-				round(wf.P50).String(), round(wf.P99).String(), fmt.Sprint(wf.StartFailures + wf.ResponseFailures),
+				round(wf.P50).String(), round(wf.P99).String(), fmt.Sprint(wf.StartFailures + wf.ResponseFailures), "-",
 			})
 		}
 		if h.Reads.Tried+h.Writes.Tried+h.Reads.Limited+h.Writes.Limited > 0 {
@@ -101,7 +101,7 @@ func (p *printer) hosts(r *Result) {
 		}
 	}
 	if len(tasks) > 0 {
-		p.table("Host\tArrived\tCompleted\tBacklog at end of load\tReload cleared\tp50\tp99\tAttempts", tasks)
+		p.table("Host\tArrived\tCompleted\tBacklog at end of load\tReload cleared\tp50\tp99\tAttempts\tThrottled", tasks)
 	}
 	if len(calls) > 0 {
 		p.table("Host\tReads ok / tried\tWrites ok / tried\tResourceExhausted\tRate limited\tGate refusals\tCut off\tAcquire timeouts", calls)

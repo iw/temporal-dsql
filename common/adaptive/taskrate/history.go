@@ -91,9 +91,20 @@ func NewSchedulerLimiter(
 	persistenceRate func() float64,
 	handler metrics.Handler,
 ) quotas.RequestRateLimiter {
+	return newSchedulerLimiter(limiter, DriveRate(plane, collection, persistenceRate, handler))
+}
+
+// DriveRate drives the scheduler's rate from the plane's snapshots, for a limiter that
+// reads it with Applying, as NewSchedulerLimiter's does. persistenceRate is the host's
+// static persistence rate.
+func DriveRate(
+	plane *signals.Plane,
+	collection *dynamicconfig.Collection,
+	persistenceRate func() float64,
+	handler metrics.Handler,
+) *signals.Driven[float64] {
 	ctrl := &controller{settings: Config.Get(collection), law: New(0)}
-	driven := signals.DriveFunc(plane, persistenceRate, ctrl, adaptive.Frozen.Get(collection), adaptive.HostKey(), handler)
-	return newSchedulerLimiter(limiter, driven)
+	return signals.DriveFunc(plane, persistenceRate, ctrl, adaptive.Frozen.Get(collection), adaptive.HostKey(), handler)
 }
 
 func newSchedulerLimiter(limiter quotas.RequestRateLimiter, driven applier) *schedulerLimiter {

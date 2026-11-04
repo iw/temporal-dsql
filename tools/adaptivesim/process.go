@@ -5,6 +5,8 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"go.temporal.io/server/common/adaptive/taskrate"
+	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/gate"
 	"go.temporal.io/server/common/signals"
 )
@@ -66,12 +68,18 @@ func (p *process) start() {
 	p.health.factsDeclared = true
 	p.pacer = newPacer(l, w.dsql, h.Pacing, w.shared, p.seed, p.name)
 	p.pool = newPool(l, h.Pool, sc.Network, p.pacer, w.dsql, p.seed, p.name)
-	p.store = newStore(l, h, sc.Network, p.pool, w.dsql, p.health, w.clock, p.seed, p.name)
+	p.store = newStore(l, h, sc.Network, sc.Slow, p.pool, w.dsql, p.health, w.clock, p.seed, p.name)
 	header := signals.Header{Service: historyService, Host: p.name, PID: p.pid}
 	p.plane = newPlane(l, sc.Signals, &hostSource{health: p.health}, header, w.opts.TraceDir, w.log)
 	p.limiter = newCapacityLimiter(h.Capacity, []byte(p.name), p.health, p.plane, l.now)
 	p.client = &client{l: l, limiter: p.limiter, health: p.health, store: p.store, retryDelay: h.History.RetryDelay}
-	p.history = newHistory(l, h.History, p.client, p.health)
+	p.history = newHistory(l, h.History, p.client, p.health, p.seed, p.name)
+	collection := newCollection(h.Controllers)
+	static := func() float64 { return h.Capacity.Static }
+	rate := taskrate.DriveRate(p.plane.signals, collection, static, metrics.NoopMetricsHandler)
+	if h.History.SchedulerRateLimiter {
+		p.history.scheduler = newSchedulerLimiter(h.Capacity.Static, rate, l.now)
+	}
 	p.history.started, p.history.reloadTotal = l.now, sc.Load.Reload.Tasks
 	p.workers = newWorkers(l, h.Workers, p.history)
 
