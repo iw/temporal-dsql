@@ -68,10 +68,13 @@ common/persistence/sql/sqlplugin/dsql/
 ├── driver/
 │   ├── interface.go               # Driver interface abstraction
 │   └── pgx.go                     # pgx driver backend
+├── gate/
+│   └── policy.go                  # The gate's admission policy, on a clock.TimeSource
 └── session/
     └── session.go                 # DSN construction
 
 tools/poolsim/                     # pgxpool and DSQL simulation
+tools/adaptivesim/                 # The adaptive plane, closed-loop on a coarse service and store
 
 schema/dsql/temporal/
 ├── schema.sql                     # Full baseline
@@ -282,7 +285,7 @@ Service pools use `MinConns == MaxConns == maxConns` (default 100). Ephemeral po
 
 The `sql.DB` uses a closing wrapper around `stdlib.GetPoolConnector`, zero idle connections and unlimited open connections. It retains pgx driver fast paths and sqlx's snake-case mapper. The connector cancels hook waits, joins metrics collection, and closes pgxpool when the handle closes. Stock pgxpool internal health-check notifications can finish asynchronously. See [connection pool](connection-pool.md) for lifecycle and expiry limitations.
 
-The connector admits callers through a gate (`acquire_gate.go`) with one slot per pool connection. `BeginTx`, and `ExecContext` and `NamedExecContext` outside a transaction, mark their context as a write. A slot that comes free goes to the first waiting write, or call without a deadline, before the first read. From the most recent holds of each kind, the gate refuses a caller before its deadline once the callers ahead of it and a reserve for its own hold no longer fit. A slot is held until database/sql closes the connection, which, with no idle connections, is when the statement, rows, transaction or `sql.Conn` is done. See [the gate](connection-pool.md#the-gate).
+The connector admits callers through a gate (`acquire_gate.go`) with one slot per pool connection. `BeginTx`, and `ExecContext` and `NamedExecContext` outside a transaction, mark their context as a write. A slot that comes free goes to the first waiting write, or call without a deadline, before the first read. From the most recent holds of each kind, the gate refuses a caller before its deadline once the callers ahead of it and a reserve for its own hold no longer fit. A slot is held until database/sql closes the connection, which, with no idle connections, is when the statement, rows, transaction or `sql.Conn` is done. The admission policy, `gate.Policy`, reads time from a `clock.TimeSource` and leaves waiting to `acquire_gate.go`, so `tools/adaptivesim` runs it on simulated time. See [the gate](connection-pool.md#the-gate).
 
 `DatabaseHandle` receives an always-false refresh predicate. `maybeConvertError` performs its own mapping without calling the upstream `ConvertError`: limiter failures, gate refusals and 53300/53400 become overload; socket errors, `pgconn.ConnectError`, class 08 and IAM access denied become unavailable; 40001/0A000 remain raw; 54000 becomes a size-limit error. Other errors pass through. pgxpool replaces broken connections without rebuilding the pool.
 
@@ -292,7 +295,7 @@ A collector samples `pool.Stat()` every 15 seconds, reporting current gauges and
 
 ## Pool Simulator
 
-`tools/poolsim` models pgxpool lifecycle behavior, a DSQL cluster, connection limiters and phased workloads. Scenarios exercise fleet startup, pool sizing, demand spikes, mass drops, rolling deployments and limiter outages. See [the simulator README](../../tools/poolsim/README.md) for commands and model limitations.
+`tools/poolsim` models pgxpool lifecycle behavior, a DSQL cluster, connection limiters and phased workloads. Scenarios exercise fleet startup, pool sizing, demand spikes, mass drops, rolling deployments and limiter outages. See [the simulator README](../../tools/poolsim/README.md) for commands and model limitations. `tools/adaptivesim` keeps a smaller connection model of its own, [checked against poolsim's](../../tools/adaptivesim/README.md#cross-check-with-poolsim) fleet start.
 
 ## Testing
 
