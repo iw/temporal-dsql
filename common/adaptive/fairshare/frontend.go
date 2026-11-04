@@ -25,8 +25,8 @@ type Settings struct {
 	Timeout    time.Duration
 	MinShare   float64
 	Headroom   float64
-	// Deadband is how far, as a share of an equal share, a namespace's share must move
-	// before a frontend applies it.
+	// Deadband is how far, as a share of an equal share, a namespace's share must rise
+	// before a frontend applies it. A share that falls applies at once.
 	Deadband float64
 }
 
@@ -53,7 +53,8 @@ Every Interval, each frontend sends the others the tokens a second each namespac
 namespace rate limits over the last Window, and takes a share of each limit: it keeps MinShare of
 an equal share, and the rest follows its part of the demand, with Headroom to spare while the
 demand fits the limit. A frontend whose report is older than StaleAfter keeps an equal share. A
-share applies once it moves Deadband of an equal share. Mode is disabled, shadow or enabled.`,
+share that rises applies once it moves Deadband of an equal share, and one that falls applies at
+once. Mode is disabled, shadow or enabled.`,
 )
 
 // Params are the law's parameters from the settings.
