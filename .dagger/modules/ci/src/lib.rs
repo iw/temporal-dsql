@@ -163,6 +163,7 @@ impl Ci {
                 "./common/stats/...",
                 "./schema/...",
                 "./tools/adaptivereplay/...",
+                "./tools/adaptivesim/...",
                 "./tools/dsql/...",
                 "./tools/poolsim/...",
             ])
