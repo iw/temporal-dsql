@@ -1,6 +1,7 @@
 package signals
 
 import (
+	"path/filepath"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -157,4 +158,66 @@ func TestPlaneTicksOnItsOwnUntilStopped(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 	f.plane.Stop()
 	f.plane.Stop()
+}
+
+// fakeSource is the signals of a host that's simulated.
+type fakeSource struct {
+	snap  Snapshot
+	reads []int // the windows of each read
+	idle  int
+}
+
+func (f *fakeSource) Read(_ time.Time, windows int) Snapshot {
+	f.reads = append(f.reads, windows)
+	return f.snap
+}
+
+func (f *fakeSource) Idle() { f.idle++ }
+
+type decisionList []adaptive.Decision
+
+func (l *decisionList) RecordDecision(d adaptive.Decision) { *l = append(*l, d) }
+
+func TestPlaneReadsASimulatedHost(t *testing.T) {
+	settings := DefaultSettings
+	settings.Enabled = true
+	settings.TraceDirectory = t.TempDir()
+	ts := clock.NewEventTimeSource().Update(time.Unix(1_700_000_000, 0).UTC())
+	source := &fakeSource{snap: Snapshot{
+		Persistence: persistence.HealthSnapshot{Samples: 7, ScheduleP90: time.Millisecond},
+		Queues:      map[string]Queue{"transfer": {DelayP90: 2 * time.Millisecond, Samples: 3}},
+		Runtime:     Runtime{HeapLive: 100 << 20, HeapGoal: 200 << 20},
+		Memory:      Memory{GoLimit: 512 << 20},
+	}}
+	var sink decisionList
+	plane := NewPlane(func() Settings { return settings }, source, &sink, ts, Header{Service: "history", Host: "history-1", PID: 42}, log.NewNoopLogger())
+	t.Cleanup(plane.Stop)
+
+	// A controller that steps as the host starts reports before the first tick.
+	early := adaptive.Decision{Controller: "persistence_capacity", Time: ts.Now(), Reason: "idle"}
+	plane.RecordDecision(early)
+	ts.Advance(time.Second)
+	plane.Tick(ts.Now())
+	snap := plane.Latest()
+	require.NotNil(t, snap)
+	require.Equal(t, ts.Now(), snap.Time)
+	require.Equal(t, source.snap.Persistence, snap.Persistence)
+	require.Equal(t, source.snap.Queues, snap.Queues)
+	require.Equal(t, source.snap.Runtime, snap.Runtime)
+	require.Equal(t, source.snap.Memory, snap.Memory)
+	require.Equal(t, map[string]adaptive.Decision{"persistence_capacity": early}, snap.Decisions)
+	require.Equal(t, []int{settings.Windows}, source.reads)
+	require.Equal(t, decisionList{early}, sink)
+
+	settings.Enabled = false
+	ts.Advance(time.Second)
+	plane.Tick(ts.Now())
+	require.Nil(t, plane.Latest())
+	require.Equal(t, 1, source.idle)
+
+	records := readTrace(t, filepath.Join(settings.TraceDirectory, traceName))
+	require.Len(t, records, 3)
+	require.Equal(t, "history-1", records[0].Header.Host)
+	require.Equal(t, early.Reason, records[1].Decision.Reason)
+	require.Equal(t, 7, records[2].Snapshot.Persistence.Samples)
 }
