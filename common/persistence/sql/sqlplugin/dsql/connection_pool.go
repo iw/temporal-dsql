@@ -129,10 +129,12 @@ func (p *plugin) beforeConnect(tokenProvider driver.TokenProvider) func(context.
 	}
 }
 
-// poolConnector owns the pool because stdlib's connector does not close it.
+// poolConnector owns the pool because stdlib's connector does not close it, and admits
+// callers to the pool through the gate.
 type poolConnector struct {
 	sqldriver.Connector
 	pool      *pgxpool.Pool
+	gate      *acquireGate
 	metrics   DSQLMetrics
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -141,6 +143,39 @@ type poolConnector struct {
 }
 
 var _ io.Closer = (*poolConnector)(nil)
+
+// Connect takes a slot at the gate, then a pool connection.
+func (c *poolConnector) Connect(ctx context.Context) (sqldriver.Conn, error) {
+	ticket, err := c.gate.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := c.Connector.Connect(ctx)
+	if err != nil {
+		ticket.release(false)
+		return nil, err
+	}
+	sc, ok := conn.(*stdlib.Conn)
+	if !ok {
+		_ = conn.Close()
+		ticket.release(false)
+		return nil, fmt.Errorf("unexpected pool connection %T", conn)
+	}
+	return &gatedConn{Conn: sc, ticket: ticket}, nil
+}
+
+// gatedConn keeps its slot at the gate until database/sql closes it. database/sql keeps no
+// idle connections, so that's when the statement, rows, transaction or Conn is done.
+type gatedConn struct {
+	*stdlib.Conn
+	ticket *gateTicket
+}
+
+func (c *gatedConn) Close() error {
+	err := c.Conn.Close()
+	c.ticket.release(true)
+	return err
+}
 
 func (c *poolConnector) Close() error {
 	c.closeOnce.Do(func() {
@@ -161,15 +196,19 @@ func (c *poolConnector) reportAcquireFacts(facts *storeFacts) {
 		return
 	}
 	c.factsDone = make(chan struct{})
-	sample := func() acquireCounts {
-		stat := c.pool.Stat()
-		return acquireCounts{acquired: stat.AcquireCount(), queued: stat.EmptyAcquireCount()}
-	}
-	start := sample()
+	start := c.acquireCounts()
 	go func() {
 		defer close(c.factsDone)
-		reportAcquireFacts(c.ctx, facts, acquireFactsInterval, start, sample)
+		reportAcquireFacts(c.ctx, facts, acquireFactsInterval, start, c.acquireCounts)
 	}()
+}
+
+// acquireCounts counts the queued acquires as those that waited at the gate, and those that
+// found no idle connection once admitted, as while the pool replaces a connection. An
+// acquire that waits for both counts twice.
+func (c *poolConnector) acquireCounts() acquireCounts {
+	stat := c.pool.Stat()
+	return acquireCounts{acquired: stat.AcquireCount(), queued: stat.EmptyAcquireCount() + c.gate.waited.Load()}
 }
 
 func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, *poolConnector, error) {
@@ -194,7 +233,14 @@ func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, 
 		return nil, nil, err
 	}
 	collector := NewDSQLMetrics(metricsHandler)
-	connector := &poolConnector{Connector: stdlib.GetPoolConnector(pool), pool: pool, metrics: collector, ctx: ctx, cancel: cancel}
+	connector := &poolConnector{
+		Connector: stdlib.GetPoolConnector(pool),
+		pool:      pool,
+		gate:      newAcquireGate(int(cfg.MaxConns), metricsHandler),
+		metrics:   collector,
+		ctx:       ctx,
+		cancel:    cancel,
+	}
 	sqlDB := sql.OpenDB(connector)
 	sqlDB.SetMaxIdleConns(0)
 	db := sqlx.NewDb(sqlDB, "pgx")

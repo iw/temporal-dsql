@@ -2,47 +2,32 @@ package dsql
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/log"
 	p "go.temporal.io/server/common/persistence"
-	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 	"go.temporal.io/server/common/primitives"
 )
 
-// DSQLExecutionStore wraps the common SQL execution store with DSQL-specific optimizations.
+// DSQLExecutionStore wraps the common SQL execution store, and reads a workflow's mutable
+// state on one connection in one round trip once the connection has the statements
+// prepared.
 //
-// # Why This Optimization Exists
-//
-// The common SQL execution store's GetWorkflowExecution performs 9 separate database reads
-// (executions, activity_info_maps, timer_info_maps, etc.), each as an implicit auto-committed
-// transaction. For traditional databases (MySQL, PostgreSQL), this has negligible overhead.
-//
-// However, Aurora DSQL uses optimistic concurrency control (OCC) where each transaction
-// boundary incurs validation overhead. The 9 separate transactions were identified as a
-// significant contributor to GetWorkflowExecution latency (P95: 1.66s observed in benchmarks).
-//
-// # Design Decision: DSQL-Only, Non-Invasive
-//
-// Rather than modifying the common SQL persistence layer (which would affect all SQL backends
-// and require extensive testing), we chose to:
-//
-//  1. Create a DSQL-specific wrapper that overrides only GetWorkflowExecution
-//  2. Batch all 9 reads into a single transaction, reducing OCC overhead by ~9x
-//  3. Preserve identical error messages and behavior for debugging
-//  4. Delegate all other ExecutionStore methods to the common implementation
-//
-// This approach keeps the common code unchanged, isolates DSQL-specific optimizations,
-// and allows independent evolution of the DSQL persistence layer.
+// The common store's GetWorkflowExecution makes 9 queries, each taking a pool connection
+// in turn. When the pool is short, every read waits for 9 acquires, so the reads progress
+// together and run out of time together. This store sends the 9 queries in one read-only
+// transaction, pipelined as one pgx batch, which also reads them from one snapshot.
 type DSQLExecutionStore struct {
 	p.ExecutionStore
 	db     *db
 	logger log.Logger
 }
 
-// NewDSQLExecutionStore creates a DSQL-optimized execution store that wraps the common SQL store.
+// NewDSQLExecutionStore creates a DSQL execution store that wraps the common SQL store.
 func NewDSQLExecutionStore(base p.ExecutionStore, dsqlDB *db, logger log.Logger) *DSQLExecutionStore {
 	return &DSQLExecutionStore{
 		ExecutionStore: base,
@@ -51,328 +36,285 @@ func NewDSQLExecutionStore(base p.ExecutionStore, dsqlDB *db, logger log.Logger)
 	}
 }
 
-// GetWorkflowExecution overrides the common implementation to batch all reads in a single transaction.
-// This reduces 9 separate read-only transactions to 1, significantly improving performance for DSQL
-// which has overhead per transaction due to its optimistic concurrency control model.
+// mutableStateQueries are the mutable state read's statements, in the order their results
+// are decoded.
+var mutableStateQueries = []string{
+	getExecutionQuery,
+	getActivityInfoMapQry,
+	getTimerInfoMapSQLQuery,
+	getChildExecutionInfoMapQry,
+	getRequestCancelInfoMapQry,
+	getSignalInfoMapQry,
+	getBufferedEventsQuery,
+	getChasmNodeMapSQLQuery,
+	getSignalsRequestedSetQuery,
+}
+
+// pipelineConn is the part of *pgx.Conn the read uses.
+type pipelineConn interface {
+	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	IsClosed() bool
+}
+
+// errNotPGX means the database's connections aren't pgx connections, as with a test's
+// Connect hook.
+var errNotPGX = errors.New("driver connection is not a pgx connection")
+
+const readFailed = "GetWorkflowExecution: failed. Error: %v"
+
+// GetWorkflowExecution reads the execution row and its maps in one read-only transaction,
+// sent as one batch on one connection.
 func (s *DSQLExecutionStore) GetWorkflowExecution(
 	ctx context.Context,
 	request *p.GetWorkflowExecutionRequest,
 ) (*p.InternalGetWorkflowExecutionResponse, error) {
-	namespaceID := primitives.MustParseUUID(request.NamespaceID)
-	workflowID := request.WorkflowID
-	runID := primitives.MustParseUUID(request.RunID)
-
-	var state *p.InternalWorkflowMutableState
-	var dbRecordVersion int64
-
-	// Execute all reads in a single transaction
-	err := s.executeReadTx(ctx, func(tx sqlplugin.Tx) error {
-		// 1. Read execution row
-		executionsRow, err := tx.SelectFromExecutions(ctx, sqlplugin.ExecutionsFilter{
-			ShardID:     request.ShardID,
-			NamespaceID: namespaceID,
-			WorkflowID:  workflowID,
-			RunID:       runID,
-		})
-		if err != nil {
-			if err == sql.ErrNoRows {
-				return serviceerror.NewNotFoundf("Workflow executionsRow not found. WorkflowId: %v, RunId: %v", workflowID, runID)
-			}
-			return serviceerror.NewUnavailablef("GetWorkflowExecution: failed. Error: %v", err)
-		}
-
-		state = &p.InternalWorkflowMutableState{
-			ExecutionInfo:   p.NewDataBlob(executionsRow.Data, executionsRow.DataEncoding),
-			ExecutionState:  p.NewDataBlob(executionsRow.State, executionsRow.StateEncoding),
-			NextEventID:     executionsRow.NextEventID,
-			DBRecordVersion: executionsRow.DBRecordVersion,
-		}
-		dbRecordVersion = executionsRow.DBRecordVersion
-
-		// 2. Read activity info map
-		state.ActivityInfos, err = s.getActivityInfoMapTx(ctx, tx, request.ShardID, namespaceID, workflowID, runID)
-		if err != nil {
-			return serviceerror.NewUnavailablef("GetWorkflowExecution: failed to get activity info. Error: %v", err)
-		}
-
-		// 3. Read timer info map
-		state.TimerInfos, err = s.getTimerInfoMapTx(ctx, tx, request.ShardID, namespaceID, workflowID, runID)
-		if err != nil {
-			return serviceerror.NewUnavailablef("GetWorkflowExecution: failed to get timer info. Error: %v", err)
-		}
-
-		// 4. Read child execution info map
-		state.ChildExecutionInfos, err = s.getChildExecutionInfoMapTx(ctx, tx, request.ShardID, namespaceID, workflowID, runID)
-		if err != nil {
-			return serviceerror.NewUnavailablef("GetWorkflowExecution: failed to get child execution info. Error: %v", err)
-		}
-
-		// 5. Read request cancel info map
-		state.RequestCancelInfos, err = s.getRequestCancelInfoMapTx(ctx, tx, request.ShardID, namespaceID, workflowID, runID)
-		if err != nil {
-			return serviceerror.NewUnavailablef("GetWorkflowExecution: failed to get request cancel info. Error: %v", err)
-		}
-
-		// 6. Read signal info map
-		state.SignalInfos, err = s.getSignalInfoMapTx(ctx, tx, request.ShardID, namespaceID, workflowID, runID)
-		if err != nil {
-			return serviceerror.NewUnavailablef("GetWorkflowExecution: failed to get signal info. Error: %v", err)
-		}
-
-		// 7. Read buffered events
-		state.BufferedEvents, err = s.getBufferedEventsTx(ctx, tx, request.ShardID, namespaceID, workflowID, runID)
-		if err != nil {
-			return serviceerror.NewUnavailablef("GetWorkflowExecution: failed to get buffered events. Error: %v", err)
-		}
-
-		// 8. Read CHASM nodes
-		state.ChasmNodes, err = s.getChasmNodeMapTx(ctx, tx, request.ShardID, namespaceID, workflowID, runID)
-		if err != nil {
-			return serviceerror.NewUnavailablef("GetWorkflowExecution: failed to get CHASM nodes. Error: %v", err)
-		}
-
-		// 9. Read signals requested
-		state.SignalRequestedIDs, err = s.getSignalsRequestedTx(ctx, tx, request.ShardID, namespaceID, workflowID, runID)
-		if err != nil {
-			return serviceerror.NewUnavailablef("GetWorkflowExecution: failed to get signals requested. Error: %v", err)
-		}
-
-		return nil
-	})
-
+	state, err := s.readMutableState(ctx, request)
+	if errors.Is(err, errNotPGX) {
+		return s.ExecutionStore.GetWorkflowExecution(ctx, request)
+	}
 	if err != nil {
 		return nil, err
 	}
-
 	return &p.InternalGetWorkflowExecutionResponse{
 		State:           state,
-		DBRecordVersion: dbRecordVersion,
+		DBRecordVersion: state.DBRecordVersion,
 	}, nil
 }
 
-// executeReadTx executes a function within a read-only transaction.
-// For DSQL, this batches multiple reads into a single transaction, reducing overhead.
-func (s *DSQLExecutionStore) executeReadTx(ctx context.Context, fn func(tx sqlplugin.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx)
+// readMutableState takes one connection for the read, and gives it back before returning.
+func (s *DSQLExecutionStore) readMutableState(
+	ctx context.Context,
+	request *p.GetWorkflowExecutionRequest,
+) (*p.InternalWorkflowMutableState, error) {
+	namespaceID := primitives.MustParseUUID(request.NamespaceID)
+	runID := primitives.MustParseUUID(request.RunID)
+	sqlDB, err := s.db.handle.DB()
 	if err != nil {
-		return serviceerror.NewUnavailablef("GetWorkflowExecution: failed to start transaction. Error: %v", err)
+		return nil, s.readError(readFailed, err)
+	}
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return nil, s.readError(readFailed, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	var state *p.InternalWorkflowMutableState
+	err = conn.Raw(func(driverConn any) error {
+		pc, ok := pgxConnOf(driverConn)
+		if !ok {
+			return errNotPGX
+		}
+		var readErr error
+		state, readErr = s.pipelineRead(ctx, pc, request.ShardID, namespaceID, request.WorkflowID, runID)
+		return readErr
+	})
+	return state, err
+}
+
+// pgxConnOf returns the pgx connection behind a database/sql driver connection. A
+// gatedConn's embedded field, Conn, hides the Conn method of the *stdlib.Conn it embeds.
+func pgxConnOf(driverConn any) (*pgx.Conn, bool) {
+	switch c := driverConn.(type) {
+	case *gatedConn:
+		return c.Conn.Conn(), true
+	case interface{ Conn() *pgx.Conn }:
+		return c.Conn(), true
+	}
+	return nil, false
+}
+
+func (s *DSQLExecutionStore) pipelineRead(
+	ctx context.Context,
+	conn pipelineConn,
+	shardID int32,
+	namespaceID primitives.UUID,
+	workflowID string,
+	runID primitives.UUID,
+) (*p.InternalWorkflowMutableState, error) {
+	batch := &pgx.Batch{}
+	batch.Queue("BEGIN READ ONLY")
+	for _, query := range mutableStateQueries {
+		batch.Queue(query, shardID, namespaceID.String(), workflowID, runID.String())
+	}
+	batch.Queue("COMMIT")
+	results := conn.SendBatch(ctx, batch)
+	state, err := s.decodeMutableState(results, workflowID, runID)
+	// Close reads what's left of the batch, and returns the first statement's error.
+	closeErr := results.Close()
+	if err == nil && closeErr != nil {
+		err = s.readError(readFailed, closeErr)
+	}
+	// A statement the server failed leaves the transaction aborted. Ending it keeps the
+	// connection, which pgxpool would otherwise replace with a new one.
+	var pgErr *pgconn.PgError
+	if errors.As(closeErr, &pgErr) && !conn.IsClosed() {
+		_, _ = conn.Exec(ctx, "ROLLBACK")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+func (s *DSQLExecutionStore) decodeMutableState(
+	results pgx.BatchResults,
+	workflowID string,
+	runID primitives.UUID,
+) (*p.InternalWorkflowMutableState, error) {
+	if _, err := results.Exec(); err != nil {
+		return nil, s.readError("GetWorkflowExecution: failed to start transaction. Error: %v", err)
 	}
 
-	err = fn(tx)
+	var (
+		found                       bool
+		nextEventID, recordVersion  int64
+		info, executionState        []byte
+		infoEncoding, stateEncoding string
+	)
+	err := readRows(results, func(rows pgx.Rows) error {
+		found = true
+		// Of executionsColumns, the key columns and last_write_version aren't needed.
+		return rows.Scan(nil, nil, nil, nil, &nextEventID, nil, &info, &infoEncoding, &executionState, &stateEncoding, &recordVersion)
+	})
 	if err != nil {
-		_ = tx.Rollback()
+		return nil, s.readError(readFailed, err)
+	}
+	if !found {
+		return nil, serviceerror.NewNotFoundf("Workflow executionsRow not found. WorkflowId: %v, RunId: %v", workflowID, runID)
+	}
+	state := &p.InternalWorkflowMutableState{
+		ExecutionInfo:   p.NewDataBlob(info, infoEncoding),
+		ExecutionState:  p.NewDataBlob(executionState, stateEncoding),
+		NextEventID:     nextEventID,
+		DBRecordVersion: recordVersion,
+	}
+
+	if state.ActivityInfos, err = readBlobMap[int64](results); err != nil {
+		return nil, s.readError("GetWorkflowExecution: failed to get activity info. Error: %v", err)
+	}
+	if state.TimerInfos, err = readBlobMap[string](results); err != nil {
+		return nil, s.readError("GetWorkflowExecution: failed to get timer info. Error: %v", err)
+	}
+	if state.ChildExecutionInfos, err = readBlobMap[int64](results); err != nil {
+		return nil, s.readError("GetWorkflowExecution: failed to get child execution info. Error: %v", err)
+	}
+	if state.RequestCancelInfos, err = readBlobMap[int64](results); err != nil {
+		return nil, s.readError("GetWorkflowExecution: failed to get request cancel info. Error: %v", err)
+	}
+	if state.SignalInfos, err = readBlobMap[int64](results); err != nil {
+		return nil, s.readError("GetWorkflowExecution: failed to get signal info. Error: %v", err)
+	}
+	if state.BufferedEvents, err = readBufferedEvents(results); err != nil {
+		return nil, s.readError("GetWorkflowExecution: failed to get buffered events. Error: %v", err)
+	}
+	if state.ChasmNodes, err = readChasmNodes(results); err != nil {
+		return nil, s.readError("GetWorkflowExecution: failed to get CHASM nodes. Error: %v", err)
+	}
+	if state.SignalRequestedIDs, err = readSignalsRequested(results); err != nil {
+		return nil, s.readError("GetWorkflowExecution: failed to get signals requested. Error: %v", err)
+	}
+
+	if _, err := results.Exec(); err != nil {
+		return nil, s.readError("GetWorkflowExecution: failed to commit transaction. Error: %v", err)
+	}
+	return state, nil
+}
+
+// readError keeps the ResourceExhausted of a call the plugin didn't attempt, so history
+// backs off rather than retrying at once, and reports other failures as the common store
+// does.
+func (s *DSQLExecutionStore) readError(format string, err error) error {
+	err = s.db.maybeConvertError(err)
+	var exhausted *serviceerror.ResourceExhausted
+	if errors.As(err, &exhausted) {
 		return err
 	}
-
-	// For read-only transactions, commit is essentially a no-op but ensures proper cleanup
-	if err := tx.Commit(); err != nil {
-		return serviceerror.NewUnavailablef("GetWorkflowExecution: failed to commit transaction. Error: %v", err)
-	}
-
-	return nil
+	return serviceerror.NewUnavailablef(format, err)
 }
 
-// Helper functions that use transaction instead of DB connection
-
-func (s *DSQLExecutionStore) getActivityInfoMapTx(
-	ctx context.Context,
-	tx sqlplugin.Tx,
-	shardID int32,
-	namespaceID primitives.UUID,
-	workflowID string,
-	runID primitives.UUID,
-) (map[int64]*commonpb.DataBlob, error) {
-	rows, err := tx.SelectAllFromActivityInfoMaps(ctx, sqlplugin.ActivityInfoMapsAllFilter{
-		ShardID:     shardID,
-		NamespaceID: namespaceID,
-		WorkflowID:  workflowID,
-		RunID:       runID,
-	})
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
+// readRows reads the next statement's rows from the batch.
+func readRows(results pgx.BatchResults, scan func(pgx.Rows) error) error {
+	rows, err := results.Query()
+	if err != nil {
+		return err
 	}
-
-	ret := make(map[int64]*commonpb.DataBlob)
-	for _, row := range rows {
-		ret[row.ScheduleID] = p.NewDataBlob(row.Data, row.DataEncoding)
-	}
-	return ret, nil
-}
-
-func (s *DSQLExecutionStore) getTimerInfoMapTx(
-	ctx context.Context,
-	tx sqlplugin.Tx,
-	shardID int32,
-	namespaceID primitives.UUID,
-	workflowID string,
-	runID primitives.UUID,
-) (map[string]*commonpb.DataBlob, error) {
-	rows, err := tx.SelectAllFromTimerInfoMaps(ctx, sqlplugin.TimerInfoMapsAllFilter{
-		ShardID:     shardID,
-		NamespaceID: namespaceID,
-		WorkflowID:  workflowID,
-		RunID:       runID,
-	})
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	ret := make(map[string]*commonpb.DataBlob)
-	for _, row := range rows {
-		ret[row.TimerID] = p.NewDataBlob(row.Data, row.DataEncoding)
-	}
-	return ret, nil
-}
-
-func (s *DSQLExecutionStore) getChildExecutionInfoMapTx(
-	ctx context.Context,
-	tx sqlplugin.Tx,
-	shardID int32,
-	namespaceID primitives.UUID,
-	workflowID string,
-	runID primitives.UUID,
-) (map[int64]*commonpb.DataBlob, error) {
-	rows, err := tx.SelectAllFromChildExecutionInfoMaps(ctx, sqlplugin.ChildExecutionInfoMapsAllFilter{
-		ShardID:     shardID,
-		NamespaceID: namespaceID,
-		WorkflowID:  workflowID,
-		RunID:       runID,
-	})
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	ret := make(map[int64]*commonpb.DataBlob)
-	for _, row := range rows {
-		ret[row.InitiatedID] = p.NewDataBlob(row.Data, row.DataEncoding)
-	}
-	return ret, nil
-}
-
-func (s *DSQLExecutionStore) getRequestCancelInfoMapTx(
-	ctx context.Context,
-	tx sqlplugin.Tx,
-	shardID int32,
-	namespaceID primitives.UUID,
-	workflowID string,
-	runID primitives.UUID,
-) (map[int64]*commonpb.DataBlob, error) {
-	rows, err := tx.SelectAllFromRequestCancelInfoMaps(ctx, sqlplugin.RequestCancelInfoMapsAllFilter{
-		ShardID:     shardID,
-		NamespaceID: namespaceID,
-		WorkflowID:  workflowID,
-		RunID:       runID,
-	})
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	ret := make(map[int64]*commonpb.DataBlob)
-	for _, row := range rows {
-		ret[row.InitiatedID] = p.NewDataBlob(row.Data, row.DataEncoding)
-	}
-	return ret, nil
-}
-
-func (s *DSQLExecutionStore) getSignalInfoMapTx(
-	ctx context.Context,
-	tx sqlplugin.Tx,
-	shardID int32,
-	namespaceID primitives.UUID,
-	workflowID string,
-	runID primitives.UUID,
-) (map[int64]*commonpb.DataBlob, error) {
-	rows, err := tx.SelectAllFromSignalInfoMaps(ctx, sqlplugin.SignalInfoMapsAllFilter{
-		ShardID:     shardID,
-		NamespaceID: namespaceID,
-		WorkflowID:  workflowID,
-		RunID:       runID,
-	})
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	ret := make(map[int64]*commonpb.DataBlob)
-	for _, row := range rows {
-		ret[row.InitiatedID] = p.NewDataBlob(row.Data, row.DataEncoding)
-	}
-	return ret, nil
-}
-
-func (s *DSQLExecutionStore) getBufferedEventsTx(
-	ctx context.Context,
-	tx sqlplugin.Tx,
-	shardID int32,
-	namespaceID primitives.UUID,
-	workflowID string,
-	runID primitives.UUID,
-) ([]*commonpb.DataBlob, error) {
-	rows, err := tx.SelectFromBufferedEvents(ctx, sqlplugin.BufferedEventsFilter{
-		ShardID:     shardID,
-		NamespaceID: namespaceID,
-		WorkflowID:  workflowID,
-		RunID:       runID,
-	})
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	var result []*commonpb.DataBlob
-	for _, row := range rows {
-		result = append(result, p.NewDataBlob(row.Data, row.DataEncoding))
-	}
-	return result, nil
-}
-
-func (s *DSQLExecutionStore) getChasmNodeMapTx(
-	ctx context.Context,
-	tx sqlplugin.Tx,
-	shardID int32,
-	namespaceID primitives.UUID,
-	workflowID string,
-	runID primitives.UUID,
-) (map[string]p.InternalChasmNode, error) {
-	rows, err := tx.SelectAllFromChasmNodeMaps(ctx, sqlplugin.ChasmNodeMapsAllFilter{
-		ShardID:     shardID,
-		NamespaceID: namespaceID,
-		WorkflowID:  workflowID,
-		RunID:       runID,
-	})
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	ret := make(map[string]p.InternalChasmNode)
-	for _, row := range rows {
-		ret[row.ChasmPath] = p.InternalChasmNode{
-			Metadata: p.NewDataBlob(row.Metadata, row.MetadataEncoding),
-			Data:     p.NewDataBlob(row.Data, row.DataEncoding),
+	defer rows.Close()
+	for rows.Next() {
+		if err := scan(rows); err != nil {
+			return err
 		}
 	}
-	return ret, nil
+	return rows.Err()
 }
 
-func (s *DSQLExecutionStore) getSignalsRequestedTx(
-	ctx context.Context,
-	tx sqlplugin.Tx,
-	shardID int32,
-	namespaceID primitives.UUID,
-	workflowID string,
-	runID primitives.UUID,
-) ([]string, error) {
-	rows, err := tx.SelectAllFromSignalsRequestedSets(ctx, sqlplugin.SignalsRequestedSetsAllFilter{
-		ShardID:     shardID,
-		NamespaceID: namespaceID,
-		WorkflowID:  workflowID,
-		RunID:       runID,
+// readBlobMap reads a map statement's rows of a key, data and encoding.
+func readBlobMap[K int64 | string](results pgx.BatchResults) (map[K]*commonpb.DataBlob, error) {
+	blobs := make(map[K]*commonpb.DataBlob)
+	err := readRows(results, func(rows pgx.Rows) error {
+		var (
+			key      K
+			data     []byte
+			encoding string
+		)
+		if err := rows.Scan(&key, &data, &encoding); err != nil {
+			return err
+		}
+		blobs[key] = p.NewDataBlob(data, encoding)
+		return nil
 	})
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
+	return blobs, err
+}
 
-	ret := make([]string, len(rows))
-	for i, row := range rows {
-		ret[i] = row.SignalID
-	}
-	return ret, nil
+func readBufferedEvents(results pgx.BatchResults) ([]*commonpb.DataBlob, error) {
+	var events []*commonpb.DataBlob
+	err := readRows(results, func(rows pgx.Rows) error {
+		var (
+			data     []byte
+			encoding string
+		)
+		if err := rows.Scan(&data, &encoding); err != nil {
+			return err
+		}
+		events = append(events, p.NewDataBlob(data, encoding))
+		return nil
+	})
+	return events, err
+}
+
+func readChasmNodes(results pgx.BatchResults) (map[string]p.InternalChasmNode, error) {
+	nodes := make(map[string]p.InternalChasmNode)
+	err := readRows(results, func(rows pgx.Rows) error {
+		var (
+			stored                         string
+			metadata, data                 []byte
+			metadataEncoding, dataEncoding string
+		)
+		if err := rows.Scan(&stored, &metadata, &metadataEncoding, &data, &dataEncoding); err != nil {
+			return err
+		}
+		path, err := decodeChasmPath(stored)
+		if err != nil {
+			return err
+		}
+		nodes[path] = p.InternalChasmNode{
+			Metadata: p.NewDataBlob(metadata, metadataEncoding),
+			Data:     p.NewDataBlob(data, dataEncoding),
+		}
+		return nil
+	})
+	return nodes, err
+}
+
+func readSignalsRequested(results pgx.BatchResults) ([]string, error) {
+	ids := make([]string, 0)
+	err := readRows(results, func(rows pgx.Rows) error {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+		return nil
+	})
+	return ids, err
 }

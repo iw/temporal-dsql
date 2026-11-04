@@ -158,7 +158,9 @@ func (pdb *db) BeginTx(ctx context.Context) (sqlplugin.Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.BeginTxx(ctx, nil)
+	// Core makes its changes in transactions, so a transaction waits with the writes at the
+	// pool's gate.
+	tx, err := db.BeginTxx(withAcquireKind(ctx, acquireWrite), nil)
 	if err != nil {
 		return nil, pdb.maybeConvertError(err)
 	}
@@ -225,9 +227,18 @@ func (pdb *db) Rollback() error {
 	return pdb.tx.Rollback()
 }
 
+// writeContext marks a statement that takes a connection of its own as a write, which the
+// pool's gate serves ahead of reads.
+func (pdb *db) writeContext(ctx context.Context) context.Context {
+	if pdb.tx != nil {
+		return ctx
+	}
+	return withAcquireKind(ctx, acquireWrite)
+}
+
 // Helper methods to hide common error handling
 func (pdb *db) ExecContext(ctx context.Context, stmt string, args ...any) (sql.Result, error) {
-	res, err := pdb.conn().ExecContext(ctx, stmt, args...)
+	res, err := pdb.conn().ExecContext(pdb.writeContext(ctx), stmt, args...)
 	return res, pdb.maybeConvertError(err)
 }
 
@@ -242,7 +253,7 @@ func (pdb *db) SelectContext(ctx context.Context, dest any, query string, args .
 }
 
 func (pdb *db) NamedExecContext(ctx context.Context, query string, arg any) (sql.Result, error) {
-	res, err := pdb.conn().NamedExecContext(ctx, query, arg)
+	res, err := pdb.conn().NamedExecContext(pdb.writeContext(ctx), query, arg)
 	return res, pdb.maybeConvertError(err)
 }
 
@@ -276,9 +287,8 @@ func (pdb *db) Rebind(query string) string {
 	return pdb.conn().Rebind(query)
 }
 
-// NewExecutionStore implements sql.ExecutionStoreCreator interface.
-// This allows DSQL to wrap the common execution store with DSQL-specific optimizations,
-// particularly batching reads in GetWorkflowExecution into a single transaction.
+// NewExecutionStore implements sql.ExecutionStoreCreator, so the factory wraps the common
+// execution store in the plugin's, which reads a workflow's mutable state in one round trip.
 func (pdb *db) NewExecutionStore(baseStore persistence.ExecutionStore, logger log.Logger) persistence.ExecutionStore {
 	return NewDSQLExecutionStore(baseStore, pdb, logger)
 }

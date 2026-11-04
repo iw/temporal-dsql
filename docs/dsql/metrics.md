@@ -34,6 +34,18 @@ In pgx v5.7.2, `NewConnsCount` increments before `BeforeConnect`, so it includes
 
 Service pools retain their full configured size. Ephemeral startup pools have max 5/min 0. The sum of every service pool's `maxConns` across all Temporal processes, including deploy overlap, must fit the cluster limit (10,000 by default). `database/sql` statistics describe only the outer adapter, so they are not the source for these DSQL pool metrics.
 
+## Gate Metrics
+
+The [gate](connection-pool.md#the-gate) in front of the pool records these as they happen. `kind` is `read` or `write`.
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `dsql_pool_gate_waits_total` | Counter | `kind` | Callers admitted after waiting for a slot |
+| `dsql_pool_gate_wait` | Timer | `kind` | How long callers admitted after waiting waited |
+| `dsql_pool_gate_refusals_total` | Counter | `kind` | Callers refused because they couldn't be served before their deadline, at once or while waiting |
+
+Callers wait at the gate rather than in pgxpool, so `dsql_pool_wait_total` counts the acquires that waited while pgxpool opened or replaced a connection.
+
 ## Rate Limiter Metrics
 
 `dsql_rate_limiter_fallbacks_total` counts calls routed to the local limiter after a DynamoDB failure, including calls during the 30-second cooldown.
@@ -53,6 +65,8 @@ rate(dsql_rate_limiter_fallbacks_total[5m]) > 0
 dsql_pool_in_use / dsql_pool_max_open
 
 # Contention and canceled acquires.
+rate(dsql_pool_gate_waits_total[5m])
+rate(dsql_pool_gate_refusals_total[5m])
 rate(dsql_pool_wait_total[5m])
 rate(dsql_pool_canceled_acquires_total[5m])
 
@@ -78,6 +92,13 @@ Investigate sustained acquisition cancellation, waits with a saturated pool, or 
     severity: warning
   annotations:
     summary: "DSQL pool above 90% utilization"
+- alert: DSQLGateRefusals
+  expr: rate(dsql_pool_gate_refusals_total[5m]) > 0
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "DSQL pool refusing calls it can't serve before their deadlines"
 - alert: DSQLAcquireCancellation
   expr: rate(dsql_pool_canceled_acquires_total[5m]) > 0
   for: 5m
