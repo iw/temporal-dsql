@@ -136,7 +136,7 @@ func newTestCluster(t *testing.T, mode string, hosts ...string) *testCluster {
 func (c *testCluster) round() {
 	for _, host := range c.members {
 		if e, ok := c.exchanges[host]; ok {
-			e.round(c.t.Context())
+			e.Round(c.t.Context())
 		}
 	}
 }

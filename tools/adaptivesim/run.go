@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/adaptive/fairshare"
 	"go.temporal.io/server/common/adaptive/partitions"
 )
 
@@ -31,6 +32,9 @@ type (
 		// matching and worker run the workflows through matching, when the scenario has it.
 		matching *matchingHost
 		worker   *worker
+		// frontends take the workflows' starts and other requests, when the scenario has
+		// them.
+		frontends *frontends
 	}
 
 	// Result is what a run did.
@@ -43,6 +47,8 @@ type (
 		Connections ConnectionResult
 		// Matching is what the matching host did, when the workflows ran through it.
 		Matching *MatchingResult
+		// Frontends are what the frontends did, when the scenario has them.
+		Frontends []FrontendResult
 	}
 
 	// HostResult is what one history host did.
@@ -98,10 +104,16 @@ func Run(sc Scenario, opts Options) (*Result, error) {
 	if sc.Host.Pacing.Shared {
 		w.shared = newTokenBucket(sc.Host.Pacing.Rate, sc.Host.Pacing.Burst, epoch)
 	}
+	pid := sc.Hosts + 1
 	if sc.Matching.on() {
-		w.matching = newMatchingHost(w, sc.Hosts+1)
+		w.matching = newMatchingHost(w, pid)
 		w.worker = newWorker(l, sc.Matching, w.matching)
 		w.matching.start()
+		pid++
+	}
+	if sc.Frontends.on() {
+		w.frontends = newFrontends(w, pid)
+		w.frontends.start()
 	}
 	starts := randoms(sc.Seed, "starts")
 	for i := range sc.Hosts {
@@ -127,6 +139,9 @@ func (w *world) stop() {
 	if w.matching != nil {
 		w.matching.plane.stop()
 	}
+	if w.frontends != nil {
+		w.frontends.stop()
+	}
 }
 
 func (w *world) result() *Result {
@@ -144,6 +159,9 @@ func (w *world) result() *Result {
 	r.Connections.PeakOpen = w.dsql.peakOpen
 	if w.matching != nil {
 		r.Matching = w.matching.result()
+	}
+	if w.frontends != nil {
+		r.Frontends = w.frontends.result()
 	}
 	return r
 }
@@ -179,10 +197,14 @@ func (ds Decisions) series() []decisionSeries {
 
 // decisionKey is what a controller decides for, when it decides for several things.
 func decisionKey(d adaptive.Decision) string {
-	if detail, ok := d.Detail.(partitions.Detail); ok {
+	switch detail := d.Detail.(type) {
+	case partitions.Detail:
 		return detail.Namespace + "/" + detail.TaskQueue + "/" + detail.TaskQueueType
+	case fairshare.Detail:
+		return detail.Class + "/" + detail.Namespace
+	default:
+		return ""
 	}
-	return ""
 }
 
 func (c *ConnCounts) add(o ConnCounts) {

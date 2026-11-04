@@ -3,11 +3,12 @@
 `adaptivesim` is a discrete-event simulator of the Temporal service's adaptive plane. It
 runs the signal plane, the adaptive controllers and their actuators closed-loop on
 simulated time, over a coarse model of history, its workers, the DSQL plugin's pool and
-DSQL itself. It's written in Go so that it runs the real code where that matters: the
-signal plane (`common/signals`), the adaptive controllers (`common/adaptive/...`) and the
-pool gate's admission policy (`common/persistence/sql/sqlplugin/dsql/gate`). The service,
-its connections and its store are models, kept coarse, since the simulator's job is the
-whole loop.
+DSQL itself, and where a scenario has them, matching and the frontends. It's written in Go
+so that it runs the real code where that matters: the signal plane (`common/signals`), the
+adaptive controllers (`common/adaptive/...`), the fair share exchange and the frontends'
+quota calculator, and the pool gate's admission policy
+(`common/persistence/sql/sqlplugin/dsql/gate`). The service, its connections and its
+store are models, kept coarse, since the simulator's job is the whole loop.
 
 [Offline replay](../../docs/dsql/adaptive-behaviour.md#offline-replay) runs the laws
 open-loop on recorded signals, so a proposal doesn't change the signals that follow.
@@ -31,13 +32,14 @@ go run ./cmd/tools/adaptivereplay /tmp/adaptivesim/*.jsonl
   the same result.
 - `-capacity mode` runs the capacity controller `disabled`, in `shadow` or `enabled`, and
   `-queued-grace duration` sets its `QueuedGrace`. `-task-rate mode`, `-workers mode`,
-  `-memory mode` and `-partitions mode` do the same for the task scheduler rate, the
-  worker counts, the memory budget and the partition scaler. The partition scaler needs a
-  scenario whose workflows run through matching.
+  `-memory mode`, `-partitions mode` and `-fair-share mode` do the same for the task
+  scheduler rate, the worker counts, the memory budget, the partition scaler and fair
+  share. The partition scaler needs a scenario whose workflows run through matching, and
+  fair share one with frontends.
 - `-trace dir` writes each host's signal plane trace to the directory, in the signal
-  plane's format and with its file names, such as `history-history-1-1.jsonl` and
-  `matching-matching-1-2.jsonl`, for `tools/adaptivereplay`. Write traces outside the
-  repository.
+  plane's format and with its file names, such as `history-history-1-1.jsonl`,
+  `matching-matching-1-2.jsonl` and `frontend-frontend-1-4.jsonl`, for
+  `tools/adaptivereplay`. Write traces outside the repository.
 
 The report gives, for each host, its tasks and how many completed, its persistence calls,
 the gate's refusals and the queries cut off at their deadlines, and its pool's connections
@@ -45,8 +47,10 @@ and acquires. For a host whose heap the model counts, it gives the heap's peak, 
 heap pressed on its limit and passed it, the tasks the queues held and left in the store,
 and the workflow cache's hits and size. Where the workflows run through matching, it gives
 each of matching's task queues: the tasks added and dispatched, the most waiting at once,
-the longest wait, and its partitions. Then come the cluster's connection attempts: the pools' dials and pgx's
-cancel requests, the connections opened, and DSQL's rejections. Last come the controllers'
+the longest wait, and its partitions. Where requests go through frontends, it gives each
+frontend's requests by namespace: those admitted and throttled, in all and a second over
+the namespace's requests at the frontend, and the rate its limiter last took. Then come
+the cluster's connection attempts: the pools' dials and pgx's cancel requests, the connections opened, and DSQL's rejections. Last come the controllers'
 decisions, a row for each controller on each host: its mode, how many decisions it made,
 its first change, the range of its proposals, and its reasons.
 
@@ -66,6 +70,7 @@ seconds, with no AWS.
 | `surge` | `tsr`, `shadow` | One host whose static persistence rate is 100/s runs 50 tasks/s, 120/s from 60 s to 120 s, and 5 workflows/s, with the capacity controller in shadow and the task scheduler rate enabled or in shadow |
 | `busy-queue` | `wrk`, `shadow` | One host whose queues have 8 workers each, so that the workers bind first, runs 60 tasks/s for 90 s, then 5 tasks/s until 540 s, with the worker counts enabled or in shadow |
 | `partitions` | `partitions`, `pollers`, `shadow` | A workflow task queue whose add rate passes the 50 tasks/s the partition scaler's trials need, which the appreciation never reached: one host of 128 shards in the local rig starts 80 workflows/s for 360 s, each a single workflow task, through matching's 4 partitions. In `partitions`, each partition dispatches at most 15 tasks/s and 32 pollers wait; in `pollers`, the partitions have no limit and 14 pollers wait. The scaler is enabled, or in shadow in `shadow`, which is `partitions`' host |
+| `uneven-frontends` | `fair`, `shadow` | The appreciation's uneven frontends, on its rig: two history hosts of 16 shards, matching with 32 workflow and 32 activity pollers, and two frontends that take 80% and 20% of 5 workflows/s, each one activity and a 1 s timer. From 30 s to 270 s, a second namespace whose limit across the cluster is 60/s gets 72 requests/s through the first frontend and 18 through the second. `fair` enables fair share with the other controllers in shadow; `shadow` runs every controller in shadow |
 | `memory-pressure` | `mem`, `shadow` | The appreciation's 512 MiB `GOMEMLIMIT`, with history's cache at its 1000 MiB default and each shard's queues limited to 10,000 pending tasks, on one host in the cluster's region: 5 workflows/s and 20 tasks/s for 600 s, and from 120 s, 224 MiB more heap for 120 s while 60,000 tasks reload, with the memory budget enabled or in shadow |
 
 The short pool's variants are the rig's: `base` is the plugin's path before the gate, with
@@ -192,6 +197,25 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
   detail. `matching.partitionScaler`, the simple scaler it falls back to, stays at its
   default, disabled, so while the controller doesn't apply its target, dynamic config
   sizes the partitions.
+- **The frontends**, where a scenario has them. Each workflow start goes through one,
+  picked by the scenario's weights, before the history host writes it, and a throttled
+  start is tried again after `RetryDelay`. Other clients' requests to a namespace are
+  admitted or throttled, and go no further. Each frontend keeps a token bucket for each
+  namespace, as `quotas.NewNamespaceRequestRateLimiter` does, at the rate the real
+  `ClusterAwareNamespaceQuotaCalculator` gives: its share of the namespace's limit across
+  the cluster, `frontend.globalNamespaceRPS`, or without one, `frontend.namespaceRPS`. The
+  burst is `frontend.namespaceBurstRatio` times the rate. As in
+  `quotas.DynamicRateLimiterImpl`, a bucket takes its rate and burst again at its first
+  request a minute or more after it last did, so a new share applies within a minute.
+- **Fair share.** Each frontend runs the real `fairshare.Exchange`, which counts the
+  tokens each namespace's requests ask of the limit and gives the quota calculator the
+  frontend's share. The exchanges serve each other over gRPC in memory, and each
+  frontend runs its rounds through `Exchange.Round` every `Interval` on simulated time,
+  from an offset of its own within the first. The exchanges' clock is set to the simulated
+  time before each round, and each frontend's own signal plane records its decisions and
+  writes its trace. The exchanges' calls run on the wall clock, so the model raises their
+  `Timeout` to a minute. With more than three frontends, the exchange adds the others'
+  demand in a map's order, so shares can differ between runs in their last bits.
 
 ## What it doesn't model
 
@@ -200,8 +224,12 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
 - **Priorities.** The persistence rate limiter is one bucket for every priority. While the
   controller is off or in shadow, it's the static rate; the existing per-priority health
   limiters aren't modeled. Freezing isn't simulated.
-- **The rest of the service.** Only history's execution store is modeled: no frontend,
-  visibility or history events reads, and a workflow is a coarse chain of tasks.
+- **The rest of the service.** Only history's execution store is modeled: no visibility or
+  history events reads, and a workflow is a coarse chain of tasks.
+- **The frontends in detail.** One namespace rate limit, the execution APIs', with one
+  priority and no operator share: no visibility or replication limits, and no limits on
+  the host as a whole. A request costs nothing past the limit, and a namespace's bucket is
+  never dropped while idle.
 - **Matching in detail.** No sticky queues, so every workflow task goes through the task
   queue's partitions: a workflow adds three where the appreciation's added about one. No
   forwarding between partitions, no backlog in the store, no task queue rate limits, and
@@ -315,13 +343,14 @@ for capacity the calls, and sets one of the model's knobs.
 | Worker counts | `common/adaptive/workers` | Each queue's scheduler workers, from `History.Workers` | Wired |
 | Memory budget | `common/adaptive/memory` | The workflow cache's size limit, from `History.CacheMaxBytes`, and each shard's queues' pending-task limits, from `History.MaxPendingTasks` | Wired |
 | Partition scaler | `common/adaptive/partitions` | Each of matching's task queues' partitions, from `Matching.Partitions` | Wired |
-| Fair share | `common/adaptive/fairshare` | Frontends' namespace shares; needs frontends | Not yet |
+| Fair share | `common/adaptive/fairshare` | Each frontend's share of a namespace's limit across the cluster, from `Frontends.Limits` | Wired |
 
 The capacity controller steps from the calls, as its limiter does. The others are driven by
 `signals.Drive` or `signals.DriveFunc`, which step a `signals.Controller` on each of the
 plane's snapshots, as they do in the service, and report each decision to the plane, which
 writes it to the trace. The partition scaler steps each time matching's scale manager
-describes a task queue's partitions, and reports to matching's plane. A host's dynamic
+describes a task queue's partitions, and reports to matching's plane. Fair share steps at
+each of the exchange's rounds, and reports to its frontend's plane. A host's dynamic
 config is a static collection of the scenario's controller settings.
 
 ## What the runs show
@@ -377,3 +406,21 @@ config is a static collection of the scenario's controller settings.
   counts shrink from 512 every 30 s until the store slows at 60 s, then hold as `backoff`
   after each capacity cut and while calls are throttled or rejected, until 3m39s. They
   shrink again from 4m9s. At 512 workers the pools never bind, as in the appreciation.
+- **Fair share lifts the busier frontend's share, and the shares stay within the
+  limit.** In `uneven-frontends`' `shadow`, each frontend takes half the second
+  namespace's limit of 60 a second: the first, sent 72, admits 30.2 and throttles 41.8,
+  and the second admits all of its 18. Together they admit 48.2 a second, as in the
+  appreciation. In `fair`, while the frontends' 30 s windows fill, each reads its own
+  demand fresher than the other's report of theirs, so for 35 s their shares add up to
+  more than the limit, as much as 79.7 a second at first. From 1m7s, once both windows
+  have filled and the frontends have exchanged them, the shares add up to 60: 44.4 and
+  15.6 a second, the law's split of the limit in proportion to the demand, above each
+  frontend's floor. Each namespace limiter takes its share a minute after its
+  namespace's first request, at 1m30s, by when the shares had settled. From then on the
+  first frontend admits 44.4 a second and the second 15.6, so the second throttles about
+  2.4 a second that it admitted in shadow, and together they admit 60, the limit. Over the
+  240 s of requests they admit 57.3 a second, against 48.2. In the appreciation, the
+  deadband held both shares above their proposals once the windows had filled, so they
+  added up to 105% of the limit. With #106, a share that falls applies at once, and
+  here the shares settle at the limit. The workflows' starts, through the same frontends
+  in a namespace without a limit across the cluster, are never throttled.

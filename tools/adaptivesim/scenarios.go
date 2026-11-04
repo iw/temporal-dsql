@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/adaptive/fairshare"
 	"go.temporal.io/server/common/adaptive/memory"
 	"go.temporal.io/server/common/adaptive/partitions"
 	"go.temporal.io/server/common/adaptive/taskrate"
@@ -29,7 +30,7 @@ type (
 		// For start-up: the capacity controller's QueuedGrace.
 		grace time.Duration
 		// The controllers' modes, where the scenario varies them.
-		capacity, taskRate, workers, memory, partitions string
+		capacity, taskRate, workers, memory, partitions, fairShare string
 		// For the partition scaler: each partition's dispatch limit, and the worker's
 		// workflow pollers.
 		partitionRate float64
@@ -127,6 +128,16 @@ var scenarios = []scenarioDef{
 			{name: "shadow", about: "each partition dispatches at most 15 tasks/s, with 32 pollers; the partition scaler in shadow", partitions: adaptive.ModeNameShadow, partitionRate: 15, pollers: 32},
 		},
 		build: partitionScaling,
+	},
+	{
+		name: "uneven-frontends",
+		about: "the appreciation's rig at 5 workflows/s, plus 90 requests/s in a second namespace from 30 s to 270 s, " +
+			"72 through the first frontend and 18 through the second, against that namespace's limit of 60/s",
+		variants: []variant{
+			{name: "fair", about: "fair share enabled, the other controllers in shadow", fairShare: adaptive.ModeNameEnabled},
+			{name: "shadow", about: "every controller in shadow"},
+		},
+		build: unevenFrontends,
 	},
 	{
 		name:     "fleet-start",
@@ -586,4 +597,85 @@ func partitionScaling(v variant) Scenario {
 			Scaler:          scaler,
 		},
 	}
+}
+
+// unevenNamespace is the uneven frontends' second namespace.
+const unevenNamespace = "uneven"
+
+// appreciationRig is the appreciation's rig, with its settings in every run: two history
+// hosts of 16 shards and 64 connections each, 22 ms from the store; matching, and a worker
+// with 32 workflow and 32 activity pollers, whose workflows each run one activity, then
+// sleep on a 1 s timer; and two frontends, which take 80% and 20% of the starts. Each
+// history host's static persistence rate is 2,000 calls a second, its task scheduler's rate
+// limiter is on, its cache is limited by size, and its heap by a 512 MiB GOMEMLIMIT. The
+// variant's modes set the controllers', and those it leaves unset run in shadow, as in the
+// appreciation. The load is 300 s, and each Workflows phase's rate is each host's.
+func appreciationRig(name string, v variant, load Load) Scenario {
+	v = v.orShadow()
+	host := Host{
+		Pool:     servicePool(64),
+		Gate:     true,
+		Read:     PipelinedRead,
+		Pacing:   localPacing(),
+		History:  historyModel(),
+		Capacity: capacityParams(v.capacity),
+		Memory:   Memory{Limit: 512 << 20, Base: 96 << 20, TaskBytes: 2 << 10},
+	}
+	host.History.SchedulerRateLimiter = true
+	// history.hostLevelCacheMaxSizeBytes's default, and the pending-task limits' defaults.
+	host.History.CacheMaxBytes = 256000 * 4 * 1024
+	host.History.CacheEntryBytes = 64 << 10
+	host.History.MaxPendingTasks = 10000
+	host.History.CriticalPendingTasks = 9000
+	host.Controllers.setModes(v)
+	scaler := partitions.DefaultSettings
+	scaler.Mode = v.partitions
+	fair := fairshare.DefaultSettings
+	fair.Mode = v.fairShare
+	return Scenario{
+		Name:     name,
+		Seed:     1,
+		Duration: 300 * time.Second,
+		Drain:    60 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    2,
+		Host:     host,
+		Signals:  signalWindows(),
+		Load:     load,
+		Matching: Matching{
+			WorkflowPollers: 32,
+			ActivityPollers: 32,
+			Activities:      1,
+			Timer:           time.Second,
+			Process:         10 * time.Millisecond,
+			Activity:        10 * time.Millisecond,
+			RetryDelay:      10 * time.Second,
+			Scaler:          scaler,
+		},
+		Frontends: Frontends{Count: 2, Starts: []float64{0.8, 0.2}, RetryDelay: time.Second, FairShare: fair},
+	}
+}
+
+// orShadow is the variant with each controller it leaves unset in shadow.
+func (v variant) orShadow() variant {
+	for _, mode := range []*string{&v.capacity, &v.taskRate, &v.workers, &v.memory, &v.partitions, &v.fairShare} {
+		if *mode == "" {
+			*mode = adaptive.ModeNameShadow
+		}
+	}
+	return v
+}
+
+// unevenFrontends is the appreciation's uneven frontends: a second namespace's requests
+// reach one frontend four times as often as the other. Without fair share, each frontend
+// takes half the namespace's limit, so the first throttles while the second leaves part of
+// its half unused.
+func unevenFrontends(v variant) Scenario {
+	sc := appreciationRig("uneven-frontends", v, Load{Workflows: []Phase{{Duration: 300 * time.Second, Rate: 2.5}}})
+	sc.Frontends.Limits = map[string]int{unevenNamespace: 60}
+	sc.Frontends.Requests = []Requests{{
+		Namespace: unevenNamespace, At: 30 * time.Second, Duration: 240 * time.Second, Rates: []float64{72, 18},
+	}}
+	return sc
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.temporal.io/server/common/adaptive/fairshare"
 	"go.temporal.io/server/common/adaptive/memory"
 	"go.temporal.io/server/common/adaptive/partitions"
 	"go.temporal.io/server/common/adaptive/taskrate"
@@ -32,6 +33,45 @@ type (
 		Slow Slow
 		// Matching, when it has pollers, runs the hosts' workflows through matching.
 		Matching Matching
+		// Frontends, when there are any, take the workflows' starts and other requests
+		// through their namespace rate limits.
+		Frontends Frontends
+	}
+
+	// Frontends are the frontend service's hosts. Each workflow start goes through one of
+	// them, which admits it or throttles it by its namespace's rate limit, before the
+	// history host writes it.
+	Frontends struct {
+		// Count is how many frontends there are.
+		Count int
+		// Starts are each frontend's part of the workflows' starts, one weight for each
+		// frontend; none splits them evenly.
+		Starts []float64
+		// Limits are namespaces' rate limits across the cluster, frontend.globalNamespaceRPS,
+		// by namespace. Each frontend takes a share of a namespace's limit: an equal share,
+		// or the fair share controller's. A namespace without one has PerInstance at each
+		// frontend, frontend.namespaceRPS, whose default is 2400 a second.
+		Limits      map[string]int
+		PerInstance int
+		// BurstRatio is each namespace's burst as a share of its rate,
+		// frontend.namespaceBurstRatio; 0 leaves its default of 2.
+		BurstRatio float64
+		// Requests are requests from other clients, which the frontends admit or throttle,
+		// and which go no further.
+		Requests []Requests
+		// RetryDelay is how long a throttled workflow start waits before it's tried again.
+		RetryDelay time.Duration
+		// FairShare is the fair share controller's dynamic config,
+		// frontend.fairShareController; zero leaves it disabled.
+		FairShare fairshare.Settings
+	}
+
+	// Requests are requests to a namespace, from At for Duration after the run's start:
+	// Rates are how many a second each frontend receives, from the first.
+	Requests struct {
+		Namespace    string
+		At, Duration time.Duration
+		Rates        []float64
 	}
 
 	// Matching is the matching service, on one host of its own, and the SDK worker that
@@ -327,8 +367,45 @@ func (sc *Scenario) validate() error {
 	if sc.Signals.Window < 100*time.Millisecond || sc.Signals.Windows < 1 || sc.Signals.PlaneInterval < 0 {
 		errs = append(errs, errors.New("the signals need a Window of at least 100 ms, and Windows"))
 	}
-	errs = append(errs, sc.Host.validate(), sc.Load.validate(&sc.Host, &sc.Matching))
+	errs = append(errs, sc.Host.validate(), sc.Load.validate(&sc.Host, &sc.Matching), sc.Frontends.validate())
 	return errors.Join(errs...)
+}
+
+func (f *Frontends) validate() error {
+	if !f.on() {
+		if len(f.Requests) > 0 {
+			return errors.New("requests need frontends")
+		}
+		return nil
+	}
+	var errs []error
+	if len(f.Starts) > 0 && len(f.Starts) != f.Count {
+		errs = append(errs, fmt.Errorf("the frontends' Starts need a weight for each of the %d frontends", f.Count))
+	}
+	total := 0.0
+	for _, w := range f.Starts {
+		if w < 0 {
+			errs = append(errs, errors.New("the frontends' Starts can't be negative"))
+		}
+		total += w
+	}
+	if len(f.Starts) > 0 && total <= 0 {
+		errs = append(errs, errors.New("the frontends' Starts need a positive weight"))
+	}
+	if f.RetryDelay <= 0 {
+		errs = append(errs, errors.New("the frontends need a RetryDelay for throttled starts"))
+	}
+	for _, r := range f.Requests {
+		if r.Namespace == "" || r.Duration <= 0 || len(r.Rates) > f.Count {
+			errs = append(errs, fmt.Errorf("requests need a namespace, a Duration and at most a rate for each frontend: %+v", r))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// on reports whether the requests go through frontends.
+func (f *Frontends) on() bool {
+	return f.Count > 0
 }
 
 func (h *Host) validate() error {

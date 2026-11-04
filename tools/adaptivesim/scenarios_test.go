@@ -6,12 +6,14 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/capacity"
+	"go.temporal.io/server/common/adaptive/fairshare"
 	"go.temporal.io/server/common/adaptive/memory"
 	"go.temporal.io/server/common/adaptive/partitions"
 	"go.temporal.io/server/common/adaptive/taskrate"
@@ -137,6 +139,7 @@ func TestTracesReplay(t *testing.T) {
 		{"memory-pressure", "mem"},
 		{"partitions", "partitions"},
 		{"partitions", "pollers"},
+		{"uneven-frontends", "fair"},
 	} {
 		t.Run(run.scenario+"/"+run.variant, func(t *testing.T) {
 			t.Parallel()
@@ -173,6 +176,9 @@ func tracedHosts(r *Result) []tracedHost {
 	}
 	if m := r.Matching; m != nil {
 		hosts = append(hosts, tracedHost{service: matchingService, name: m.Name, pid: m.PID, decisions: m.Decisions})
+	}
+	for _, f := range r.Frontends {
+		hosts = append(hosts, tracedHost{service: frontendService, name: f.Name, pid: f.PID, decisions: f.Decisions})
 	}
 	return hosts
 }
@@ -479,6 +485,12 @@ func TestTool(t *testing.T) {
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-memory", "on"}, &out), "memory mode")
 	require.ErrorContains(t, run([]string{"-scenario", "partitions", "-partitions", "on"}, &out), "partitions mode")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-partitions", "enabled"}, &out), "through matching")
+	require.ErrorContains(t, run([]string{"-scenario", "uneven-frontends", "-fair-share", "on"}, &out), "fair-share mode")
+	require.ErrorContains(t, run([]string{"-scenario", "startup", "-fair-share", "enabled"}, &out), "has no frontends")
+
+	out.Reset()
+	require.NoError(t, run([]string{"-scenario", "uneven-frontends", "-variant", "shadow", "-fair-share", "enabled"}, &out))
+	require.Regexp(t, `frontend-1 +fair_share execution/uneven +enabled`, out.String())
 }
 
 // partitionDecisions are the matching host's partition scaler decisions for the workflow
@@ -590,4 +602,117 @@ func TestPartitionScalerUndoesATrialThatDoesNot(t *testing.T) {
 		require.LessOrEqual(t, ds[j].Proposed, float64(details[j].Signals.Partitions), "no trial within NoGainHold")
 	}
 	require.Equal(t, 4, r.Matching.Queues[0].Read)
+}
+
+// uneven is a frontend's requests in the uneven frontends' second namespace.
+func uneven(t *testing.T, r *Result, frontend int) NamespaceResult {
+	t.Helper()
+	require.Len(t, r.Frontends, 2)
+	n, ok := r.Frontends[frontend].Namespace(unevenNamespace)
+	require.True(t, ok)
+	return n
+}
+
+// admittedBetween is the requests the frontends admitted for a namespace, a second, over
+// [from, to) after the run's start.
+func admittedBetween(t *testing.T, r *Result, from, to time.Duration) float64 {
+	t.Helper()
+	admitted := 0
+	for i := range r.Frontends {
+		n := uneven(t, r, i)
+		for s := int(from / time.Second); s < int(to/time.Second) && s < len(n.PerSecond); s++ {
+			admitted += n.PerSecond[s].Admitted
+		}
+	}
+	return float64(admitted) / (to - from).Seconds()
+}
+
+// The appreciation's uneven frontends, and its finding 4. Without fair share, each frontend
+// takes half the namespace's limit, so the busier throttles while the quieter leaves part of
+// its half unused. With it, the busier frontend's share rises and the quieter's falls, and
+// once the namespace's limiters take the shares, at their refresh, its admitted requests
+// rise to its limit. Once the frontends' demand windows have filled, their shares add up to
+// no more than the limit, as #106 has it: a share that falls applies at once, and one that
+// rises by less than the deadband holds below its proposal.
+func TestFairShareLiftsTheBusierFrontend(t *testing.T) {
+	t.Parallel()
+	fair := runScenario(t, "uneven-frontends", "fair", Options{})
+	shadow := runScenario(t, "uneven-frontends", "shadow", Options{})
+	sc, err := Lookup("uneven-frontends", "fair")
+	require.NoError(t, err)
+	requests := sc.Frontends.Requests[0]
+	end := requests.At + requests.Duration
+	limit := float64(sc.Frontends.Limits[unevenNamespace])
+	settings := sc.Frontends.FairShare
+
+	admitted, throttled := uneven(t, shadow, 0).Rates()
+	require.InDelta(t, limit/2, admitted, 0.5)
+	require.InDelta(t, requests.Rates[0]-limit/2, throttled, 0.5)
+	admitted, _ = uneven(t, shadow, 1).Rates()
+	require.InDelta(t, requests.Rates[1], admitted, 0.5)
+	require.Zero(t, uneven(t, shadow, 1).Throttled)
+
+	// The frontends' decisions in time order, and the share each applied after each.
+	type step struct {
+		frontend int
+		d        adaptive.Decision
+	}
+	var steps []step
+	for i, f := range fair.Frontends {
+		for _, d := range f.Decisions.Of(fairshare.Name) {
+			require.Equal(t, adaptive.ModeOn, d.Mode)
+			steps = append(steps, step{frontend: i, d: d})
+		}
+	}
+	slices.SortStableFunc(steps, func(a, b step) int { return a.d.Time.Compare(b.d.Time) })
+	shares := []float64{limit / 2, limit / 2}
+	filled := requests.At + settings.Window + 2*settings.Interval
+	checked := 0
+	for _, s := range steps {
+		shares[s.frontend] = s.d.Applied
+		if at := s.d.Time.Sub(epoch); at >= filled && at < end {
+			require.LessOrEqual(t, shares[0]+shares[1], limit+1e-9, "the shares at %s", at)
+			checked++
+		}
+	}
+	require.Positive(t, checked)
+
+	// Once their windows have filled, each frontend applies the law's share of the demand:
+	// the busier more than half the limit, the quieter less.
+	applied := make([]float64, len(requests.Rates))
+	for i, rate := range requests.Rates {
+		for _, s := range steps {
+			if s.frontend == i && s.d.Time.Sub(epoch) < end {
+				applied[i] = s.d.Applied
+			}
+		}
+		want, reason := fairshare.Share(settings.Params(), limit, fairshare.Demand{
+			Own: rate, Peers: requests.Rates[1-i], Members: 2, Known: 1,
+		})
+		require.Equal(t, fairshare.ReasonOver, reason)
+		require.InDelta(t, want, applied[i], 1e-9, "frontend %d", i+1)
+	}
+	require.Greater(t, applied[0], limit/2)
+	require.Less(t, applied[1], limit/2)
+
+	// The limiters take the shares at their refresh, a minute after the requests start; a
+	// minute later, they've spent the burst they saved.
+	from := requests.At + 2*limiterRefresh
+	require.InDelta(t, limit, admittedBetween(t, fair, from, end), 1)
+	require.InDelta(t, limit/2+requests.Rates[1], admittedBetween(t, shadow, from, end), 1)
+
+	// The workflows' starts go through the same frontends, in a namespace without a limit
+	// across the cluster: none is throttled, and every workflow completes.
+	for _, r := range []*Result{fair, shadow} {
+		completed := 0
+		for _, h := range r.Hosts {
+			completed += h.Workflows.Completed
+		}
+		require.Equal(t, 1500, completed)
+		for _, f := range r.Frontends {
+			n, ok := f.Namespace(workflowNamespace)
+			require.True(t, ok)
+			require.Zero(t, n.Throttled)
+		}
+	}
 }

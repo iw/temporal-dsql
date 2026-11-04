@@ -20,6 +20,7 @@ func Report(w io.Writer, r *Result) error {
 	p.hosts(r)
 	p.memory(r)
 	p.matching(r)
+	p.frontends(r)
 	p.connections(r)
 	p.decisions(r)
 	return p.err
@@ -160,6 +161,23 @@ func (p *printer) matching(r *Result) {
 	}
 }
 
+// frontends is the requests each frontend took, by namespace.
+func (p *printer) frontends(r *Result) {
+	var rows [][]string
+	for _, f := range r.Frontends {
+		for _, n := range f.Namespaces {
+			admitted, throttled := n.Rates()
+			rows = append(rows, []string{
+				f.Name, n.Namespace, fmt.Sprint(n.Admitted), fmt.Sprint(n.Throttled),
+				fmt.Sprintf("%.1f / %.1f", admitted, throttled), number(n.Limit),
+			})
+		}
+	}
+	if len(rows) > 0 {
+		p.table("Frontend\tNamespace\tAdmitted\tThrottled\tAdmitted / throttled a second\tLimit last taken", rows)
+	}
+}
+
 func (p *printer) connections(r *Result) {
 	c := r.Connections
 	peakAttempts, peakOpens := 0, 0
@@ -182,6 +200,9 @@ func (p *printer) decisions(r *Result) {
 	}
 	if m := r.Matching; m != nil {
 		rows = append(rows, decisionRows(m.Name, 0, m.Decisions)...)
+	}
+	for _, f := range r.Frontends {
+		rows = append(rows, decisionRows(f.Name, 0, f.Decisions)...)
 	}
 	if len(rows) > 0 {
 		p.table("Host\tController\tMode\tDecisions\tFirst change, after start\tLowest proposed\tHighest proposed\tLast applied\tReasons", rows)
