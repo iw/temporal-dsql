@@ -36,6 +36,7 @@ const loadEnd = 150 * time.Second
 // completed all of them and cleared it in about 31 s; the gate alone completed all of
 // them, in 226 s.
 func TestShortPoolBurst(t *testing.T) {
+	t.Parallel()
 	base := runScenario(t, "short-pool-burst", "base", Options{})
 	gated := runScenario(t, "short-pool-burst", "gate", Options{})
 	both := runScenario(t, "short-pool-burst", "pipeline-gate", Options{})
@@ -68,6 +69,7 @@ func TestShortPoolBurst(t *testing.T) {
 // path completed 244 of 3,599, the gate alone 2,764, and the gate and the pipelined read
 // about 3,540.
 func TestShortPoolOverload(t *testing.T) {
+	t.Parallel()
 	base := runScenario(t, "short-pool-overload", "base", Options{})
 	gated := runScenario(t, "short-pool-overload", "gate", Options{})
 	both := runScenario(t, "short-pool-overload", "pipeline-gate", Options{})
@@ -87,6 +89,7 @@ func TestShortPoolOverload(t *testing.T) {
 // controller's rate at most host starts. QueuedGrace keeps the queued share from cutting
 // for 30 s after the controller's first step.
 func TestStartupQueuedGrace(t *testing.T) {
+	t.Parallel()
 	grace := runScenario(t, "startup", "grace", Options{})
 	for _, h := range grace.Hosts {
 		decisions := h.Decisions.Of(capacity.Name)
@@ -122,6 +125,7 @@ func firstCut(h HostResult) *adaptive.Decision {
 // The hosts' traces replay through tools/adaptivereplay, each capacity step to the
 // proposal and reason the simulation recorded.
 func TestTracesReplay(t *testing.T) {
+	t.Parallel()
 	for _, run := range []struct{ scenario, variant string }{
 		{"startup", "no-grace"},
 		{"short-pool-overload", "pipeline-gate"},
@@ -131,21 +135,24 @@ func TestTracesReplay(t *testing.T) {
 		{"busy-queue", "wrk"},
 		{"memory-pressure", "mem"},
 	} {
-		dir := t.TempDir()
-		r := runScenario(t, run.scenario, run.variant, Options{TraceDir: dir})
-		for i, h := range r.Hosts {
-			path := filepath.Join(dir, fmt.Sprintf("%s-%s-%d.jsonl", historyService, h.Name, i+1))
-			f, err := os.Open(path)
-			require.NoError(t, err)
-			traces, err := adaptivereplay.Read(filepath.Base(path), f)
-			require.NoError(t, f.Close())
-			require.NoError(t, err)
-			require.Len(t, traces, 1)
-			require.Equal(t, h.Name, traces[0].Header.Host)
-			require.Positive(t, traces[0].Ticks)
+		t.Run(run.scenario+"/"+run.variant, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			r := runScenario(t, run.scenario, run.variant, Options{TraceDir: dir})
+			for i, h := range r.Hosts {
+				path := filepath.Join(dir, fmt.Sprintf("%s-%s-%d.jsonl", historyService, h.Name, i+1))
+				f, err := os.Open(path)
+				require.NoError(t, err)
+				traces, err := adaptivereplay.Read(filepath.Base(path), f)
+				require.NoError(t, f.Close())
+				require.NoError(t, err)
+				require.Len(t, traces, 1)
+				require.Equal(t, h.Name, traces[0].Header.Host)
+				require.Positive(t, traces[0].Ticks)
 
-			requireReplays(t, traces[0], h.Decisions)
-		}
+				requireReplays(t, traces[0], h.Decisions)
+			}
+		})
 	}
 }
 
@@ -168,6 +175,7 @@ func requireReplays(t *testing.T, trace *adaptivereplay.Trace, decisions Decisio
 // appreciation found, unsmoothed: each coupled step reads the rate of capacity's latest
 // decision, and the task rate falls within a few steps of capacity's first cut.
 func TestTaskRateFollowsCapacity(t *testing.T) {
+	t.Parallel()
 	for _, variant := range []string{"cap", "cap-tsr"} {
 		r := runScenario(t, "slow-store", variant, Options{})
 		h := r.Hosts[0]
@@ -231,6 +239,7 @@ func proposedAt(ds Decisions, at time.Time) float64 {
 // tasks over its rate in the scheduler: the persistence rate limiter refuses almost
 // nothing, the workflows' calls keep their share, and the backlog clears.
 func TestTaskRateHoldsTasksInTheScheduler(t *testing.T) {
+	t.Parallel()
 	enabled := runScenario(t, "surge", "tsr", Options{})
 	shadow := runScenario(t, "surge", "shadow", Options{})
 	held, unheld := enabled.Hosts[0], shadow.Hosts[0]
@@ -255,6 +264,7 @@ func TestTaskRateHoldsTasksInTheScheduler(t *testing.T) {
 // every IdleSteps, to half. The appreciation's queues never bound, so their counts only
 // shrank.
 func TestWorkerCountsGrowAndShrink(t *testing.T) {
+	t.Parallel()
 	enabled := runScenario(t, "busy-queue", "wrk", Options{})
 	shadow := runScenario(t, "busy-queue", "shadow", Options{})
 	h := enabled.Hosts[0]
@@ -291,6 +301,7 @@ func TestWorkerCountsGrowAndShrink(t *testing.T) {
 // While persistence backs off, as after each capacity cut, the worker counts hold, or
 // return to their setting, and never grow.
 func TestWorkerCountsBackOffAfterCapacityCuts(t *testing.T) {
+	t.Parallel()
 	r := runScenario(t, "slow-store", "cap-wrk", Options{})
 	h := r.Hosts[0]
 	cuts := 0
@@ -321,6 +332,7 @@ func TestWorkerCountsBackOffAfterCapacityCuts(t *testing.T) {
 // to their budgets. The heap stays under the limit, where in shadow the cache's setting
 // takes it past.
 func TestMemoryBudgetShrinksUnderPressureAndRecovers(t *testing.T) {
+	t.Parallel()
 	enabled := runScenario(t, "memory-pressure", "mem", Options{})
 	shadow := runScenario(t, "memory-pressure", "shadow", Options{})
 	sc, err := Lookup("memory-pressure", "mem")
@@ -398,6 +410,7 @@ func TestMemoryBudgetShrinksUnderPressureAndRecovers(t *testing.T) {
 }
 
 func TestRunsAreDeterministic(t *testing.T) {
+	t.Parallel()
 	first := runScenario(t, "short-pool-burst", "base", Options{})
 	second := runScenario(t, "short-pool-burst", "base", Options{})
 	require.Equal(t, first, second)
@@ -411,6 +424,7 @@ func TestRunsAreDeterministic(t *testing.T) {
 }
 
 func TestWorkflowsComplete(t *testing.T) {
+	t.Parallel()
 	r := runScenario(t, "workflows", "", Options{})
 	for _, h := range r.Hosts {
 		require.Equal(t, 1200, h.Workflows.Started)
@@ -420,6 +434,7 @@ func TestWorkflowsComplete(t *testing.T) {
 }
 
 func TestTool(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	require.NoError(t, run([]string{"-list"}, &out))
 	for _, name := range Names() {
