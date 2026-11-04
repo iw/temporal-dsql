@@ -57,7 +57,7 @@ type (
 		// counting is set while the controller runs, so requests are counted.
 		counting atomic.Bool
 		// lastRound is when the last round measured, or zero before the first since counting
-		// started. Only the exchange's goroutine uses it.
+		// started. Only the goroutine that runs the rounds uses it.
 		lastRound time.Time
 		ctx       context.Context
 		cancel    context.CancelFunc
@@ -74,8 +74,8 @@ type (
 	}
 
 	// class is one of a frontend's namespace rate limits, with the counts, shares and
-	// decisions the exchange keeps for it. Only the exchange's goroutine uses samples,
-	// applied and last.
+	// decisions the exchange keeps for it. Only the goroutine that runs the rounds uses
+	// samples, applied and last.
 	class struct {
 		name    string
 		limit   func(namespace string) int // a namespace's limit across the cluster
@@ -211,8 +211,16 @@ func (e *Exchange) run() {
 	}
 }
 
+// Round runs one round now, in place of Start, for a caller that runs the rounds on a
+// schedule of its own, as tools/adaptivesim does on simulated time. Rounds don't overlap:
+// a caller of Round doesn't call Start.
+func (e *Exchange) Round(ctx context.Context) {
+	e.round(ctx)
+}
+
 // round measures this frontend's demand, exchanges it with the other frontends, and sets
-// each limit's shares. Only the exchange's goroutine calls it.
+// each limit's shares. Only the goroutine that runs the rounds calls it: the exchange's
+// own, or Round's caller.
 func (e *Exchange) round(ctx context.Context) {
 	s := e.Settings()
 	if adaptive.ParseMode(s.Mode) == adaptive.ModeOff {

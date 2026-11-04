@@ -91,6 +91,7 @@ type (
 		// runs, as its queue recorders do.
 		recording func() bool
 		shards    []shard
+		shardLog  ShardStats
 		cache     *workflowCache
 		// loaded is the tasks the queues hold in memory, and stored those they left in the
 		// store while their shards' queues were at their pending-task limits.
@@ -102,7 +103,9 @@ type (
 		reloadTotal int
 	}
 
-	// task is one of history's tasks, for a workflow of its own, in one of the queues.
+	// task is one of history's tasks, for a workflow of its own, in one of the queues. An
+	// attempt reads the workflow's state if it isn't cached, then writes, except a
+	// transfer task of the matching model's, which pushes a task to matching instead.
 	task struct {
 		wf               int64
 		shard            int
@@ -110,6 +113,9 @@ type (
 		arrived, queued  time.Time
 		attempts, denied int
 		reload           bool
+		// push adds the workflow's task to matching, in place of the write. fired follows
+		// a timer task's write.
+		push, fired func()
 	}
 
 	shard struct {
@@ -122,6 +128,19 @@ type (
 		grant  func()
 		expire *event
 		gone   bool
+	}
+
+	// ShardStats are the host's shards' writes, each second after the run's start.
+	ShardStats struct {
+		Shards    int
+		PerSecond []ShardSecond
+	}
+
+	// ShardSecond is the writes that took their shard's lock in a second, and how long
+	// they waited for it, and the time the shards were held for writes during the second.
+	ShardSecond struct {
+		Writes       int
+		Waited, Busy time.Duration
 	}
 
 	// TaskStats counts a host's tasks: those that arrived and completed, their attempts,
@@ -147,6 +166,7 @@ func newHistory(l *loop, cfg History, c *client, h *health, seed uint64, name st
 		health:    h,
 		recording: func() bool { return false },
 		shards:    make([]shard, cfg.Shards),
+		shardLog:  ShardStats{Shards: cfg.Shards},
 		cache:     newWorkflowCache(cfg.CacheMaxBytes, cfg.CacheEntryBytes),
 	}
 	for _, queue := range queueNames {
@@ -197,48 +217,86 @@ func (h *history) run(t *task) {
 	}
 	t.attempts++
 	h.stats.Attempts++
-	h.execute(t.wf, t.shard, now.Add(h.cfg.Deadline), func(f failure) {
+	done := func(f failure) {
 		if f == ok {
 			h.complete(t)
 		} else {
 			h.fail(t, f)
 		}
 		t.queue.free()
+	}
+	deadline := now.Add(h.cfg.Deadline)
+	if t.push != nil {
+		h.read(t.wf, deadline, func(f failure) {
+			if f == ok {
+				t.push()
+			}
+			done(f)
+		})
+		return
+	}
+	h.execute(t.wf, t.shard, deadline, func(f failure) {
+		if f == ok && t.fired != nil {
+			t.fired()
+		}
+		done(f)
+	})
+}
+
+// read reads the workflow's state, unless it's cached.
+func (h *history) read(wf int64, deadline time.Time, done func(failure)) {
+	if h.cache.get(wf) {
+		done(ok)
+		return
+	}
+	h.client.call(readOp, deadline, func(f failure) {
+		if f == ok {
+			h.cache.put(wf)
+		}
+		done(f)
 	})
 }
 
 // execute reads the workflow's state if it isn't cached, then writes it under its shard's
 // lock. A failure clears the workflow from the cache.
 func (h *history) execute(wf int64, shard int, deadline time.Time, done func(failure)) {
-	write := func() {
+	h.read(wf, deadline, func(f failure) {
+		if f != ok {
+			done(f)
+			return
+		}
 		h.write(wf, shard, deadline, func(f failure) {
 			if f != ok {
 				h.cache.remove(wf)
 			}
 			done(f)
 		})
-	}
-	if h.cache.get(wf) {
-		write()
-		return
-	}
-	h.client.call(readOp, deadline, func(f failure) {
-		if f != ok {
-			done(f)
-			return
-		}
-		h.cache.put(wf)
-		write()
 	})
 }
 
+// queue is the task queue of the name.
+func (h *history) queue(name string) *taskQueue {
+	for _, q := range h.queues {
+		if q.name == name {
+			return q
+		}
+	}
+	return nil
+}
+
 func (h *history) write(wf int64, shard int, deadline time.Time, done func(failure)) {
+	asked := h.l.now
 	h.lock(shard, deadline, func(locked bool) {
 		if !locked {
 			done(timedOut)
 			return
 		}
+		took := h.l.now
+		s := secondOf(&h.shardLog.PerSecond, took)
+		s.Writes++
+		s.Waited += took.Sub(asked)
 		h.client.call(writeOp, deadline, func(f failure) {
+			spread(&h.shardLog.PerSecond, took, h.l.now, func(s *ShardSecond, d time.Duration) { s.Busy += d })
 			h.unlock(shard)
 			done(f)
 		})
@@ -360,10 +418,15 @@ type (
 	// WorkflowStats counts a host's workflows.
 	WorkflowStats struct {
 		Started, Completed int
-		// StartFailures and ResponseFailures count the starts and the workers' responses
-		// that failed, and were tried again after RetryDelay.
+		// StartFailures and ResponseFailures count the starts and the workers' calls that
+		// failed, and were tried again after RetryDelay: their responses, and with
+		// matching, the tasks history couldn't record as started.
 		StartFailures, ResponseFailures int
-		P50, P99                        time.Duration
+		// P50, P99 and Max are the workflows' times from start to completion.
+		P50, P99, Max time.Duration
+		// CompletedPerSecond is the workflows that completed in each second after the run's
+		// start.
+		CompletedPerSecond []int
 	}
 )
 
@@ -414,8 +477,7 @@ func (w *workers) poll(wf *workflow) {
 				w.dispatch(wf)
 				return
 			}
-			w.stats.Completed++
-			w.lat = append(w.lat, w.l.now.Sub(wf.started))
+			w.completed(wf.started)
 		})
 	})
 }
@@ -428,8 +490,15 @@ func (w *workers) release() {
 	w.free++
 }
 
+// completed counts a workflow that completed, and its time from its start.
+func (w *workers) completed(started time.Time) {
+	w.stats.Completed++
+	*secondOf(&w.stats.CompletedPerSecond, w.l.now)++
+	w.lat = append(w.lat, w.l.now.Sub(started))
+}
+
 func (w *workers) result() WorkflowStats {
 	stats := w.stats
-	stats.P50, stats.P99 = percentile(w.lat, 0.5), percentile(w.lat, 0.99)
+	stats.P50, stats.P99, stats.Max = percentile(w.lat, 0.5), percentile(w.lat, 0.99), percentile(w.lat, 1)
 	return stats
 }

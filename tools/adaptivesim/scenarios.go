@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/adaptive/fairshare"
 	"go.temporal.io/server/common/adaptive/memory"
+	"go.temporal.io/server/common/adaptive/partitions"
 	"go.temporal.io/server/common/adaptive/taskrate"
 	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -28,7 +30,14 @@ type (
 		// For start-up: the capacity controller's QueuedGrace.
 		grace time.Duration
 		// The controllers' modes, where the scenario varies them.
-		capacity, taskRate, workers, memory string
+		capacity, taskRate, workers, memory, partitions, fairShare string
+		// For the partition scaler: each partition's dispatch limit, and the worker's
+		// workflow pollers.
+		partitionRate float64
+		pollers       int
+		// off disables every controller and turns the signal plane off, as today's defaults
+		// have it.
+		off bool
 	}
 )
 
@@ -80,6 +89,8 @@ var scenarios = []scenarioDef{
 			{name: "cap", about: "the capacity controller enabled, the task scheduler rate in shadow", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameShadow},
 			{name: "cap-tsr", about: "both enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled},
 			{name: "cap-wrk", about: "the capacity controller and the worker counts enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameShadow, workers: adaptive.ModeNameEnabled},
+			{name: "all", about: "every controller the host runs enabled: the capacity controller, the task scheduler rate and the worker counts",
+				capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled, workers: adaptive.ModeNameEnabled},
 		},
 		build: slowStore,
 	},
@@ -111,6 +122,35 @@ var scenarios = []scenarioDef{
 			{name: "shadow", about: "the memory budget in shadow", memory: adaptive.ModeNameShadow},
 		},
 		build: memoryPressure,
+	},
+	{
+		name: "partitions",
+		about: "one host of 128 shards in the local rig: 80 workflows/s for 360 s, each a single workflow task, " +
+			"through a workflow task queue of 4 partitions",
+		variants: []variant{
+			{name: "partitions", about: "each partition dispatches at most 15 tasks/s, with 32 pollers; the partition scaler enabled", partitions: adaptive.ModeNameEnabled, partitionRate: 15, pollers: 32},
+			{name: "pollers", about: "no partition limit, with 14 pollers; the partition scaler enabled", partitions: adaptive.ModeNameEnabled, pollers: 14},
+			{name: "shadow", about: "each partition dispatches at most 15 tasks/s, with 32 pollers; the partition scaler in shadow", partitions: adaptive.ModeNameShadow, partitionRate: 15, pollers: 32},
+		},
+		build: partitionScaling,
+	},
+	{
+		name: "uneven-frontends",
+		about: "the appreciation's rig at 5 workflows/s, plus 90 requests/s in a second namespace from 30 s to 270 s, " +
+			"72 through the first frontend and 18 through the second, against that namespace's limit of 60/s",
+		variants: []variant{
+			{name: "fair", about: "fair share enabled, the other controllers in shadow", fairShare: adaptive.ModeNameEnabled},
+			{name: "shadow", about: "every controller in shadow"},
+			appreciationConfigs[len(appreciationConfigs)-1],
+		},
+		build: unevenFrontends,
+	},
+	{
+		name: "ramp",
+		about: "the appreciation's ramp on its rig: 5, 10, 20 and 30 workflows/s, 75 s each, " +
+			"where history's writes to each shard and the worker's pollers bound goodput",
+		variants: appreciationConfigs,
+		build:    ramp,
 	},
 	{
 		name:     "fleet-start",
@@ -533,4 +573,166 @@ func describe() string {
 		}
 	}
 	return b.String()
+}
+
+// partitionScaling is a task queue whose add rate passes the 50 tasks a second the
+// partition scaler's trials need, which the appreciation never reached. Each workflow is a
+// single workflow task, so the workflow task queue's add rate is the start rate. Either
+// the partitions or the pollers hold dispatch back, and the scaler's trial shows which.
+func partitionScaling(v variant) Scenario {
+	host := Host{
+		Pool:     servicePool(64),
+		Gate:     true,
+		Read:     PipelinedRead,
+		Pacing:   localPacing(),
+		History:  historyModel(),
+		Capacity: capacityParams(adaptive.ModeNameShadow),
+	}
+	host.History.Shards = 128
+	scaler := partitions.DefaultSettings
+	scaler.Mode = v.partitions
+	return Scenario{
+		Name:     "partitions",
+		Seed:     1,
+		Duration: 360 * time.Second,
+		Drain:    60 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    1,
+		Host:     host,
+		Signals:  signalWindows(),
+		Load:     Load{Workflows: []Phase{{Duration: 360 * time.Second, Rate: 80}}},
+		Matching: Matching{
+			PartitionRate:   v.partitionRate,
+			WorkflowPollers: v.pollers,
+			Process:         10 * time.Millisecond,
+			RetryDelay:      10 * time.Second,
+			Scaler:          scaler,
+		},
+	}
+}
+
+// unevenNamespace is the uneven frontends' second namespace.
+const unevenNamespace = "uneven"
+
+// appreciationRig is the appreciation's rig, with its settings in every run: two history
+// hosts of 16 shards and 64 connections each, 22 ms from the store; matching, and a worker
+// with 32 workflow and 32 activity pollers, whose workflows each run one activity, then
+// sleep on a 1 s timer; and two frontends, which take 80% and 20% of the starts. Each
+// history host's static persistence rate is 2,000 calls a second, its task scheduler's rate
+// limiter is on, its cache is limited by size, and its heap by a 512 MiB GOMEMLIMIT. The
+// variant's modes set the controllers', and those it leaves unset run in shadow, as in the
+// appreciation. The load is 300 s, and each Workflows phase's rate is each host's.
+func appreciationRig(name string, v variant, load Load) Scenario {
+	if v.off {
+		v = v.disabled()
+	}
+	v = v.orShadow()
+	host := Host{
+		Pool:     servicePool(64),
+		Gate:     true,
+		Read:     PipelinedRead,
+		Pacing:   localPacing(),
+		History:  historyModel(),
+		Capacity: capacityParams(v.capacity),
+		Memory:   Memory{Limit: 512 << 20, Base: 96 << 20, TaskBytes: 2 << 10},
+	}
+	host.History.SchedulerRateLimiter = true
+	// history.hostLevelCacheMaxSizeBytes's default, and the pending-task limits' defaults.
+	host.History.CacheMaxBytes = 256000 * 4 * 1024
+	host.History.CacheEntryBytes = 64 << 10
+	host.History.MaxPendingTasks = 10000
+	host.History.CriticalPendingTasks = 9000
+	host.Controllers.setModes(v)
+	scaler := partitions.DefaultSettings
+	scaler.Mode = v.partitions
+	fair := fairshare.DefaultSettings
+	fair.Mode = v.fairShare
+	sc := Scenario{
+		Name:     name,
+		Seed:     1,
+		Duration: 300 * time.Second,
+		Drain:    60 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    2,
+		Host:     host,
+		Signals:  signalWindows(),
+		Load:     load,
+		Matching: Matching{
+			WorkflowPollers: 32,
+			ActivityPollers: 32,
+			Activities:      1,
+			Timer:           time.Second,
+			Process:         10 * time.Millisecond,
+			Activity:        10 * time.Millisecond,
+			RetryDelay:      10 * time.Second,
+			Scaler:          scaler,
+		},
+		Frontends: Frontends{Count: 2, Starts: []float64{0.8, 0.2}, RetryDelay: time.Second, FairShare: fair},
+	}
+	if v.off {
+		sc.Signals.PlaneInterval = 0
+	}
+	return sc
+}
+
+// disabled is the variant with every controller disabled.
+func (v variant) disabled() variant {
+	for _, mode := range []*string{&v.capacity, &v.taskRate, &v.workers, &v.memory, &v.partitions, &v.fairShare} {
+		*mode = adaptive.ModeNameDisabled
+	}
+	return v
+}
+
+// orShadow is the variant with each controller it leaves unset in shadow.
+func (v variant) orShadow() variant {
+	for _, mode := range []*string{&v.capacity, &v.taskRate, &v.workers, &v.memory, &v.partitions, &v.fairShare} {
+		if *mode == "" {
+			*mode = adaptive.ModeNameShadow
+		}
+	}
+	return v
+}
+
+// unevenFrontends is the appreciation's uneven frontends: a second namespace's requests
+// reach one frontend four times as often as the other. Without fair share, each frontend
+// takes half the namespace's limit, so the first throttles while the second leaves part of
+// its half unused.
+func unevenFrontends(v variant) Scenario {
+	sc := appreciationRig("uneven-frontends", v, Load{Workflows: []Phase{{Duration: 300 * time.Second, Rate: 2.5}}})
+	sc.Frontends.Limits = map[string]int{unevenNamespace: 60}
+	sc.Frontends.Requests = []Requests{{
+		Namespace: unevenNamespace, At: 30 * time.Second, Duration: 240 * time.Second, Rates: []float64{72, 18},
+	}}
+	return sc
+}
+
+// appreciationConfigs are the appreciation's configs: every controller disabled with the
+// signal plane off, every one in shadow, each enabled alone with the others in shadow, and
+// every one enabled.
+var appreciationConfigs = []variant{
+	{name: "off", about: "every controller disabled and the signal plane off: today's defaults", off: true},
+	{name: "shadow", about: "every controller in shadow"},
+	{name: "cap", about: "persistence capacity enabled, the others in shadow", capacity: adaptive.ModeNameEnabled},
+	{name: "tsr", about: "the task scheduler rate enabled, the others in shadow", taskRate: adaptive.ModeNameEnabled},
+	{name: "wrk", about: "the worker counts enabled, the others in shadow", workers: adaptive.ModeNameEnabled},
+	{name: "mem", about: "the memory budget enabled, the others in shadow", memory: adaptive.ModeNameEnabled},
+	{name: "par", about: "the partition scaler enabled, the others in shadow", partitions: adaptive.ModeNameEnabled},
+	{name: "fair", about: "fair share enabled, the others in shadow", fairShare: adaptive.ModeNameEnabled},
+	{name: "all", about: "every controller enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled,
+		workers: adaptive.ModeNameEnabled, memory: adaptive.ModeNameEnabled, partitions: adaptive.ModeNameEnabled,
+		fairShare: adaptive.ModeNameEnabled},
+}
+
+// ramp is the appreciation's ramp on its rig: 5, 10, 20 and 30 workflows a second, 75 s
+// each, split between the two history hosts.
+func ramp(v variant) Scenario {
+	var phases []Phase
+	for i, rate := range []float64{5, 10, 20, 30} {
+		phases = append(phases, Phase{At: time.Duration(i) * 75 * time.Second, Duration: 75 * time.Second, Rate: rate / 2})
+	}
+	sc := appreciationRig("ramp", v, Load{Workflows: phases})
+	sc.Drain = 180 * time.Second
+	return sc
 }

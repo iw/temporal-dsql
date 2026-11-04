@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive"
+	"go.temporal.io/server/common/adaptive/fairshare"
 	"go.temporal.io/server/common/adaptive/memory"
+	"go.temporal.io/server/common/adaptive/partitions"
 	"go.temporal.io/server/common/adaptive/taskrate"
 	workercount "go.temporal.io/server/common/adaptive/workers"
 )
@@ -33,6 +35,8 @@ func run(args []string, stdout io.Writer) error {
 	fs.StringVar(&o.taskRate, "task-rate", "", "run the task scheduler rate controller in this `mode`")
 	fs.StringVar(&o.workers, "workers", "", "run the worker count controllers in this `mode`")
 	fs.StringVar(&o.memory, "memory", "", "run the memory budget controllers in this `mode`")
+	fs.StringVar(&o.partitions, "partitions", "", "run the partition scaler in this `mode`, where the workflows run through matching")
+	fs.StringVar(&o.fairShare, "fair-share", "", "run the fair share controller in this `mode`, where the requests go through frontends")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(fs.Output(), "Usage: adaptivesim -scenario name [flags]\n\n"+
 			"Simulates history's adaptive plane on a coarse model of its DSQL store.\n\n")
@@ -81,8 +85,8 @@ func run(args []string, stdout io.Writer) error {
 
 // overrides are the controllers' settings the command line sets.
 type overrides struct {
-	capacity, taskRate, workers, memory string
-	grace                               time.Duration
+	capacity, taskRate, workers, memory, partitions, fairShare string
+	grace                                                      time.Duration
 }
 
 func (o overrides) apply(sc *Scenario) error {
@@ -124,6 +128,35 @@ func (o overrides) apply(sc *Scenario) error {
 			c.Memory = memory.DefaultSettings
 		}
 		c.Memory.Mode = o.memory
+	}
+	return o.applyServices(sc)
+}
+
+// applyServices sets the modes of the controllers outside history.
+func (o overrides) applyServices(sc *Scenario) error {
+	if o.partitions != "" {
+		if err := checkMode("partitions", o.partitions); err != nil {
+			return err
+		}
+		if !sc.Matching.on() {
+			return fmt.Errorf("scenario %s doesn't run its workflows through matching", sc.Name)
+		}
+		if sc.Matching.Scaler == (partitions.Settings{}) {
+			sc.Matching.Scaler = partitions.DefaultSettings
+		}
+		sc.Matching.Scaler.Mode = o.partitions
+	}
+	if o.fairShare != "" {
+		if err := checkMode("fair-share", o.fairShare); err != nil {
+			return err
+		}
+		if !sc.Frontends.on() {
+			return fmt.Errorf("scenario %s has no frontends", sc.Name)
+		}
+		if sc.Frontends.FairShare == (fairshare.Settings{}) {
+			sc.Frontends.FairShare = fairshare.DefaultSettings
+		}
+		sc.Frontends.FairShare.Mode = o.fairShare
 	}
 	return nil
 }

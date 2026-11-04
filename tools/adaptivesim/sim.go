@@ -198,6 +198,15 @@ func (q *fifo[T]) push(v T) { q.items = append(q.items, v) }
 
 func (q *fifo[T]) len() int { return len(q.items) - q.head }
 
+// peek returns the oldest item, without taking it.
+func (q *fifo[T]) peek() (T, bool) {
+	var zero T
+	if q.head == len(q.items) {
+		return zero, false
+	}
+	return q.items[q.head], true
+}
+
 func (q *fifo[T]) pop() (T, bool) {
 	var zero T
 	if q.head == len(q.items) {
@@ -213,4 +222,36 @@ func (q *fifo[T]) pop() (T, bool) {
 		q.head = 0
 	}
 	return v, true
+}
+
+// secondOf returns the entry for now's second after the run's start, in a series of one
+// entry a second, adding entries up to it.
+func secondOf[T any](series *[]T, now time.Time) *T {
+	i := int(now.Sub(epoch) / time.Second)
+	for len(*series) <= i {
+		var zero T
+		*series = append(*series, zero)
+	}
+	return &(*series)[i]
+}
+
+// spread adds each second's part of the span [from, to) to that second's entry.
+func spread[T any](series *[]T, from, to time.Time, add func(*T, time.Duration)) {
+	for from.Before(to) {
+		end := epoch.Add((from.Sub(epoch)/time.Second + 1) * time.Second)
+		if end.After(to) {
+			end = to
+		}
+		add(secondOf(series, from), end.Sub(from))
+		from = end
+	}
+}
+
+// sum adds up a series' entries for the seconds in [from, to) after the run's start.
+func sum[T any](series []T, from, to time.Duration, value func(T) float64) float64 {
+	total := 0.0
+	for i := int(from / time.Second); i < int(to/time.Second) && i < len(series); i++ {
+		total += value(series[i])
+	}
+	return total
 }

@@ -18,7 +18,10 @@ func Report(w io.Writer, r *Result) error {
 	p := &printer{w: w}
 	p.printf("Scenario %s, seed %d: %s of load, then %s to drain\n\n", r.Scenario, r.Seed, r.Duration, r.Drain)
 	p.hosts(r)
+	p.phases(r)
 	p.memory(r)
+	p.matching(r)
+	p.frontends(r)
 	p.connections(r)
 	p.decisions(r)
 	return p.err
@@ -110,6 +113,28 @@ func (p *printer) hosts(r *Result) {
 	p.table("Host\tStarted\tConnections opened\tAcquires\tWaited\tQueued share\tCanceled acquires\tLifetime destroys", pool)
 }
 
+// phases is what the hosts did over each of the load's workflow phases, where it has
+// several.
+func (p *printer) phases(r *Result) {
+	if len(r.Phases) < 2 {
+		return
+	}
+	rows := make([][]string, 0, len(r.Phases))
+	for _, ph := range r.Phases {
+		busy, held, backlog := "-", "-", "-"
+		if r.Matching != nil {
+			busy, held, backlog = fmt.Sprintf("%.2f", ph.PollersBusy), round(ph.PollHeld).String(), fmt.Sprint(ph.Backlog)
+		}
+		rows = append(rows, []string{
+			fmt.Sprintf("%s to %s", round(ph.At), round(ph.At+ph.Duration)),
+			number(ph.Rate), number(ph.Completed), fmt.Sprintf("%.2f", ph.ShardsBusy), round(ph.ShardWait).String(),
+			busy, held, backlog,
+		})
+	}
+	p.table("Workflow phase\tStarted a second\tCompleted a second\tShards busy\tWait for the shard\t"+
+		"Workflow pollers busy\tWorkflow poll held\tWorkflow task backlog at end", rows)
+}
+
 // memory is the hosts' heaps and workflow caches, for the hosts whose heap the model
 // counts.
 func (p *printer) memory(r *Result) {
@@ -139,6 +164,43 @@ func mib(bytes int) string {
 	return fmt.Sprintf("%.1f MiB", float64(bytes)/(1<<20))
 }
 
+// matching is the task queues of the matching host, when the workflows ran through it.
+func (p *printer) matching(r *Result) {
+	if r.Matching == nil {
+		return
+	}
+	var rows [][]string
+	for _, q := range r.Matching.Queues {
+		if q.Added == 0 {
+			continue
+		}
+		rows = append(rows, []string{
+			q.Name, fmt.Sprint(q.Added), fmt.Sprint(q.Dispatched), fmt.Sprint(q.PeakBacklog), round(q.PeakWait).String(),
+			fmt.Sprintf("%d / %d", q.Read, q.Write), fmt.Sprint(q.MostRead),
+		})
+	}
+	if len(rows) > 0 {
+		p.table("Task queue\tAdded\tDispatched\tPeak backlog\tLongest wait\tRead / write partitions at end\tMost read partitions", rows)
+	}
+}
+
+// frontends is the requests each frontend took, by namespace.
+func (p *printer) frontends(r *Result) {
+	var rows [][]string
+	for _, f := range r.Frontends {
+		for _, n := range f.Namespaces {
+			admitted, throttled := n.Rates()
+			rows = append(rows, []string{
+				f.Name, n.Namespace, fmt.Sprint(n.Admitted), fmt.Sprint(n.Throttled),
+				fmt.Sprintf("%.1f / %.1f", admitted, throttled), number(n.Limit),
+			})
+		}
+	}
+	if len(rows) > 0 {
+		p.table("Frontend\tNamespace\tAdmitted\tThrottled\tAdmitted / throttled a second\tLimit last taken", rows)
+	}
+}
+
 func (p *printer) connections(r *Result) {
 	c := r.Connections
 	peakAttempts, peakOpens := 0, 0
@@ -158,6 +220,12 @@ func (p *printer) decisions(r *Result) {
 	var rows [][]string
 	for _, h := range r.Hosts {
 		rows = append(rows, decisionRows(h.Name, h.Started, h.Decisions)...)
+	}
+	if m := r.Matching; m != nil {
+		rows = append(rows, decisionRows(m.Name, 0, m.Decisions)...)
+	}
+	for _, f := range r.Frontends {
+		rows = append(rows, decisionRows(f.Name, 0, f.Decisions)...)
 	}
 	if len(rows) > 0 {
 		p.table("Host\tController\tMode\tDecisions\tFirst change, after start\tLowest proposed\tHighest proposed\tLast applied\tReasons", rows)

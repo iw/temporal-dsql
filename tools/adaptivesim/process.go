@@ -89,6 +89,9 @@ func (p *process) start() {
 	p.pool.start()
 	p.store.reportFacts(acquireCounts{})
 	p.plane.start()
+	if sc.Signals.PlaneInterval == 0 {
+		p.sampleHeap()
+	}
 	p.startupPools()
 	p.startLoad()
 	l.after(sc.Duration, func() {
@@ -122,6 +125,15 @@ func (p *process) drive(collection *dynamicconfig.Collection) {
 	if h.History.CacheMaxBytes > 0 {
 		memory.DriveCache(p.plane.signals, collection, memory.HistoryCache, h.History.CacheMaxBytes, p.history.cache, metrics.NoopMetricsHandler)
 	}
+}
+
+// sampleHeap reads the heap each second, as the plane would, for a run whose plane is off,
+// so that its heap stats compare with a run whose plane reads it.
+func (p *process) sampleHeap() {
+	p.w.l.after(time.Second, func() {
+		p.source.heap.read(p.w.l.now)
+		p.sampleHeap()
+	})
 }
 
 // staticSetting is a setting that never changes.
@@ -191,10 +203,10 @@ func (p *process) startLoad() {
 		}
 	}
 	for _, phase := range load.Tasks {
-		p.arrivals(phase, func() { p.newTask(false) })
+		arrivals(p.w.l, phase, func() { p.newTask(false) })
 	}
 	for _, phase := range load.Workflows {
-		p.arrivals(phase, p.newWorkflow)
+		arrivals(p.w.l, phase, p.newWorkflow)
 	}
 	if load.Pool.Every > 0 {
 		p.w.l.soon(p.poolBurst)
@@ -202,7 +214,7 @@ func (p *process) startLoad() {
 }
 
 // arrivals calls arrive at the phase's rate, evenly spaced, from At for Duration.
-func (p *process) arrivals(phase Phase, arrive func()) {
+func arrivals(l *loop, phase Phase, arrive func()) {
 	if phase.Rate <= 0 {
 		return
 	}
@@ -214,9 +226,9 @@ func (p *process) arrivals(phase Phase, arrive func()) {
 			return
 		}
 		arrive()
-		p.w.l.after(interval, func() { next(i + 1) })
+		l.after(interval, func() { next(i + 1) })
 	}
-	p.w.l.after(phase.At, func() { next(0) })
+	l.after(phase.At, func() { next(0) })
 }
 
 func (p *process) id() (int64, int) {
@@ -233,8 +245,22 @@ func (p *process) newTask(reload bool) {
 	p.history.arrive(&task{wf: wf, shard: shard, queue: p.history.queues[0], reload: reload})
 }
 
+// newWorkflow starts a workflow, through a frontend when the scenario has them.
 func (p *process) newWorkflow() {
+	if fs := p.w.frontends; fs != nil {
+		fs.startWorkflow(p.startWorkflow)
+		return
+	}
+	p.startWorkflow()
+}
+
+// startWorkflow starts a workflow on the host, through matching when the scenario has it.
+func (p *process) startWorkflow() {
 	wf, shard := p.id()
+	if p.w.worker != nil {
+		p.w.worker.start(&flow{id: wf, shard: shard, host: p})
+		return
+	}
 	p.workers.start(&workflow{id: wf, shard: shard})
 }
 
@@ -297,6 +323,7 @@ func (p *process) result() HostResult {
 		PoolLoad:  pl,
 		Memory:    p.source.heap.stats,
 		Cache:     p.history.cache.stats,
+		Shards:    p.history.shardLog,
 		Decisions: p.plane.decisions,
 	}
 }
