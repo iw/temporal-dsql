@@ -73,6 +73,7 @@
 - Shard updates are fenced by the range check in `lockShard`, as upstream
 - FOR UPDATE queries use single tables
 - Shard read lock uses FOR KEY SHARE, so a range renewal fails the commit of an in-flight write that read the old range
+- `GetWorkflowExecution` reads a workflow's state on one connection, in one read-only transaction sent as one pipelined batch
 
 #### Visibility
 - DSQL visibility store in its own PostgreSQL schema, `temporal_visibility` by default, with schema baseline 1.0 (`schema/dsql/visibility/schema.sql`)
@@ -89,6 +90,7 @@
 - **pgxpool** behind `database/sql` — service pools keep `MinConns == MaxConns` (configured `maxConns`, default 100); ephemeral pools use max 5/min 0. A closing connector owns pool and metrics shutdown. Connection failures do not rebuild pools.
 - Lifetime is capped at 50 minutes, with 4 minutes of jitter and 1-minute health checks. `maxIdleConns` is ignored. There are no acquire/release hooks. See the expiry and shutdown limitations in `docs/dsql/connection-pool.md`.
 - A process-wide semaphore of 8 bounds limiter/token calls before each handshake. Background fill uses the same rate limiter as on-demand connections.
+- A gate admits callers to each pool, one slot per connection, writes before reads. It refuses a caller it can't admit before the caller's deadline with `ResourceExhausted`, without reaching DSQL.
 - **Token Bucket Rate Limiter** (opt-in) — DynamoDB-backed GCRA reservations, with burst capacity 1000 and 100/sec sustained. Reservations only move forward under clock skew. The token bucket falls back to local pacing for 30 seconds on DynamoDB errors; local pacing is the default mode.
 
 #### Observability

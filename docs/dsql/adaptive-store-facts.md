@@ -114,9 +114,10 @@ The health signal aggregator implements `StoreFacts`.
 |---|---|
 | `maybeConvertError`: the call's deadline expired while `beforeConnect` waited for a connection-attempt slot or the connection rate limiter | Throttled |
 | `maybeConvertError`: DSQL returned 53400 (connection rate exceeded) or 53300 (too many connections) | Throttled |
+| `maybeConvertError`: the pool's gate refused a call it couldn't admit before the call's deadline | Throttled |
 | `TxRetryBackoff`: retries on 40001 ran out | Contention |
 | `maybeConvertError`: DSQL returned 54000 (transaction, row, key or age limits), 53200 (a transaction's memory) or 53100 (storage) | Limit |
-| A once-a-second sample of the pool's acquires that found no idle connection | Queued |
+| A once-a-second sample of the calls the pool's gate admitted after a wait, and of the pool's acquires that found no idle connection | Queued |
 | The same sample's count of all the pool's acquires | Acquired |
 
 The plugin reports each failed call once, where it already converts the error. Its existing pool collector samples every 15 seconds, which is too coarse for the controller's windows, so queued and acquired facts have a sampler of their own.
@@ -130,6 +131,8 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
 - The pacing wait fails only if the pool closes during it, at shutdown.
 - On DSQL, throttled facts come from DSQL's own refusals.
 - As a host starts, pgx opens all of a pool's connections at once. The pacing lets a burst through, 100 connections a process by default, then 10 a second. Callers that come before the pool has opened its connections wait for them, and count as queued too.
+
+**The gate's waits and refusals.** The pool's [gate](connection-pool.md#the-gate) admits a call at once while a connection is free. A call it admits after a wait counts as queued, and one that then waits for a new connection too counts twice. A call it refuses counts as throttled, before the call's deadline, and never reaches DSQL.
 
 ### 5. How the controller uses the facts
 

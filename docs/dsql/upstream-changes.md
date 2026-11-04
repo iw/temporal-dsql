@@ -40,10 +40,12 @@ patch set.
 `common/persistence/sql/factory.go` defines the optional `ExecutionStoreCreator`
 interface. The factory creates the common execution store, then lets a supporting
 connection wrap it. DSQL's wrapper reads the execution row, mutable-state maps,
-buffered events, CHASM nodes and requested signal IDs in one transaction in
-`GetWorkflowExecution`. Other methods delegate to the common store.
+buffered events, CHASM nodes and requested signal IDs in `GetWorkflowExecution`
+in one read-only transaction, sent as one pipelined batch on one connection.
+Other methods delegate to the common store.
 
-This reduces transaction boundaries for workflow-state reads on DSQL. Other
+This takes one pool connection for a workflow-state read on DSQL, where the
+common store takes one for each of its nine queries in turn. Other
 plugins retain the common store. Path forward: keep the factory hook in the
 patch set; the DSQL wrapper stays in the plugin.
 

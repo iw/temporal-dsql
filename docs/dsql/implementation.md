@@ -18,6 +18,7 @@ This document covers the technical implementation of Aurora DSQL support in Temp
   - [Transaction Retry Policy](#transaction-retry-policy-tx_retry_policygo)
 - [Shard and Task Queue Ownership](#shard-and-task-queue-ownership)
 - [Batched Range Deletes](#batched-range-deletes)
+- [Workflow Reads](#workflow-reads)
 - [IAM Authentication](#iam-authentication)
   - [BeforeConnect](#beforeconnect)
   - [Token Cache](#token-cache-tokencachego)
@@ -34,7 +35,7 @@ common/persistence/sql/sqlplugin/dsql/
 ├── plugin.go                      # Plugin registration, IAM auth, token refresh
 ├── db.go                          # Database handle, transaction management
 ├── execution.go                   # Workflow execution operations
-├── execution_store.go             # Workflow read transaction wrapper
+├── execution_store.go             # Workflow state read, pipelined on one connection
 ├── execution_maps.go              # Execution map operations (activity, timer, child, signal)
 ├── shard.go                       # Shard locks and updates
 ├── retry.go                       # OCC retry logic with backoff
@@ -43,6 +44,7 @@ common/persistence/sql/sqlplugin/dsql/
 ├── metrics.go                     # DSQL-specific metrics
 ├── token_cache.go                 # IAM token caching
 ├── connection_pool.go             # pgxpool config, hooks, connector ownership
+├── acquire_gate.go                # Write-first admission to the pool
 ├── connection_rate_limiter.go     # Local (per-instance) rate limiting
 ├── token_bucket_limiter.go        # GCRA reservations for distributed burst/rate control
 ├── rate_limiter_fallback.go       # Local fallback on DynamoDB errors
@@ -225,6 +227,14 @@ Matching's task cleanup deletes one batch per call: core passes an exclusive upp
 
 Fair queues, in `tasks_v2` when `matching.enableFairness` is on, order tasks by `(pass, task_id)`. Their cleanup finds the batch's first and last task in the same way and deletes the tasks between them. DSQL applies row comparisons as filters, so plain bounds on `pass` limit both scans. The delete reads and skips any later tasks that share the batch's last pass.
 
+## Workflow Reads
+
+`DSQLExecutionStore` (`execution_store.go`) wraps the common SQL execution store and replaces its `GetWorkflowExecution`; every other method delegates to the common store. The common store reads a workflow's mutable state with nine queries: the execution row, the activity, timer, child execution, request cancel and signal maps, buffered events, CHASM nodes and requested signal IDs. Each query takes a pool connection in turn. On a pool too short for its load, a read waits for a connection nine times, and reads that start together run out of time together, part-way through.
+
+The plugin takes one connection for the read, through the [gate](connection-pool.md#the-gate), and sends `BEGIN READ ONLY`, the nine queries and `COMMIT` as one pgx batch. pgx pipelines a batch and syncs once at its end, so once the connection has prepared the statements, a read is one round trip, and its queries read from one snapshot. Rows decode as in the common store. A missing execution is `NotFound` and a failed query is `Unavailable`, except that a gate refusal stays `ResourceExhausted`, so history backs off.
+
+A statement that fails on the server aborts the transaction, so the read sends `ROLLBACK` before it gives the connection back; pgxpool closes a connection returned inside a transaction. When the database's connections aren't pgx connections, as with the `cfg.Connect` test hook, the read goes through the common store.
+
 ## IAM Authentication
 
 ### BeforeConnect
@@ -272,7 +282,9 @@ Service pools use `MinConns == MaxConns == maxConns` (default 100). Ephemeral po
 
 The `sql.DB` uses a closing wrapper around `stdlib.GetPoolConnector`, zero idle connections and unlimited open connections. It retains pgx driver fast paths and sqlx's snake-case mapper. The connector cancels hook waits, joins metrics collection, and closes pgxpool when the handle closes. Stock pgxpool internal health-check notifications can finish asynchronously. See [connection pool](connection-pool.md) for lifecycle and expiry limitations.
 
-`DatabaseHandle` receives an always-false refresh predicate. `maybeConvertError` performs its own mapping without calling the upstream `ConvertError`: limiter failures and 53300/53400 become overload; socket errors, `pgconn.ConnectError`, class 08 and IAM access denied become unavailable; 40001/0A000 remain raw; 54000 becomes a size-limit error. Other errors pass through. pgxpool replaces broken connections without rebuilding the pool.
+The connector admits callers through a gate (`acquire_gate.go`) with one slot per pool connection. `BeginTx`, and `ExecContext` and `NamedExecContext` outside a transaction, mark their context as a write. A slot that comes free goes to the first waiting write, or call without a deadline, before the first read. From the most recent holds of each kind, the gate refuses a caller before its deadline once the callers ahead of it and a reserve for its own hold no longer fit. A slot is held until database/sql closes the connection, which, with no idle connections, is when the statement, rows, transaction or `sql.Conn` is done. See [the gate](connection-pool.md#the-gate).
+
+`DatabaseHandle` receives an always-false refresh predicate. `maybeConvertError` performs its own mapping without calling the upstream `ConvertError`: limiter failures, gate refusals and 53300/53400 become overload; socket errors, `pgconn.ConnectError`, class 08 and IAM access denied become unavailable; 40001/0A000 remain raw; 54000 becomes a size-limit error. Other errors pass through. pgxpool replaces broken connections without rebuilding the pool.
 
 ## Pool Metrics Collection
 

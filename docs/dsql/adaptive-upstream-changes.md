@@ -1,6 +1,6 @@
 # Adaptive behaviour: changes to upstream code
 
-The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller), its [store facts](adaptive-store-facts.md) and its coupling to the task scheduler, the signal plane from [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane), with the task queueing delay it reads, the worker counts from [Proposal 4](adaptive-behaviour.md#proposal-4-worker-counts-follow-queueing-delay), the memory budget from [Proposal 5](adaptive-behaviour.md#proposal-5-a-memory-budget-instead-of-counts-and-bytes), the partition scaler from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity), with its server option, and fair share from [Proposal 7](adaptive-behaviour.md#proposal-7-fair-share-follows-demand).
+The `adaptive-behaviour` branch carries main's patch set, which [Changes to upstream code](upstream-changes.md) records, and the changes below. They support the shared core from [Proposal 1](adaptive-behaviour.md#proposal-1-dynamic-config-becomes-an-envelope), the persistence capacity controller in [Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller), its [store facts](adaptive-store-facts.md) and its coupling to the task scheduler, the signal plane from [Proposal 2](adaptive-behaviour.md#proposal-2-a-per-host-signal-plane), with the task queueing delay it reads, the worker counts from [Proposal 4](adaptive-behaviour.md#proposal-4-worker-counts-follow-queueing-delay), the memory budget from [Proposal 5](adaptive-behaviour.md#proposal-5-a-memory-budget-instead-of-counts-and-bytes), the partition scaler from [Proposal 6](adaptive-behaviour.md#proposal-6-the-partition-scaler-learns-capacity), with its server option, and fair share from [Proposal 7](adaptive-behaviour.md#proposal-7-fair-share-follows-demand). The SQL factory also uses the execution store a plugin provides, so the DSQL plugin reads a workflow's state on one connection, which a [short pool](adaptive-appreciation.md#short-pool) needs.
 
 The branch takes main's changes by merge or rebase, and reaches a new release tag through main. When that happens, check the files below against the new tag first.
 
@@ -41,7 +41,7 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 | `temporal/server_options.go` | `serverOptions` keeps that factory. |
 | `temporal/fx.go` | Passes the factory to the matching service, whose graph uses it in place of its default when one is set. |
 | `temporal/server_test.go` | `runAndTestServer` takes extra server options. |
-| `AGENTS.md` | Lists the adaptive behaviour documents, beside main's DSQL documents. |
+| `AGENTS.md` | Lists the adaptive behaviour documents, beside main's DSQL documents, and describes the pool's gate and the one-connection workflow read. |
 
 ## Fork-added files inside upstream packages
 
@@ -64,6 +64,7 @@ These files extend existing packages without editing upstream files:
 - `common/persistence/store_facts.go`: the store-facts types.
 - `common/persistence/windowed_counter.go`: request, error, rejection, fact and task-attempt counts over fixed windows.
 - `common/persistence/sql/store_facts.go`: passes the sink through the SQL factory and `DbConn`.
+- `common/persistence/sql/execution_store_creator.go`: forwards the optional `ExecutionStoreCreator` hook through `DbConn`, so the factory uses the execution store a plugin provides.
 - Their tests, and `common/persistence/health_signal_aggregator_snapshot_test.go`, `common/persistence/client/store_facts_test.go`, `common/stats/windowed_tdigest_recent_test.go`, `service/history/queues/executable_schedule_latency_test.go`, `service/history/queues/pending_task_size_test.go`, `service/matching/learned_partition_scaler_test.go`, `service/matching/scale_manager_stats_test.go` and `temporal/partition_scaler_option_test.go`.
 
 The DSQL plugin's store facts live in its own directory, `common/persistence/sql/sqlplugin/dsql`.

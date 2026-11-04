@@ -1,6 +1,6 @@
 # DSQL connection pool
 
-The persistence plugin uses pgx v5.7.2's `pgxpool` behind `database/sql` and sqlx. A single pool owns the physical connections and the acquisition queue. A DSQL visibility datastore has a pool of its own, built the same way.
+The persistence plugin uses pgx v5.7.2's `pgxpool` behind `database/sql` and sqlx. A single pool owns the physical connections, and a [gate](#the-gate) in front of it decides which caller gets the next one. A DSQL visibility datastore has a pool and gate of its own, built the same way.
 
 ## Size and startup
 
@@ -8,7 +8,22 @@ Service pools set both `MinConns` and `MaxConns` to `maxConns`, or 100 when unse
 
 Each service pool opens its full `maxConns` allocation even at low traffic. Count **every pool in every Temporal process**, including multiple stores in one process, across all replicas. Their sum must fit the cluster's connection limit (10,000 by default), with headroom for ephemeral pools, rolling deployments and administration. A tenfold increase in traffic queues at the same pool limit; it does not create an extra buffer of connections. A tenfold increase in replicas needs a new capacity budget.
 
-`maxIdleConns` is ignored. The outer `sql.DB` has zero idle connections and unlimited open connections; pgxpool is the only queue. `MaxConnIdleTime` retains pgxpool's default (30 minutes). Idle eviction cannot reduce service pools below `MinConns == MaxConns`.
+`maxIdleConns` is ignored. The outer `sql.DB` has zero idle connections and unlimited open connections, so each statement, rows, transaction or `sql.Conn` takes a connection through the gate and gives it back when it's done. `MaxConnIdleTime` retains pgxpool's default (30 minutes). Idle eviction cannot reduce service pools below `MinConns == MaxConns`.
+
+## The gate
+
+The connector admits callers to the pool through a gate with one slot per connection. On its own, pgxpool serves callers first come, first served. On a pool too short for its load, history's reads and writes then interleave, every caller waits until its deadline, and no workflow finishes. The gate keeps the calls that can finish moving:
+
+- **Writes first.** Transactions, and statements outside a transaction that change rows, wait in one queue, and reads in another. A slot that comes free goes to the first write, and only then to the first read. A call without a deadline waits with the writes, so it can't wait behind them without end.
+- **Refused at once.** When every slot is taken, a caller with a deadline is refused at once if it can't be admitted in time to finish. The callers ahead of it, at the recent mean hold, and a reserve for its own hold must fit before its deadline. The reserve is 1.5 times the recent p90 hold of its kind, read or write, or of the other kind while its own has none.
+- **Refused while waiting.** A waiting caller is refused once only its reserve is left before its deadline. A caller whose context ends while it waits gets the context's error, as it would from pgxpool.
+- **Holds** run from admission until database/sql gives the connection back. The gate keeps the most recent 256 of each kind. A connect that fails gives its slot back without counting as a hold.
+
+A refusal is a connection throttle. It returns `ResourceExhausted` with cause `SYSTEM_OVERLOADED`, the call never reaches DSQL, and the plugin reports a throttled [store fact](adaptive-store-facts.md#4-what-the-dsql-plugin-reports). Transactions and the plugin's workflow reads pass the refusal on as it is, and history backs off from it, where it resubmits `Unavailable` at once. Most other calls through the common store, history appends among them, report it as `Unavailable`. Callers that waited count as queued store facts.
+
+While the pool has a free connection, the gate admits at once, so a pool sized for its load behaves as before. The gate doesn't hold back pgxpool's refills or health checks, and pgxpool still queues an admitted caller while it opens or replaces a connection.
+
+The plugin's `GetWorkflowExecution` reads a workflow's mutable state on one connection, its nine queries sent as one pipelined batch, so a read takes one slot for about one round trip. See [implementation](implementation.md#workflow-reads).
 
 ## Lifetime
 
@@ -44,13 +59,13 @@ The plugin never asks `DatabaseHandle` to rebuild a healthy pool after a connect
 
 | Error | Temporal result |
 |---|---|
-| Limiter/semaphore failure; SQLSTATE 53400 or 53300 | `ResourceExhausted`, cause `SYSTEM_OVERLOADED`: connection not attempted, operation not committed |
+| Gate refusal; limiter/semaphore failure; SQLSTATE 53400 or 53300 | `ResourceExhausted`, cause `SYSTEM_OVERLOADED`: connection not attempted, operation not committed |
 | `driver.ErrBadConn`, EOF, unexpected EOF, reset/aborted/refused socket, `pgconn.ConnectError`, SQLSTATE class 08, IAM access denied | `Unavailable` with `database connection lost`, without rebuilding the pool |
 | 40001, 0A000 | Preserved for transaction retry classification |
 | 54000 | `TransactionSizeLimitError` |
 | Other errors | Unchanged |
 
-The connector wraps `stdlib.GetPoolConnector` and implements `io.Closer`. Closing the plugin DB closes the handle and `sql.DB`, cancels background hook waits, joins the metrics collector, and closes the pool. Failed startup pings close the same resources before trying another default database name. pgxpool closes all physical connections and rejects subsequent acquires; its internal health-check goroutine and 500 ms health-check notifications may finish asynchronously after `Pool.Close()` returns. There is no plugin-owned refiller or driver registration to leak.
+The connector wraps `stdlib.GetPoolConnector`, admits callers through the gate and implements `io.Closer`. Closing the plugin DB closes the handle and `sql.DB`, cancels background hook waits, joins the metrics collector, and closes the pool. Failed startup pings close the same resources before trying another default database name. pgxpool closes all physical connections and rejects subsequent acquires; its internal health-check goroutine and 500 ms health-check notifications may finish asynchronously after `Pool.Close()` returns. There is no plugin-owned refiller or driver registration to leak.
 
 ## Deployment checks
 
@@ -63,7 +78,7 @@ Budget every pool, including overlapping replicas during deployment. Set
 `dsql_connect_gcra#<endpoint>` item in the configured table with a string `pk` key
 and TTL on `ttl_epoch`.
 
-Watch `dsql_pool_open`, `dsql_pool_constructing`, `dsql_pool_wait_total`, canceled
-acquires and connection errors. A successful startup ping does not mean the
+Watch `dsql_pool_open`, `dsql_pool_constructing`, the gate's waits and refusals,
+`dsql_pool_wait_total`, canceled acquires and connection errors. A successful startup ping does not mean the
 background fill is complete. Check `open - constructing` against the expected
 size before starting more replicas. See [metrics](metrics.md).
