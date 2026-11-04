@@ -105,6 +105,17 @@ type (
 		PeakBacklog           int
 		PeakWait              time.Duration
 		Read, Write, MostRead int
+		// PerSecond is the task queue each second after the run's start.
+		PerSecond []QueueSecond
+	}
+
+	// QueueSecond is a task queue's polls that ended in a second, having held their poller
+	// while history recorded their task as started, how long they held it, and the
+	// backlog at the second's end.
+	QueueSecond struct {
+		Polls   int
+		Held    time.Duration
+		Backlog int
 	}
 
 	// MatchingResult is what the matching host did.
@@ -158,7 +169,16 @@ func (m *matchingHost) start() {
 		q.partition(read - 1)
 		q.result.MostRead = read
 		q.background()
+		q.sample()
 	}
+}
+
+// sample keeps the backlog at the end of each second.
+func (q *matchingQueue) sample() {
+	q.m.l.after(time.Second, func() {
+		secondOf(&q.result.PerSecond, q.m.l.now.Add(-time.Nanosecond)).Backlog = q.backlog
+		q.sample()
+	})
 }
 
 // queue is the task queue of a kind.

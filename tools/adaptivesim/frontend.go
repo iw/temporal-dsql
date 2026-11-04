@@ -345,16 +345,13 @@ func (f *frontend) request(namespace string) bool {
 		f.counts[namespace] = n
 		f.order = append(f.order, namespace)
 	}
-	second := int(now.Sub(epoch) / time.Second)
-	for len(n.PerSecond) <= second {
-		n.PerSecond = append(n.PerSecond, RequestCounts{})
-	}
+	counts := secondOf(&n.PerSecond, now)
 	if admitted {
 		n.Admitted++
-		n.PerSecond[second].Admitted++
+		counts.Admitted++
 	} else {
 		n.Throttled++
-		n.PerSecond[second].Throttled++
+		counts.Throttled++
 	}
 	return admitted
 }

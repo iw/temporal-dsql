@@ -89,6 +89,9 @@ func (p *process) start() {
 	p.pool.start()
 	p.store.reportFacts(acquireCounts{})
 	p.plane.start()
+	if sc.Signals.PlaneInterval == 0 {
+		p.sampleHeap()
+	}
 	p.startupPools()
 	p.startLoad()
 	l.after(sc.Duration, func() {
@@ -122,6 +125,15 @@ func (p *process) drive(collection *dynamicconfig.Collection) {
 	if h.History.CacheMaxBytes > 0 {
 		memory.DriveCache(p.plane.signals, collection, memory.HistoryCache, h.History.CacheMaxBytes, p.history.cache, metrics.NoopMetricsHandler)
 	}
+}
+
+// sampleHeap reads the heap each second, as the plane would, for a run whose plane is off,
+// so that its heap stats compare with a run whose plane reads it.
+func (p *process) sampleHeap() {
+	p.w.l.after(time.Second, func() {
+		p.source.heap.read(p.w.l.now)
+		p.sampleHeap()
+	})
 }
 
 // staticSetting is a setting that never changes.
@@ -311,6 +323,7 @@ func (p *process) result() HostResult {
 		PoolLoad:  pl,
 		Memory:    p.source.heap.stats,
 		Cache:     p.history.cache.stats,
+		Shards:    p.history.shardLog,
 		Decisions: p.plane.decisions,
 	}
 }

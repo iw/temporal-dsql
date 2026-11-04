@@ -43,7 +43,11 @@ go run ./cmd/tools/adaptivereplay /tmp/adaptivesim/*.jsonl
 
 The report gives, for each host, its tasks and how many completed, its persistence calls,
 the gate's refusals and the queries cut off at their deadlines, and its pool's connections
-and acquires. For a host whose heap the model counts, it gives the heap's peak, how long the
+and acquires. Where the load has several workflow phases, it gives each phase's workflows
+started and completed a second, the share of the shards' time they were held for writes
+and a write's mean wait for its shard, and with matching, the share of the workflow task
+pollers' time they were held, a poll's mean hold and the workflow task backlog at the
+phase's end. For a host whose heap the model counts, it gives the heap's peak, how long the
 heap pressed on its limit and passed it, the tasks the queues held and left in the store,
 and the workflow cache's hits and size. Where the workflows run through matching, it gives
 each of matching's task queues: the tasks added and dispatched, the most waiting at once,
@@ -66,11 +70,12 @@ seconds, with no AWS.
 | `startup` | `grace`, `no-grace` | Finding 1: four hosts of 64 connections start within 10 s, and each reloads 100 tasks as it takes its shards, with the capacity controller enabled. `no-grace` sets `QueuedGrace` to 0, as the appreciation ran |
 | `fleet-start` | | `tools/poolsim`'s `pgxpool-fleet-start.yaml`, for the [cross-check](#cross-check-with-poolsim) |
 | `workflows` | | Two hosts run 10 workflows/s each through 32 pollers a host, on the plugin's current path |
-| `slow-store` | `cap`, `cap-tsr`, `cap-wrk` | The appreciation's slow store: one host of 48 connections, whose static persistence rate is 300/s, runs 80 tasks/s and 10 workflows/s for 240 s, and the store's replies come 40 ms later from 60 s to 150 s. `cap` enables the capacity controller with the task scheduler rate in shadow; `cap-tsr` enables both; `cap-wrk` enables the capacity controller and the worker counts |
+| `slow-store` | `cap`, `cap-tsr`, `cap-wrk`, `all` | The appreciation's slow store: one host of 48 connections, whose static persistence rate is 300/s, runs 80 tasks/s and 10 workflows/s for 240 s, and the store's replies come 40 ms later from 60 s to 150 s. `cap` enables the capacity controller with the task scheduler rate in shadow; `cap-tsr` enables both; `cap-wrk` enables the capacity controller and the worker counts; `all` enables all three, every controller the host runs |
 | `surge` | `tsr`, `shadow` | One host whose static persistence rate is 100/s runs 50 tasks/s, 120/s from 60 s to 120 s, and 5 workflows/s, with the capacity controller in shadow and the task scheduler rate enabled or in shadow |
 | `busy-queue` | `wrk`, `shadow` | One host whose queues have 8 workers each, so that the workers bind first, runs 60 tasks/s for 90 s, then 5 tasks/s until 540 s, with the worker counts enabled or in shadow |
 | `partitions` | `partitions`, `pollers`, `shadow` | A workflow task queue whose add rate passes the 50 tasks/s the partition scaler's trials need, which the appreciation never reached: one host of 128 shards in the local rig starts 80 workflows/s for 360 s, each a single workflow task, through matching's 4 partitions. In `partitions`, each partition dispatches at most 15 tasks/s and 32 pollers wait; in `pollers`, the partitions have no limit and 14 pollers wait. The scaler is enabled, or in shadow in `shadow`, which is `partitions`' host |
-| `uneven-frontends` | `fair`, `shadow` | The appreciation's uneven frontends, on its rig: two history hosts of 16 shards, matching with 32 workflow and 32 activity pollers, and two frontends that take 80% and 20% of 5 workflows/s, each one activity and a 1 s timer. From 30 s to 270 s, a second namespace whose limit across the cluster is 60/s gets 72 requests/s through the first frontend and 18 through the second. `fair` enables fair share with the other controllers in shadow; `shadow` runs every controller in shadow |
+| `uneven-frontends` | `fair`, `shadow`, `all` | The appreciation's uneven frontends, on its rig: two history hosts of 16 shards, matching with 32 workflow and 32 activity pollers, and two frontends that take 80% and 20% of 5 workflows/s, each one activity and a 1 s timer. From 30 s to 270 s, a second namespace whose limit across the cluster is 60/s gets 72 requests/s through the first frontend and 18 through the second. `fair` enables fair share with the other controllers in shadow; `shadow` runs every controller in shadow, and `all` enables every one |
+| `ramp` | `off`, `shadow`, `cap`, `tsr`, `wrk`, `mem`, `par`, `fair`, `all` | The appreciation's ramp, on the same rig: 5, 10, 20 and 30 workflows/s, 75 s each, then 180 s to drain. `off` disables every controller and turns the signal plane off, as today's defaults have it; `shadow` runs every controller in shadow; `cap`, `tsr`, `wrk`, `mem`, `par` and `fair` each enable one, with the others in shadow; `all` enables every one |
 | `memory-pressure` | `mem`, `shadow` | The appreciation's 512 MiB `GOMEMLIMIT`, with history's cache at its 1000 MiB default and each shard's queues limited to 10,000 pending tasks, on one host in the cluster's region: 5 workflows/s and 20 tasks/s for 600 s, and from 120 s, 224 MiB more heap for 120 s while 60,000 tasks reload, with the memory budget enabled or in shadow |
 
 The short pool's variants are the rig's: `base` is the plugin's path before the gate, with
@@ -178,7 +183,9 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
 - **The signal plane.** The real `signals.Plane`, ticked every second on simulated time.
   It reads the host's signals through a `signals.Source`, takes a snapshot over the newest
   3 windows, steps the controllers that `signals.Drive` subscribes to it, and writes its
-  trace with the service's trace writer. Every controller's decisions go through it.
+  trace with the service's trace writer. Every controller's decisions go through it. A
+  scenario can turn it off, as the ramp's `off` does; the heap model is then read each
+  second for the report alone.
 - **The task scheduler rate.** The real controller, driven by `taskrate.DriveRate` as the
   service drives it, steps on each snapshot: the capacity controller's rate while that's
   enabled and recent, otherwise the static rate, times attempts per call.
@@ -231,10 +238,11 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
   the host as a whole. A request costs nothing past the limit, and a namespace's bucket is
   never dropped while idle.
 - **Matching in detail.** No sticky queues, so every workflow task goes through the task
-  queue's partitions: a workflow adds three where the appreciation's added about one. No
-  forwarding between partitions, no backlog in the store, no task queue rate limits, and
-  the scale manager calls the scaler only on its interval, not also when a batch of
-  tasks has arrived.
+  queue's partitions: a workflow adds three where the appreciation's added about one, and
+  past the shards' bound a running workflow's next workflow task waits behind new
+  workflows' first ones. No forwarding between partitions, no backlog in the store, no task
+  queue rate limits, and the scale manager calls the scaler only on its interval, not also
+  when a batch of tasks has arrived.
 - **Connections in detail.** No TLS or IAM, and no ping failures. A connection DSQL cuts
   off while idle leaves the pool at once, rather than at its next ping. poolsim models more
   of pgxpool and of deployments.
@@ -423,4 +431,47 @@ config is a static collection of the scenario's controller settings.
   deadband held both shares above their proposals once the windows had filled, so they
   added up to 105% of the limit. With #106, a share that falls applies at once, and
   here the shares settle at the limit. The workflows' starts, through the same frontends
-  in a namespace without a limit across the cluster, are never throttled.
+  in a namespace without a limit across the cluster, are never throttled. With every
+  controller enabled (`all`), fair share does the same.
+- **The ramp is bound by history's writes to each shard and by the workflow task pollers,
+  which no controller reads, so every config runs the same.** In `ramp`, at 5 and 10
+  workflows a second, workflows complete as fast as they start. At 20 and 30 a second, the
+  shards are busy writing 99% and 98% of the time, and a write waits 564 and 720 ms on
+  average for its shard, against 6 ms at 10 a second. A workflow task's poll is held while
+  history records it as started, one of those writes, so polls are held 748 and 900 ms,
+  against 216 ms, and the 32 pollers are busy 95% and 100% of the time. Workflows complete
+  at 10.7 and 7.6 a second, and matching's backlog reaches 2,278 workflow tasks, 58 s old.
+  Once the starts stop, workflows complete at 20 a second, the last by 7m0s. Every config,
+  `off` and `fair` included, which the appreciation didn't run here, completes all 4,874
+  workflows with the same p50 of 1m20s and 1m18s on the two hosts, p99 of 2m23s and heap
+  peak of 248.3 MiB. With seeds 2–5, `off` and `all` again match, while the p50 moves
+  between 1m17s and 1m26s from seed to seed. With every controller enabled:
+  - Capacity stays at its static 2,000 a second and never cuts, so the task scheduler rate
+    follows it, at 818–1,204 a second through the load, and holds no task, as in the
+    appreciation. In the last 15 s of the drain, the workflows left are on their last
+    workflow tasks, already in matching, whose writes are calls that make no task attempts,
+    so attempts per call falls and the task rate with it: to 40 a second on one host, its
+    floor, and 114 on the other. No task is waiting then.
+  - The worker counts shrink every 30 s, to their floor of 256.
+  - The memory budget takes the cache to 153.6 MiB in its first second, which still holds
+    the 152.3 MiB the load uses, and the pending tasks to 0.164 of their limits.
+  - The partition scaler runs no trial. The workflow task queue falls behind, with tasks
+    added at 56–58 a second, past the 50 its trials need, but dispatched at 35–38, under
+    it, which the law reads as something other than its partitions holding it back:
+    `no-gain`. Once its hold has passed, in the drain, the activity queue goes to 3
+    partitions.
+  - Fair share decides nothing: no namespace has a limit across the cluster.
+
+  The appreciation's goodput held at about 15 a second at 20 and 30 a second, where the
+  model's falls as the starts rise, since without sticky queues each of a running
+  workflow's workflow tasks waits through the backlog. A write holds its shard about 216 ms
+  here, and a workflow makes 10, so the 32 shards carry at most about 15 workflows a
+  second; the appreciation measured 155 ms and about 9 writes, and about 22 a second.
+- **#110's slow store holds its cut with every controller enabled.** `slow-store`'s `all`
+  enables the capacity controller, the task scheduler rate and the worker counts, every
+  controller its host runs, and its tasks, workflows, capacity decisions and task rate
+  decisions are `cap-tsr`'s: capacity holds its cut of 80.5 a second as `idle` from 1m17s
+  to the load's end, the task rate stays at about 42 a second, and 6,648 tasks are still
+  waiting when the load ends. The worker counts back off after each cut and shrink to 361,
+  which changes nothing else. In the ramp's and the uneven frontends' `all`, capacity never
+  cuts, so there's no cut for the task rate to hold.

@@ -119,7 +119,11 @@ func (w *worker) schedule(f *flow) {
 func (w *worker) record(q *matchingQueue, t *matchingTask) {
 	f := t.flow
 	h := f.host.history
+	held := w.l.now
 	h.execute(f.id, f.shard, w.l.now.Add(h.cfg.Deadline), func(fl failure) {
+		s := secondOf(&q.result.PerSecond, w.l.now)
+		s.Polls++
+		s.Held += w.l.now.Sub(held)
 		q.poll()
 		if fl != ok {
 			f.host.workers.stats.ResponseFailures++
@@ -151,7 +155,6 @@ func (w *worker) respond(f *flow) {
 			w.schedule(f)
 			return
 		}
-		stats.Completed++
-		f.host.workers.lat = append(f.host.workers.lat, w.l.now.Sub(f.started))
+		f.host.workers.completed(f.started)
 	})
 }

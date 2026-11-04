@@ -426,7 +426,7 @@ Proposals match within a relative 1e-9. A law built where the compiler fuses mul
 go run ./cmd/tools/adaptivesim -scenario startup -variant no-grace -trace /tmp/adaptivesim
 ```
 
-Its scenarios reproduce the appreciation's [short pool](adaptive-appreciation.md#short-pool) and start-up findings, and show each controller it runs act in the loop and recover, as seeded tests that run in seconds. Its traces replay through `tools/adaptivereplay`. [The tool's README](../../tools/adaptivesim/README.md) describes what it models and what it leaves out, its calibration against the short pool's local rig, and a cross-check with `tools/poolsim`.
+Its scenarios reproduce the appreciation's [short pool](adaptive-appreciation.md#short-pool), start-up, uneven frontends and ramp findings, run the ramp in each of the appreciation's configs and with every controller disabled, and show each controller it runs act in the loop and recover, as seeded tests that run in seconds. Its traces replay through `tools/adaptivereplay`. [The tool's README](../../tools/adaptivesim/README.md) describes what it models and what it leaves out, its calibration against the short pool's local rig, and a cross-check with `tools/poolsim`.
 
 ## What stays in dynamic config
 

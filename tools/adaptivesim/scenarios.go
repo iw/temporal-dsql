@@ -35,6 +35,9 @@ type (
 		// workflow pollers.
 		partitionRate float64
 		pollers       int
+		// off disables every controller and turns the signal plane off, as today's defaults
+		// have it.
+		off bool
 	}
 )
 
@@ -86,6 +89,8 @@ var scenarios = []scenarioDef{
 			{name: "cap", about: "the capacity controller enabled, the task scheduler rate in shadow", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameShadow},
 			{name: "cap-tsr", about: "both enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled},
 			{name: "cap-wrk", about: "the capacity controller and the worker counts enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameShadow, workers: adaptive.ModeNameEnabled},
+			{name: "all", about: "every controller the host runs enabled: the capacity controller, the task scheduler rate and the worker counts",
+				capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled, workers: adaptive.ModeNameEnabled},
 		},
 		build: slowStore,
 	},
@@ -136,8 +141,16 @@ var scenarios = []scenarioDef{
 		variants: []variant{
 			{name: "fair", about: "fair share enabled, the other controllers in shadow", fairShare: adaptive.ModeNameEnabled},
 			{name: "shadow", about: "every controller in shadow"},
+			appreciationConfigs[len(appreciationConfigs)-1],
 		},
 		build: unevenFrontends,
+	},
+	{
+		name: "ramp",
+		about: "the appreciation's ramp on its rig: 5, 10, 20 and 30 workflows/s, 75 s each, " +
+			"where history's writes to each shard and the worker's pollers bound goodput",
+		variants: appreciationConfigs,
+		build:    ramp,
 	},
 	{
 		name:     "fleet-start",
@@ -611,6 +624,9 @@ const unevenNamespace = "uneven"
 // variant's modes set the controllers', and those it leaves unset run in shadow, as in the
 // appreciation. The load is 300 s, and each Workflows phase's rate is each host's.
 func appreciationRig(name string, v variant, load Load) Scenario {
+	if v.off {
+		v = v.disabled()
+	}
 	v = v.orShadow()
 	host := Host{
 		Pool:     servicePool(64),
@@ -632,7 +648,7 @@ func appreciationRig(name string, v variant, load Load) Scenario {
 	scaler.Mode = v.partitions
 	fair := fairshare.DefaultSettings
 	fair.Mode = v.fairShare
-	return Scenario{
+	sc := Scenario{
 		Name:     name,
 		Seed:     1,
 		Duration: 300 * time.Second,
@@ -655,6 +671,18 @@ func appreciationRig(name string, v variant, load Load) Scenario {
 		},
 		Frontends: Frontends{Count: 2, Starts: []float64{0.8, 0.2}, RetryDelay: time.Second, FairShare: fair},
 	}
+	if v.off {
+		sc.Signals.PlaneInterval = 0
+	}
+	return sc
+}
+
+// disabled is the variant with every controller disabled.
+func (v variant) disabled() variant {
+	for _, mode := range []*string{&v.capacity, &v.taskRate, &v.workers, &v.memory, &v.partitions, &v.fairShare} {
+		*mode = adaptive.ModeNameDisabled
+	}
+	return v
 }
 
 // orShadow is the variant with each controller it leaves unset in shadow.
@@ -677,5 +705,34 @@ func unevenFrontends(v variant) Scenario {
 	sc.Frontends.Requests = []Requests{{
 		Namespace: unevenNamespace, At: 30 * time.Second, Duration: 240 * time.Second, Rates: []float64{72, 18},
 	}}
+	return sc
+}
+
+// appreciationConfigs are the appreciation's configs: every controller disabled with the
+// signal plane off, every one in shadow, each enabled alone with the others in shadow, and
+// every one enabled.
+var appreciationConfigs = []variant{
+	{name: "off", about: "every controller disabled and the signal plane off: today's defaults", off: true},
+	{name: "shadow", about: "every controller in shadow"},
+	{name: "cap", about: "persistence capacity enabled, the others in shadow", capacity: adaptive.ModeNameEnabled},
+	{name: "tsr", about: "the task scheduler rate enabled, the others in shadow", taskRate: adaptive.ModeNameEnabled},
+	{name: "wrk", about: "the worker counts enabled, the others in shadow", workers: adaptive.ModeNameEnabled},
+	{name: "mem", about: "the memory budget enabled, the others in shadow", memory: adaptive.ModeNameEnabled},
+	{name: "par", about: "the partition scaler enabled, the others in shadow", partitions: adaptive.ModeNameEnabled},
+	{name: "fair", about: "fair share enabled, the others in shadow", fairShare: adaptive.ModeNameEnabled},
+	{name: "all", about: "every controller enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled,
+		workers: adaptive.ModeNameEnabled, memory: adaptive.ModeNameEnabled, partitions: adaptive.ModeNameEnabled,
+		fairShare: adaptive.ModeNameEnabled},
+}
+
+// ramp is the appreciation's ramp on its rig: 5, 10, 20 and 30 workflows a second, 75 s
+// each, split between the two history hosts.
+func ramp(v variant) Scenario {
+	var phases []Phase
+	for i, rate := range []float64{5, 10, 20, 30} {
+		phases = append(phases, Phase{At: time.Duration(i) * 75 * time.Second, Duration: 75 * time.Second, Rate: rate / 2})
+	}
+	sc := appreciationRig("ramp", v, Load{Workflows: phases})
+	sc.Drain = 180 * time.Second
 	return sc
 }

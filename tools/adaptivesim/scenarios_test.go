@@ -139,7 +139,8 @@ func TestTracesReplay(t *testing.T) {
 		{"memory-pressure", "mem"},
 		{"partitions", "partitions"},
 		{"partitions", "pollers"},
-		{"uneven-frontends", "fair"},
+		{"uneven-frontends", "all"},
+		{"ramp", "all"},
 	} {
 		t.Run(run.scenario+"/"+run.variant, func(t *testing.T) {
 			t.Parallel()
@@ -638,6 +639,7 @@ func TestFairShareLiftsTheBusierFrontend(t *testing.T) {
 	t.Parallel()
 	fair := runScenario(t, "uneven-frontends", "fair", Options{})
 	shadow := runScenario(t, "uneven-frontends", "shadow", Options{})
+	all := runScenario(t, "uneven-frontends", "all", Options{})
 	sc, err := Lookup("uneven-frontends", "fair")
 	require.NoError(t, err)
 	requests := sc.Frontends.Requests[0]
@@ -701,6 +703,12 @@ func TestFairShareLiftsTheBusierFrontend(t *testing.T) {
 	require.InDelta(t, limit, admittedBetween(t, fair, from, end), 1)
 	require.InDelta(t, limit/2+requests.Rates[1], admittedBetween(t, shadow, from, end), 1)
 
+	// With every controller enabled, fair share does the same.
+	for i, f := range all.Frontends {
+		require.Equal(t, uneven(t, fair, i), uneven(t, all, i), f.Name)
+		require.Equal(t, fair.Frontends[i].Decisions.Of(fairshare.Name), f.Decisions.Of(fairshare.Name), f.Name)
+	}
+
 	// The workflows' starts go through the same frontends, in a namespace without a limit
 	// across the cluster: none is throttled, and every workflow completes.
 	for _, r := range []*Result{fair, shadow} {
@@ -715,4 +723,124 @@ func TestFairShareLiftsTheBusierFrontend(t *testing.T) {
 			require.Zero(t, n.Throttled)
 		}
 	}
+}
+
+// The appreciation's ramp, and its finding 5. At 5 and 10 workflows a second, workflows
+// complete as fast as they start. At 20 and 30, history's shards spend nearly all their
+// time writing, and a write waits over half a second for its shard; the workflow task
+// pollers, each held while history records its task as started, are busy all the time.
+// Goodput falls below the starts, and matching's backlog grows. No controller reads
+// either bound, so with every controller enabled the ramp runs as with every one disabled.
+func TestRampIsBoundByShardsAndPollers(t *testing.T) {
+	t.Parallel()
+	off := runScenario(t, "ramp", "off", Options{})
+	all := runScenario(t, "ramp", "all", Options{})
+	for _, r := range []*Result{off, all} {
+		completed := 0
+		for _, h := range r.Hosts {
+			require.Equal(t, h.Workflows.Started, h.Workflows.Completed, h.Name)
+			completed += h.Workflows.Completed
+			require.Zero(t, h.Reads.Limited+h.Writes.Limited, h.Name)
+			require.Zero(t, h.Reads.Exhausted+h.Writes.Exhausted, h.Name)
+			require.Zero(t, h.Tasks.Throttled, h.Name)
+		}
+		require.Equal(t, 4874, completed)
+
+		require.Len(t, r.Phases, 4)
+		quiet := r.Phases[0]
+		for _, ph := range r.Phases[:2] {
+			require.GreaterOrEqual(t, ph.Completed, 0.9*ph.Rate, "at %v a second", ph.Rate)
+			require.Less(t, ph.ShardWait, 50*time.Millisecond, "at %v a second", ph.Rate)
+		}
+		for _, ph := range r.Phases[2:] {
+			require.Less(t, ph.Completed, 0.6*ph.Rate, "at %v a second", ph.Rate)
+			require.Greater(t, ph.ShardsBusy, 0.95, "at %v a second", ph.Rate)
+			require.Greater(t, ph.ShardWait, 500*time.Millisecond, "at %v a second", ph.Rate)
+			require.Greater(t, ph.PollersBusy, 0.9, "at %v a second", ph.Rate)
+			require.Greater(t, ph.PollHeld, 3*quiet.PollHeld, "at %v a second", ph.Rate)
+		}
+		require.Greater(t, r.Phases[3].Backlog, 1000)
+	}
+
+	for i, ph := range all.Phases {
+		require.InEpsilon(t, off.Phases[i].Completed, ph.Completed, 0.05, "at %v a second", ph.Rate)
+	}
+	for i, h := range all.Hosts {
+		was := off.Hosts[i].Workflows
+		require.InEpsilon(t, was.P50.Seconds(), h.Workflows.P50.Seconds(), 0.05, h.Name)
+		require.InEpsilon(t, was.P99.Seconds(), h.Workflows.P99.Seconds(), 0.05, h.Name)
+		require.Equal(t, off.Hosts[i].Memory.PeakLive, h.Memory.PeakLive, h.Name)
+	}
+
+	// With every controller disabled and the plane off, none decides.
+	for _, h := range off.Hosts {
+		require.Empty(t, h.Decisions, h.Name)
+	}
+	require.Empty(t, off.Matching.Decisions)
+	for _, f := range off.Frontends {
+		require.Empty(t, f.Decisions, f.Name)
+	}
+
+	// With every one enabled, capacity never cuts, and the task rate holds no task (above).
+	// The workflow task queue falls behind, but dispatches under the 50 a second the
+	// partition scaler's trials need, so it runs none: the pollers, not the partitions,
+	// hold the queue back. No namespace has a limit for fair share to divide.
+	for _, h := range all.Hosts {
+		require.Nil(t, firstCut(h), h.Name)
+	}
+	ds, details := partitionDecisions(t, all)
+	noGain := 0
+	for i, d := range ds {
+		require.NotEqual(t, adaptive.Reason(partitions.ReasonTrial), d.Reason)
+		if d.Reason == adaptive.Reason(partitions.ReasonNoGain) {
+			noGain++
+			require.GreaterOrEqual(t, details[i].Signals.AddRate, details[i].Params.MinRate)
+			require.Less(t, details[i].Signals.DispatchRate, details[i].Params.MinRate)
+		}
+	}
+	require.Positive(t, noGain)
+	for _, f := range all.Frontends {
+		require.Empty(t, f.Decisions.Of(fairshare.Name), f.Name)
+	}
+}
+
+// #110's slow store, with every controller its host runs enabled: the capacity controller
+// and the task scheduler rate hold the cut as they do in cap-tsr. Once the store has
+// recovered, the task rate keeps persistence's calls under capacity's cut, so capacity
+// holds it as idle, and the task rate stays under the tasks' rate, so tasks are still
+// waiting when the load ends. The worker counts back off after each cut, and change
+// nothing else.
+func TestSlowStoreHoldsItsCutWithEveryController(t *testing.T) {
+	t.Parallel()
+	pair := runScenario(t, "slow-store", "cap-tsr", Options{})
+	all := runScenario(t, "slow-store", "all", Options{})
+	sc, err := Lookup("slow-store", "all")
+	require.NoError(t, err)
+	p, a := pair.Hosts[0], all.Hosts[0]
+	require.Equal(t, p.Tasks, a.Tasks)
+	require.Equal(t, p.Workflows, a.Workflows)
+	require.Equal(t, p.Decisions.Of(capacity.Name), a.Decisions.Of(capacity.Name))
+	require.Equal(t, p.Decisions.Of(taskrate.Name), a.Decisions.Of(taskrate.Name))
+	require.NotEmpty(t, a.Decisions.Of(workercount.NamePrefix+transferQueue))
+
+	recovered, end := sc.Slow.At+sc.Slow.Duration, sc.Duration
+	arriving := sc.Load.Tasks[0].Rate
+	held := 0
+	for _, d := range a.Decisions {
+		at := d.Time.Sub(epoch)
+		if at < recovered || at >= end {
+			continue
+		}
+		switch d.Controller {
+		case capacity.Name:
+			require.Equal(t, adaptive.Reason(capacity.ReasonIdle), d.Reason, "at %s", at)
+			require.Less(t, d.Applied, d.Static, "at %s", at)
+			held++
+		case taskrate.Name:
+			require.Less(t, d.Applied, arriving, "at %s", at)
+		default:
+		}
+	}
+	require.Positive(t, held)
+	require.Positive(t, a.Tasks.Backlog)
 }
