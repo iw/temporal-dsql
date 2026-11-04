@@ -2,6 +2,7 @@ package adaptivesim
 
 import (
 	"go.temporal.io/server/common/adaptive/taskrate"
+	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/log"
 )
@@ -12,6 +13,9 @@ func newCollection(c Controllers) *dynamicconfig.Collection {
 	values := dynamicconfig.StaticClient{}
 	if c.TaskRate != (taskrate.Settings{}) {
 		values[taskrate.Config.Key()] = c.TaskRate
+	}
+	if c.WorkerCount != (workercount.Settings{}) {
+		values[workercount.Config.Key()] = c.WorkerCount
 	}
 	return dynamicconfig.NewCollection(values, log.NewNoopLogger())
 }

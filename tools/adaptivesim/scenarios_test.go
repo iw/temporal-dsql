@@ -12,6 +12,7 @@ import (
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/capacity"
 	"go.temporal.io/server/common/adaptive/taskrate"
+	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/tools/adaptivereplay"
 )
 
@@ -123,7 +124,9 @@ func TestTracesReplay(t *testing.T) {
 		{"startup", "no-grace"},
 		{"short-pool-overload", "pipeline-gate"},
 		{"slow-store", "cap-tsr"},
+		{"slow-store", "cap-wrk"},
 		{"surge", "tsr"},
+		{"busy-queue", "wrk"},
 	} {
 		dir := t.TempDir()
 		r := runScenario(t, run.scenario, run.variant, Options{TraceDir: dir})
@@ -196,6 +199,19 @@ func TestTaskRateFollowsCapacity(t *testing.T) {
 	}
 }
 
+// appliedAt is the applied value of the latest decision at or before at after the run's
+// start.
+func appliedAt(ds Decisions, at time.Duration) float64 {
+	applied := ds[0].Applied
+	for _, d := range ds {
+		if d.Time.Sub(epoch) > at {
+			break
+		}
+		applied = d.Applied
+	}
+	return applied
+}
+
 // proposedAt is the proposal of the latest decision at or before at.
 func proposedAt(ds Decisions, at time.Time) float64 {
 	proposed := ds[0].Proposed
@@ -229,6 +245,70 @@ func TestTaskRateHoldsTasksInTheScheduler(t *testing.T) {
 	require.Less(t, held.Tasks.Attempts, unheld.Tasks.Attempts)
 	require.Less(t, held.Tasks.Backlog, unheld.Tasks.Backlog)
 	require.Less(t, held.Workflows.P99*10, unheld.Workflows.P99, "the workflows' calls keep their share")
+}
+
+// While its tasks wait longer than the target, a queue's worker count grows, to at most
+// twice its setting; while they wait less than a quarter of it, the count shrinks a step
+// every IdleSteps, to half. The appreciation's queues never bound, so their counts only
+// shrank.
+func TestWorkerCountsGrowAndShrink(t *testing.T) {
+	enabled := runScenario(t, "busy-queue", "wrk", Options{})
+	shadow := runScenario(t, "busy-queue", "shadow", Options{})
+	h := enabled.Hosts[0]
+	const static = 8
+
+	transfer := h.Decisions.Of(workercount.NamePrefix + transferQueue)
+	require.NotEmpty(t, transfer)
+	grown, peak := false, 0.0
+	for _, d := range transfer {
+		require.GreaterOrEqual(t, d.Applied, static/2.0)
+		require.LessOrEqual(t, d.Applied, 2.0*static)
+		peak = max(peak, d.Applied)
+		switch workercount.Reason(d.Reason) {
+		case workercount.ReasonGrow:
+			require.Less(t, d.Time.Sub(epoch), 90*time.Second, "it grows while the queue is busy")
+			grown = true
+		case workercount.ReasonShrink:
+			require.True(t, grown)
+		default:
+		}
+	}
+	require.InDelta(t, 2*static, peak, 1e-9)
+	require.Greater(t, appliedAt(transfer, 89*time.Second), float64(static), "the pool stays grown while the queue is busy")
+	require.InDelta(t, static/2.0, transfer[len(transfer)-1].Applied, 1e-9)
+
+	timer := h.Decisions.Of(workercount.NamePrefix + timerQueue)
+	require.InDelta(t, static/2.0, timer[len(timer)-1].Applied, 1e-9, "the idle timer queue shrinks too")
+
+	// The grown pool serves the busy phase that the static one falls behind in.
+	require.Less(t, h.Tasks.P99*10, shadow.Hosts[0].Tasks.P99)
+	require.Equal(t, shadow.Hosts[0].Tasks.Completed, h.Tasks.Completed)
+}
+
+// While persistence backs off, as after each capacity cut, the worker counts hold, or
+// return to their setting, and never grow.
+func TestWorkerCountsBackOffAfterCapacityCuts(t *testing.T) {
+	r := runScenario(t, "slow-store", "cap-wrk", Options{})
+	h := r.Hosts[0]
+	cuts := 0
+	var cut *adaptive.Decision
+	for i, d := range h.Decisions {
+		switch {
+		case d.Controller == capacity.Name && isCut(d.Reason):
+			cut = &h.Decisions[i]
+			cuts++
+		case d.Controller == workercount.NamePrefix+transferQueue:
+			require.GreaterOrEqual(t, d.Applied, d.Static/2)
+			require.LessOrEqual(t, d.Applied, 2*d.Static)
+			if cut != nil {
+				require.Equal(t, adaptive.Reason(workercount.ReasonBackoff), d.Reason, "after the cut at %s", cut.Time)
+				cut = nil
+			}
+			require.NotEqual(t, adaptive.Reason(workercount.ReasonGrow), d.Reason)
+		default:
+		}
+	}
+	require.Positive(t, cuts)
 }
 
 func TestRunsAreDeterministic(t *testing.T) {
@@ -273,4 +353,5 @@ func TestTool(t *testing.T) {
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-variant", "nonesuch"}, &out), "no variant")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-capacity", "on"}, &out), "capacity mode")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-task-rate", "on"}, &out), "task-rate mode")
+	require.ErrorContains(t, run([]string{"-scenario", "startup", "-workers", "on"}, &out), "workers mode")
 }

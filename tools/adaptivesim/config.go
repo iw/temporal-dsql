@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive/taskrate"
+	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
 )
 
@@ -86,7 +87,8 @@ type (
 	// signal plane's snapshots. A zero setting is its controller's default, which leaves it
 	// disabled.
 	Controllers struct {
-		TaskRate taskrate.Settings
+		TaskRate    taskrate.Settings
+		WorkerCount workercount.Settings
 	}
 
 	// Pool is the plugin's pgxpool.
@@ -121,7 +123,8 @@ type (
 	History struct {
 		// Shards is how many shards the host owns. A shard's writes run one at a time.
 		Shards int
-		// Workers is how many task attempts the task scheduler runs at once.
+		// Workers is how many task attempts each queue's scheduler runs at once: its worker
+		// count setting, which the worker count controllers drive.
 		Workers int
 		// Deadline is each task attempt's and each API call's deadline.
 		Deadline time.Duration

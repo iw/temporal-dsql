@@ -7,6 +7,7 @@ import (
 
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/taskrate"
+	workercount "go.temporal.io/server/common/adaptive/workers"
 	"go.temporal.io/server/common/dynamicconfig"
 )
 
@@ -25,9 +26,8 @@ type (
 		gate bool
 		// For start-up: the capacity controller's QueuedGrace.
 		grace time.Duration
-		// The capacity and task scheduler rate controllers' modes, where the scenario
-		// varies them.
-		capacity, taskRate string
+		// The controllers' modes, where the scenario varies them.
+		capacity, taskRate, workers string
 	}
 )
 
@@ -78,8 +78,18 @@ var scenarios = []scenarioDef{
 		variants: []variant{
 			{name: "cap", about: "the capacity controller enabled, the task scheduler rate in shadow", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameShadow},
 			{name: "cap-tsr", about: "both enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled},
+			{name: "cap-wrk", about: "the capacity controller and the worker counts enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameShadow, workers: adaptive.ModeNameEnabled},
 		},
 		build: slowStore,
+	},
+	{
+		name:  "busy-queue",
+		about: "one host whose queues have 8 workers each: 60 tasks/s for 90 s, then 5 tasks/s until 540 s",
+		variants: []variant{
+			{name: "wrk", about: "the worker counts enabled", workers: adaptive.ModeNameEnabled},
+			{name: "shadow", about: "the worker counts in shadow", workers: adaptive.ModeNameShadow},
+		},
+		build: busyQueue,
 	},
 	{
 		name: "surge",
@@ -274,9 +284,20 @@ func taskHost(conns, shards int, static float64, v variant) Host {
 	host.Capacity.Static = static
 	host.History.Shards = shards
 	host.History.SchedulerRateLimiter = true
-	host.Controllers.TaskRate = taskrate.DefaultSettings
-	host.Controllers.TaskRate.Mode = v.taskRate
+	host.Controllers.setModes(v)
 	return host
+}
+
+// setModes sets the modes a variant gives the controllers that step on the plane.
+func (c *Controllers) setModes(v variant) {
+	if v.taskRate != "" {
+		c.TaskRate = taskrate.DefaultSettings
+		c.TaskRate.Mode = v.taskRate
+	}
+	if v.workers != "" {
+		c.WorkerCount = workercount.DefaultSettings
+		c.WorkerCount.Mode = v.workers
+	}
 }
 
 // slowStore is the appreciation's slow store, on a host whose pool binds while the store
@@ -323,6 +344,38 @@ func surge(v variant) Scenario {
 			},
 			Workflows: []Phase{{Duration: 240 * time.Second, Rate: 5}},
 		},
+	}
+}
+
+// busyQueue is a queue whose workers bind for a while, then sit idle: its worker count
+// grows to twice its setting, then shrinks to half. The setting is low, 8, so that the
+// workers bind before the shards and the pool do; at history's default of 512 they don't.
+func busyQueue(v variant) Scenario {
+	host := Host{
+		Pool:     servicePool(64),
+		Gate:     true,
+		Read:     PipelinedRead,
+		Pacing:   localPacing(),
+		History:  historyModel(),
+		Workers:  Workers{Pollers: 32, Steps: 1},
+		Capacity: capacityParams(adaptive.ModeNameShadow),
+	}
+	host.History.Shards = 64
+	host.History.Workers = 8
+	host.Controllers.setModes(v)
+	return Scenario{
+		Name:     "busy-queue",
+		Seed:     1,
+		Duration: 540 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    1,
+		Host:     host,
+		Signals:  signalWindows(),
+		Load: Load{Tasks: []Phase{
+			{Duration: 90 * time.Second, Rate: 60},
+			{At: 90 * time.Second, Duration: 450 * time.Second, Rate: 5},
+		}},
 	}
 }
 

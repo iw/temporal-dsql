@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.temporal.io/server/common/adaptive/taskrate"
+	workercount "go.temporal.io/server/common/adaptive/workers"
+	"go.temporal.io/server/common/dynamicconfig"
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/gate"
 	"go.temporal.io/server/common/signals"
@@ -34,6 +36,7 @@ type (
 		history  *history
 		workers  *workers
 		plane    *plane
+		source   *hostSource
 		poolLoad poolLoad
 		nextID   int64
 		rng      *rand.Rand
@@ -70,16 +73,14 @@ func (p *process) start() {
 	p.pool = newPool(l, h.Pool, sc.Network, p.pacer, w.dsql, p.seed, p.name)
 	p.store = newStore(l, h, sc.Network, sc.Slow, p.pool, w.dsql, p.health, w.clock, p.seed, p.name)
 	header := signals.Header{Service: historyService, Host: p.name, PID: p.pid}
-	p.plane = newPlane(l, sc.Signals, &hostSource{health: p.health}, header, w.opts.TraceDir, w.log)
+	p.source = &hostSource{health: p.health}
+	p.plane = newPlane(l, sc.Signals, p.source, header, w.opts.TraceDir, w.log)
 	p.limiter = newCapacityLimiter(h.Capacity, []byte(p.name), p.health, p.plane, l.now)
 	p.client = &client{l: l, limiter: p.limiter, health: p.health, store: p.store, retryDelay: h.History.RetryDelay}
 	p.history = newHistory(l, h.History, p.client, p.health, p.seed, p.name)
-	collection := newCollection(h.Controllers)
-	static := func() float64 { return h.Capacity.Static }
-	rate := taskrate.DriveRate(p.plane.signals, collection, static, metrics.NoopMetricsHandler)
-	if h.History.SchedulerRateLimiter {
-		p.history.scheduler = newSchedulerLimiter(h.Capacity.Static, rate, l.now)
-	}
+	p.history.recording = func() bool { return p.plane.signals.Latest() != nil }
+	p.source.history = p.history
+	p.drive(newCollection(h.Controllers))
 	p.history.started, p.history.reloadTotal = l.now, sc.Load.Reload.Tasks
 	p.workers = newWorkers(l, h.Workers, p.history)
 
@@ -93,13 +94,43 @@ func (p *process) start() {
 	})
 }
 
+// drive subscribes the controllers that step on the plane's snapshots, as the service
+// wires them: the task scheduler rate, then the queues' pending-task limits and worker
+// counts.
+func (p *process) drive(collection *dynamicconfig.Collection) {
+	h := p.w.sc.Host
+	static := func() float64 { return h.Capacity.Static }
+	rate := taskrate.DriveRate(p.plane.signals, collection, static, metrics.NoopMetricsHandler)
+	if h.History.SchedulerRateLimiter {
+		p.history.scheduler = newSchedulerLimiter(h.Capacity.Static, rate, p.w.l.now)
+	}
+	queues := workercount.NewHistoryQueues(p.plane.signals, collection, nil, metrics.NoopMetricsHandler)
+	for _, q := range p.history.queues {
+		count := queues.WorkerCount(q.name, staticSetting(h.History.Workers))
+		q.workers, _ = count(q.setWorkers)
+	}
+}
+
+// staticSetting is a setting that never changes.
+func staticSetting[T any](value T) dynamicconfig.TypedSubscribable[T] {
+	return func(func(T)) (T, func()) { return value, func() {} }
+}
+
 // hostSource is a history host's signals, as its plane reads them.
 type hostSource struct {
-	health *health
+	health  *health
+	history *history
 }
 
 func (s *hostSource) Read(now time.Time, windows int) signals.Snapshot {
-	return signals.Snapshot{Persistence: s.health.snapshot(now, windows)}
+	snap := signals.Snapshot{Persistence: s.health.snapshot(now, windows)}
+	if s.history != nil {
+		snap.Queues = make(map[string]signals.Queue, len(s.history.queues))
+		for _, q := range s.history.queues {
+			snap.Queues[q.name] = q.signal(now, windows)
+		}
+	}
+	return snap
 }
 
 func (s *hostSource) Idle() {}
@@ -182,7 +213,7 @@ func (p *process) newTask(reload bool) {
 	if !reload {
 		p.history.cached[wf] = true
 	}
-	p.history.arrive(&task{wf: wf, shard: shard, reload: reload})
+	p.history.arrive(&task{wf: wf, shard: shard, queue: p.history.queues[0], reload: reload})
 }
 
 func (p *process) newWorkflow() {

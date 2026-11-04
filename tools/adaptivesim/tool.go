@@ -10,6 +10,7 @@ import (
 
 	"go.temporal.io/server/common/adaptive"
 	"go.temporal.io/server/common/adaptive/taskrate"
+	workercount "go.temporal.io/server/common/adaptive/workers"
 )
 
 // RunTool runs the tool with its command-line arguments.
@@ -29,6 +30,7 @@ func run(args []string, stdout io.Writer) error {
 	fs.StringVar(&o.capacity, "capacity", "", "run the capacity controller in this `mode`: disabled, shadow or enabled")
 	fs.DurationVar(&o.grace, "queued-grace", -1, "set the capacity controller's QueuedGrace to this `duration`")
 	fs.StringVar(&o.taskRate, "task-rate", "", "run the task scheduler rate controller in this `mode`")
+	fs.StringVar(&o.workers, "workers", "", "run the worker count controllers in this `mode`")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(fs.Output(), "Usage: adaptivesim -scenario name [flags]\n\n"+
 			"Simulates history's adaptive plane on a coarse model of its DSQL store.\n\n")
@@ -77,8 +79,8 @@ func run(args []string, stdout io.Writer) error {
 
 // overrides are the controllers' settings the command line sets.
 type overrides struct {
-	capacity, taskRate string
-	grace              time.Duration
+	capacity, taskRate, workers string
+	grace                       time.Duration
 }
 
 func (o overrides) apply(sc *Scenario) error {
@@ -93,15 +95,24 @@ func (o overrides) apply(sc *Scenario) error {
 	if o.grace >= 0 {
 		params.Capacity.QueuedGrace = o.grace
 	}
+	c := &sc.Host.Controllers
 	if o.taskRate != "" {
 		if err := checkMode("task-rate", o.taskRate); err != nil {
 			return err
 		}
-		c := &sc.Host.Controllers
 		if c.TaskRate == (taskrate.Settings{}) {
 			c.TaskRate = taskrate.DefaultSettings
 		}
 		c.TaskRate.Mode = o.taskRate
+	}
+	if o.workers != "" {
+		if err := checkMode("workers", o.workers); err != nil {
+			return err
+		}
+		if c.WorkerCount == (workercount.Settings{}) {
+			c.WorkerCount = workercount.DefaultSettings
+		}
+		c.WorkerCount.Mode = o.workers
 	}
 	return nil
 }
