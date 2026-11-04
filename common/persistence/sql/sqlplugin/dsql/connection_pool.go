@@ -22,6 +22,7 @@ import (
 	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/driver"
+	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/gate"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/dsql/session"
 	"go.temporal.io/server/common/resolver"
 )
@@ -152,13 +153,13 @@ func (c *poolConnector) Connect(ctx context.Context) (sqldriver.Conn, error) {
 	}
 	conn, err := c.Connector.Connect(ctx)
 	if err != nil {
-		ticket.release(false)
+		ticket.Release(false)
 		return nil, err
 	}
 	sc, ok := conn.(*stdlib.Conn)
 	if !ok {
 		_ = conn.Close()
-		ticket.release(false)
+		ticket.Release(false)
 		return nil, fmt.Errorf("unexpected pool connection %T", conn)
 	}
 	return &gatedConn{Conn: sc, ticket: ticket}, nil
@@ -168,12 +169,12 @@ func (c *poolConnector) Connect(ctx context.Context) (sqldriver.Conn, error) {
 // idle connections, so that's when the statement, rows, transaction or Conn is done.
 type gatedConn struct {
 	*stdlib.Conn
-	ticket *gateTicket
+	ticket *gate.Ticket
 }
 
 func (c *gatedConn) Close() error {
 	err := c.Conn.Close()
-	c.ticket.release(true)
+	c.ticket.Release(true)
 	return err
 }
 

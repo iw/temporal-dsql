@@ -390,7 +390,7 @@ Every controller ships disabled, is proven in shadow, and stays inside bounds an
 | Partition count | Rate-limited by `MaxRate` | Minutes |
 | Demand-aware share | Seconds-scale exchange | Tens of seconds |
 
-**Testing.** Controllers are pure functions of state, envelope and signals, so unit tests run on a fake clock. Recorded signal traces replay through them offline, as the next section describes. Interactions between controllers need a discrete-event simulator, such as iw/tempdes, fed with production traces before any canary.
+**Testing.** Controllers are pure functions of state, envelope and signals, so unit tests run on a fake clock. Recorded signal traces replay through them offline, as the next section describes. Interactions between controllers need a discrete-event simulator before any canary. `tools/adaptivesim` runs them closed-loop on simulated time, as [Closed-loop simulation](#closed-loop-simulation) describes.
 
 ## Offline replay
 
@@ -414,9 +414,19 @@ Proposals match within a relative 1e-9. A law built where the compiler fuses mul
 
 **Limits.**
 
-- Replay is open-loop. A proposal under other parameters doesn't change the signals that follow. So a what-if shows direction and timing, as shadow mode does, but not where the system would have settled. Closing the loop needs the discrete-event simulator.
+- Replay is open-loop. A proposal under other parameters doesn't change the signals that follow. So a what-if shows direction and timing, as shadow mode does, but not where the system would have settled. Closing the loop needs the [discrete-event simulator](#closed-loop-simulation).
 - A recording opened on a running host, by setting the trace directory then, starts each law from its static value. Its first steps can differ from the recorded ones until the law's state catches up. To record from the start, enable the plane and set the directory before the host starts.
 - Fair share records a namespace's decision only when its mode, its reason or the share it applies changes, or the share it proposes moves by `Deadband`. So its series holds those changes, not every step.
+
+## Closed-loop simulation
+
+`tools/adaptivesim` closes the loop that replay leaves open. It's a discrete-event simulator of history on its DSQL store, kept coarse: the plugin's pool, gate and connection pacing, DSQL's connection admission and limits, history's task scheduler and its writes to each shard, and the workers' pollers. On that model it runs the signal plane and the controllers on simulated time, so a controller's decisions change the limits the simulated service runs under, and the signals that follow. The capacity controller and the gate's admission policy are the real code. The first cut wires only the capacity controller; the others join as actuators on the same model.
+
+```bash
+go run ./cmd/tools/adaptivesim -scenario startup -variant no-grace -trace /tmp/adaptivesim
+```
+
+Its scenarios reproduce the appreciation's [short pool](adaptive-appreciation.md#short-pool) and start-up findings as seeded tests that run in seconds, and its traces replay through `tools/adaptivereplay`. [The tool's README](../../tools/adaptivesim/README.md) describes what it models and what it leaves out, its calibration against the short pool's local rig, and a cross-check with `tools/poolsim`.
 
 ## What stays in dynamic config
 
