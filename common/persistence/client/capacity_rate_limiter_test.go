@@ -227,6 +227,56 @@ func TestCapacityLimiterRecoversToWhatTheStoreDeliveredAfterACut(t *testing.T) {
 	require.InDelta(t, 900, recovered.Decision.Delivered, 0.001)
 }
 
+// History's task scheduler rate, coupled to the persistence rate, keeps the calls at its
+// Headroom of it, so once the store recovers from a cut, this limiter denies nothing. With
+// CoupledBindingShare set, the scheduler's refusals bind, in shadow too, and the rate
+// returns to what the store delivered; without it, the controller holds its cut as idle.
+func TestCapacityLimiterCountsTheSchedulersRefusalsWhenSet(t *testing.T) {
+	for _, mode := range []string{adaptive.ModeNameEnabled, adaptive.ModeNameShadow} {
+		for _, tc := range []struct {
+			share  float64
+			reason string
+			rate   float64
+		}{
+			{share: 0, reason: "idle", rate: 500},
+			{share: 0.9, reason: "recover", rate: 810},
+		} {
+			t.Run(fmt.Sprintf("%s/%v", mode, tc.share), func(t *testing.T) {
+				f := newCapacityLimiterFixture(t, mode)
+				f.params.Capacity.CoupledBindingShare = tc.share
+				f.signals.snapshot.Span = 3 * time.Second
+				f.allowAfter(0) // learns a 10ms baseline
+				f.signals.snapshot = persistence.HealthSnapshot{P99: 2 * time.Second, ErrorRatio: 0.5, Samples: 1000, Span: 3 * time.Second}
+				f.allowAfter(time.Second)
+				f.signals.snapshot = persistence.HealthSnapshot{P99: 500 * time.Millisecond, Throughput: 900, Samples: 1000, Span: 3 * time.Second}
+				for range 3 {
+					f.allowAfter(time.Second)
+				}
+				require.InDelta(t, 500, f.limiter.ctrl.Rate(), 0.001)
+
+				// Healthy again. The scheduler lets 0.9 x 500 = 450 calls a second through, and
+				// they're offered, 1,200 made and 150 rejected over 3 s, while it holds tasks back.
+				f.signals.snapshot = persistence.HealthSnapshot{
+					P99: 10 * time.Millisecond, Throughput: 400, Samples: 1200, Rejected: 150, Span: 3 * time.Second,
+					CoupledRefusals: 40, CoupledHeadroom: 0.9,
+				}
+				f.allowAfter(time.Second)
+				reasons := f.decisions()
+				require.Equal(t, tc.reason, reasons[len(reasons)-1])
+				require.InDelta(t, tc.rate, f.limiter.ctrl.Rate(), 0.001)
+
+				// The detail carries the share and the scheduler's signals, so a trace replays the step.
+				step, ok := f.sink.decisions[len(f.sink.decisions)-1].Detail.(capacity.Detail)
+				require.True(t, ok)
+				require.InDelta(t, tc.share, step.Envelope.CoupledBindingShare, 0)
+				require.Equal(t, 40, step.Signals.CoupledRefusals)
+				require.InDelta(t, 0.9, step.Signals.CoupledHeadroom, 0)
+				require.Equal(t, 150, step.Signals.Rejected)
+			})
+		}
+	}
+}
+
 func TestCapacityLimiterReportsBaselineMoves(t *testing.T) {
 	f := newCapacityLimiterFixture(t, adaptive.ModeNameEnabled)
 	f.params.Capacity.BaselineWindow = time.Minute
@@ -528,6 +578,7 @@ func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
 	require.Equal(t, 30*time.Second, step.Envelope.DeliveryWindow)
 	require.Equal(t, 30*time.Second, step.Envelope.QueuedGrace)
 	require.InDelta(t, 2, step.Envelope.BaselineAlert, 0.001)
+	require.Zero(t, step.Envelope.CoupledBindingShare, "off by default")
 	require.Equal(t, 200*time.Millisecond, step.Signals.P99)
 	require.InDelta(t, 600, step.Signals.Throughput, 0.001)
 	require.Equal(t, 3*time.Second, step.Signals.Span)

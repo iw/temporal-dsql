@@ -302,6 +302,68 @@ func TestReplaysTheCapacityController(t *testing.T) {
 	require.InDelta(t, 0.8, m.Min, 1e-9)
 }
 
+// coupledRecording records the capacity controller, enabled with CoupledBindingShare at 0.9,
+// for 60 seconds: errors cut its rate from 10s to 13s, and from 20s history's task scheduler
+// holds tasks back, with the calls offered at the 0.9 of the rate it lets through, while the
+// limiter denies nothing.
+func coupledRecording(t *testing.T) *recording {
+	t.Helper()
+	env := capacity.DefaultEnvelope(1000)
+	env.CoupledBindingShare = 0.9
+	ctrl := capacity.New(1000)
+	from := 1000.0
+	rec := &recording{}
+	rec.write(t, signals.Record{Header: &signals.Header{Service: "history", Host: "host", PID: 1, Start: start}})
+	for i := range 60 {
+		now := start.Add(time.Duration(i) * time.Second)
+		s := capacity.Signals{Now: now, P99: 5 * time.Millisecond, Throughput: 600, Span: 3 * time.Second, Samples: 1800}
+		switch {
+		case 10 <= i && i < 13:
+			s.ErrorRatio, s.Throughput = 0.2, 300
+		case i >= 20:
+			s.Samples, s.Rejected = int(3*0.9*ctrl.Rate())-30, 30
+			s.CoupledRefusals, s.CoupledHeadroom = 25, 0.9
+		default:
+		}
+		d := ctrl.Step(env, 1000, s)
+		rec.decision(t, adaptive.Decision{
+			Controller: capacity.Name,
+			Time:       now,
+			Mode:       adaptive.ModeOn,
+			Reason:     adaptive.Reason(d.Reason),
+			Static:     1000,
+			Proposed:   d.Proposed,
+			Applied:    d.RPS,
+			Detail:     capacity.Detail{Envelope: env, Signals: s, Decision: d, Start: from},
+		})
+		from = 0
+	}
+	return rec
+}
+
+func TestReplaysTheCapacityControllersCoupledRefusals(t *testing.T) {
+	trace := coupledRecording(t).read(t)
+
+	r, err := Run(trace, nil, nil, nil)
+	require.NoError(t, err)
+	require.Len(t, r.Series, 1)
+	s := r.Series[0]
+	require.Equal(t, len(s.Steps), s.Matched())
+	m := s.Replayed()
+	require.Positive(t, m.Reasons[adaptive.Reason(capacity.ReasonErrors)])
+	require.Positive(t, m.Reasons[adaptive.Reason(capacity.ReasonRecover)], "the scheduler's refusals bind")
+	require.Positive(t, m.Reasons[adaptive.Reason(capacity.ReasonProbe)])
+	require.Greater(t, m.Final, 0.6)
+
+	// Without the share, the controller would have held its cut as idle.
+	r, err = Run(trace, []Override{{Controller: capacity.Name, Field: "CoupledBindingShare", Value: "0"}}, nil, nil)
+	require.NoError(t, err)
+	m = r.Series[0].Replayed()
+	require.Zero(t, m.Reasons[adaptive.Reason(capacity.ReasonRecover)])
+	require.Zero(t, m.Reasons[adaptive.Reason(capacity.ReasonProbe)])
+	require.InDelta(t, m.Min, m.Final, 1e-9, "held at the cut")
+}
+
 func TestReplaysEachTaskQueuesPartitionScaler(t *testing.T) {
 	params := partitions.DefaultSettings.Params(false)
 	params.Settle, params.DownHold = 0, time.Minute
