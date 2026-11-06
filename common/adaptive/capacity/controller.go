@@ -16,7 +16,9 @@
 //     again, the rate returns to that fraction of what it delivered after the cut.
 //   - Probe upward only while the limit is binding (anti-windup); probe
 //     slowly near the rate where overload was last seen, accelerating the
-//     longer the system stays healthy.
+//     longer the system stays healthy. With CoupledBindingShare set, the
+//     limit of history's task scheduler, whose rate is coupled to this one,
+//     binds for it too.
 //
 // The controller reports when its learned baseline moves by BaselineAlert, since a
 // database that slows down raises the target with it.
@@ -113,6 +115,14 @@ type Envelope struct {
 
 	// MinSamples below which the controller holds.
 	MinSamples int
+
+	// CoupledBindingShare counts the refusals of history's task scheduler as the limit
+	// binding while the calls offered reach this share of the calls the scheduler lets
+	// through, CoupledHeadroom times the rate. The scheduler's rate is coupled to the
+	// persistence rate and keeps the calls at its Headroom of it, so while the scheduler's
+	// limit binds, this one denies nothing, and the controller would hold a cut as idle.
+	// 0 turns it off.
+	CoupledBindingShare float64 `json:",omitempty"`
 }
 
 // DefaultEnvelope derives sane bounds from the existing static MaxQPS. Note
@@ -155,6 +165,15 @@ type Signals struct {
 	FactsReported  bool
 	ThrottledRatio float64 // calls the store reported as throttled / requests
 	QueuedRatio    float64 // plugin connection acquires that waited / all acquires
+
+	// Rejected counts the calls the limiter rejected over the same window. With Samples,
+	// they're the calls offered.
+	Rejected int `json:",omitempty"`
+	// CoupledRefusals counts the tasks history's task scheduler refused over the same
+	// window while its rate, coupled to the persistence rate, was below its static rate.
+	// CoupledHeadroom is the share of the persistence rate the scheduler coupled at.
+	CoupledRefusals int     `json:",omitempty"`
+	CoupledHeadroom float64 `json:",omitempty"`
 }
 
 // Name is the controller's name in its decisions and their metric.
@@ -279,6 +298,7 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 			d.LatencyShadow = latencyHigh && !factsHigh
 			latencyHigh = false
 		}
+		binding := s.Binding || coupledBinding(env, s, c.rate)
 		switch {
 		case factsHigh || latencyHigh:
 			if !c.lastDecrease.IsZero() && s.Now.Sub(c.lastDecrease) < env.Cooldown {
@@ -314,7 +334,7 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 				c.lastCut, c.beforeCut, c.delivered = s.Now, before, 0
 				d.Delivered = 0
 			}
-		case !s.Binding:
+		case !binding:
 			d.Reason = ReasonIdle
 		default:
 			step := env.IncreaseFrac
@@ -342,6 +362,19 @@ func (c *Controller) Step(env Envelope, staticRPS float64, s Signals) Decision {
 		d.RPS = staticRPS
 	}
 	return d
+}
+
+// coupledBinding reports whether the task scheduler's coupled limit binds for a controller
+// at rate: the scheduler refused tasks, and the calls offered reach CoupledBindingShare of
+// the calls it lets through. Calls offered well below them say that something other than
+// the rate held the tasks back, such as a mix of calls the scheduler's rate hasn't caught
+// up with yet.
+func coupledBinding(env Envelope, s Signals, rate float64) bool {
+	if env.CoupledBindingShare <= 0 || s.CoupledRefusals <= 0 || s.CoupledHeadroom <= 0 || s.Span <= 0 {
+		return false
+	}
+	offered := float64(s.Samples+s.Rejected) / s.Span.Seconds()
+	return offered >= env.CoupledBindingShare*s.CoupledHeadroom*rate
 }
 
 // recordDelivered keeps the most the store has delivered since the last cut, over
