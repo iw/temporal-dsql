@@ -14,8 +14,9 @@ const numFacts = int(persistence.StoreFactAcquired) + 1
 type (
 	// health is the history host's persistence health signal aggregator, as
 	// common/persistence's healthSignalAggregatorImpl keeps it, on simulated time: calls,
-	// unhealthy errors, rejections, facts and task attempts counted in fixed windows, and
-	// latencies in windows that start at their first sample. The real aggregator reads the
+	// unhealthy errors, rejections, facts, task attempts and the task scheduler's coupled
+	// refusals counted in fixed windows, and latencies in windows that start at their first
+	// sample. The real aggregator reads the
 	// wall clock, so the simulator keeps its own, and takes exact quantiles where the real
 	// one uses t-digests.
 	health struct {
@@ -31,9 +32,12 @@ type (
 		windowCounts
 	}
 
+	// windowCounts are the counts in one window, or summed over several. headroom is the
+	// Headroom of the newest refusal.
 	windowCounts struct {
-		total, errors, rejected, attempts uint64
-		facts                             [numFacts]uint64
+		total, errors, rejected, attempts, refusals uint64
+		facts                                       [numFacts]uint64
+		headroom                                    float64
 	}
 
 	// windowedSamples keeps samples in windows of a fixed size, each starting at its first
@@ -82,6 +86,14 @@ func (h *health) recordSchedule(now time.Time, wait time.Duration) {
 	h.bucket(now).attempts++
 }
 
+// recordRefusal is RecordCoupledRefusal: a task the scheduler's coupled limit held back,
+// and the Headroom the limit coupled at.
+func (h *health) recordRefusal(now time.Time, headroom float64) {
+	b := h.bucket(now)
+	b.refusals++
+	b.headroom = headroom
+}
+
 func (h *health) reportFact(now time.Time, fact persistence.StoreFact, count int64) {
 	if count <= 0 {
 		return
@@ -110,6 +122,10 @@ func (h *health) snapshot(now time.Time, windows int) persistence.HealthSnapshot
 			counts.errors += b.errors
 			counts.rejected += b.rejected
 			counts.attempts += b.attempts
+			counts.refusals += b.refusals
+			if counts.headroom == 0 && b.refusals > 0 {
+				counts.headroom = b.headroom // the newest window's
+			}
 			for fact, count := range b.facts {
 				counts.facts[fact] += count
 			}
@@ -129,6 +145,8 @@ func (h *health) snapshot(now time.Time, windows int) persistence.HealthSnapshot
 		Acquired:          int(counts.facts[persistence.StoreFactAcquired]),
 		Rejected:          int(counts.rejected),
 		ScheduleSamples:   int(counts.attempts),
+		CoupledRefusals:   int(counts.refusals),
+		CoupledHeadroom:   counts.headroom,
 	}
 	if counts.total > 0 {
 		snap.ErrorRatio = float64(counts.errors) / float64(counts.total)

@@ -32,6 +32,7 @@ func run(args []string, stdout io.Writer) error {
 	var o overrides
 	fs.StringVar(&o.capacity, "capacity", "", "run the capacity controller in this `mode`: disabled, shadow or enabled")
 	fs.DurationVar(&o.grace, "queued-grace", -1, "set the capacity controller's QueuedGrace to this `duration`")
+	fs.Float64Var(&o.coupledShare, "coupled-binding-share", -1, "set the capacity controller's CoupledBindingShare to this `share`; 0.9 counts the task scheduler's coupled refusals")
 	fs.StringVar(&o.taskRate, "task-rate", "", "run the task scheduler rate controller in this `mode`")
 	fs.StringVar(&o.workers, "workers", "", "run the worker count controllers in this `mode`")
 	fs.StringVar(&o.memory, "memory", "", "run the memory budget controllers in this `mode`")
@@ -87,6 +88,7 @@ func run(args []string, stdout io.Writer) error {
 type overrides struct {
 	capacity, taskRate, workers, memory, partitions, fairShare string
 	grace                                                      time.Duration
+	coupledShare                                               float64
 }
 
 func (o overrides) apply(sc *Scenario) error {
@@ -100,6 +102,9 @@ func (o overrides) apply(sc *Scenario) error {
 	}
 	if o.grace >= 0 {
 		params.Capacity.QueuedGrace = o.grace
+	}
+	if o.coupledShare >= 0 {
+		params.Capacity.CoupledBindingShare = o.coupledShare
 	}
 	c := &sc.Host.Controllers
 	if o.taskRate != "" {

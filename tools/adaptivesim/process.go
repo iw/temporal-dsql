@@ -107,7 +107,7 @@ func (p *process) drive(collection *dynamicconfig.Collection) {
 	static := func() float64 { return h.Capacity.Static }
 	rate := taskrate.DriveRate(p.plane.signals, collection, static, metrics.NoopMetricsHandler)
 	if h.History.SchedulerRateLimiter {
-		p.history.scheduler = newSchedulerLimiter(h.Capacity.Static, rate, p.w.l.now)
+		p.history.scheduler = newSchedulerLimiter(h.Capacity.Static, rate, taskrate.Config.Get(collection), p.health, p.w.l.now)
 	}
 	queues := workercount.NewHistoryQueues(p.plane.signals, collection, nil, metrics.NoopMetricsHandler)
 	for _, q := range p.history.queues {
