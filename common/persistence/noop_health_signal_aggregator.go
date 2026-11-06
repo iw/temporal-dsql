@@ -23,6 +23,8 @@ func (a *noopSignalAggregator) RecordCall(_ context.Context, _ int32, _ time.Dur
 
 func (a *noopSignalAggregator) RecordScheduleLatency(_ time.Duration) {}
 
+func (a *noopSignalAggregator) RecordCoupledRefusal(_ float64) {}
+
 func (a *noopSignalAggregator) AverageLatency() float64 {
 	return 0
 }

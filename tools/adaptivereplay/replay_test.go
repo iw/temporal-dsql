@@ -98,7 +98,7 @@ func TestReplaysWhatTheSignalPlaneRecorded(t *testing.T) {
 	queues.PendingTaskLimits("transfer", func() int { return 10000 }, func() int { return 9000 })
 	queues.SetShardCount(func() int { return 4 })
 	memory.DriveCache(plane, collection, memory.HistoryCache, 512<<20, &resizable{}, metrics.NoopMetricsHandler)
-	taskrate.NewSchedulerLimiter(quotas.NoopRequestRateLimiter, plane, collection, func() float64 { return 9000 }, metrics.NoopMetricsHandler)
+	taskrate.NewSchedulerLimiter(quotas.NoopRequestRateLimiter, plane, collection, func() float64 { return 9000 }, nil, metrics.NoopMetricsHandler)
 
 	busy := func(i int) bool { return i < 20 || 35 <= i && i < 45 }
 	for i := range 60 {

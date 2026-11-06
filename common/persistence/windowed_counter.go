@@ -6,10 +6,10 @@ import (
 )
 
 // windowedCounter counts requests, unhealthy errors, the persistence rate limiter's
-// rejections, store facts and task attempts in fixed time windows, so error ratio,
-// throughput, facts and attempts per call are all read over exactly the same span. The
-// latency t-digests start a window at its first sample, so their quantiles cover about
-// that span.
+// rejections, store facts, task attempts and the task scheduler's coupled refusals in
+// fixed time windows, so error ratio, throughput, facts, attempts per call and refusals
+// are all read over exactly the same span. The latency t-digests start a window at its
+// first sample, so their quantiles cover about that span.
 type windowedCounter struct {
 	mu      sync.Mutex
 	size    time.Duration
@@ -21,10 +21,12 @@ type counterBucket struct {
 	windowCounts
 }
 
-// windowCounts are the counts in one window, or summed over several.
+// windowCounts are the counts in one window, or summed over several. headroom is the
+// Headroom of the newest refusal.
 type windowCounts struct {
-	total, errors, rejected, attempts uint64
-	facts                             [numStoreFacts]uint64
+	total, errors, rejected, attempts, refusals uint64
+	facts                                       [numStoreFacts]uint64
+	headroom                                    float64
 }
 
 func newWindowedCounter(size time.Duration, count int) *windowedCounter {
@@ -59,6 +61,14 @@ func (c *windowedCounter) recordAttempt(now time.Time) {
 	c.bucket(now).attempts++
 }
 
+func (c *windowedCounter) recordRefusal(now time.Time, headroom float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.bucket(now)
+	b.refusals++
+	b.headroom = headroom
+}
+
 // bucket returns now's bucket, cleared if it still holds an older window. Callers hold mu.
 func (c *windowedCounter) bucket(now time.Time) *counterBucket {
 	w := now.UnixNano() / int64(c.size)
@@ -83,6 +93,10 @@ func (c *windowedCounter) sum(now time.Time, n int) (counts windowCounts, span t
 			counts.errors += b.errors
 			counts.rejected += b.rejected
 			counts.attempts += b.attempts
+			counts.refusals += b.refusals
+			if counts.headroom == 0 && b.refusals > 0 {
+				counts.headroom = b.headroom // the newest window's
+			}
 			for fact, count := range b.facts {
 				counts.facts[fact] += count
 			}
