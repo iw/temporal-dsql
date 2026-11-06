@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"go.temporal.io/server/common/adaptive/taskrate"
 	"go.temporal.io/server/common/signals"
 	"golang.org/x/time/rate"
 )
@@ -24,12 +25,16 @@ type (
 	// without a scheduler rate of its own, and the task rate controller's on top while
 	// it's enabled, as taskrate's schedulerLimiter holds it. A task takes a token from
 	// both, or from neither. Every task has the same priority, so one bucket stands for
-	// the controller's buckets.
+	// the controller's buckets. While the controller's rate is below the static rate, the
+	// tasks its bucket refuses go to the health windows, as taskrate records them.
 	schedulerLimiter struct {
 		original *rate.Limiter
 		coupled  *rate.Limiter
 		driven   *signals.Driven[float64]
 		rate     float64 // the coupled bucket's
+		static   float64
+		settings func() taskrate.Settings
+		health   *health
 	}
 
 	// rescheduler is history's task rescheduler: the tasks the scheduler didn't take wait
@@ -54,11 +59,20 @@ type (
 	}
 )
 
-func newSchedulerLimiter(static float64, driven *signals.Driven[float64], now time.Time) *schedulerLimiter {
+func newSchedulerLimiter(
+	static float64,
+	driven *signals.Driven[float64],
+	settings func() taskrate.Settings,
+	h *health,
+	now time.Time,
+) *schedulerLimiter {
 	s := &schedulerLimiter{
 		original: rate.NewLimiter(rate.Limit(static), max(1, int(schedulerBurstRatio*static))),
 		coupled:  rate.NewLimiter(1, 1),
 		driven:   driven,
+		static:   static,
+		settings: settings,
+		health:   h,
 	}
 	// The limiters start full at the time the host starts.
 	s.original.AllowN(now, 0)
@@ -80,6 +94,9 @@ func (s *schedulerLimiter) allow(now time.Time) bool {
 	coupled := s.coupled.ReserveN(now, 1)
 	if !coupled.OK() || coupled.DelayFrom(now) > 0 {
 		coupled.CancelAt(now)
+		if r < s.static {
+			s.health.recordRefusal(now, s.settings().Headroom)
+		}
 		return false
 	}
 	original := s.original.ReserveN(now, 1)

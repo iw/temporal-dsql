@@ -46,16 +46,36 @@ type (
 		Applying() (float64, bool)
 	}
 
+	// RefusalRecorder receives the tasks the scheduler's coupled limit holds back, as the
+	// persistence health aggregator counts them for the capacity controller.
+	RefusalRecorder interface {
+		RecordCoupledRefusal(headroom float64)
+	}
+
 	// schedulerLimiter limits history's task scheduler to the controller's rate while it's
 	// enabled, on top of the scheduler's own limiter. Otherwise it's the scheduler's own.
+	// While the controller's rate is below the static rate, it records each task the
+	// controller's buckets hold back.
 	schedulerLimiter struct {
 		original quotas.RequestRateLimiter
 		coupled  quotas.RequestRateLimiter // the buckets' priority cascade, then original
 		driven   applier
 		rate     atomic.Uint64 // the buckets' rate, as math.Float64bits
+		static   func() float64
+		settings func() Settings
+		refusals RefusalRecorder
 
 		mu      sync.Mutex // guards the buckets' updates
 		buckets []*quotas.RateLimiterImpl
+	}
+
+	// heldBack is the buckets' priority cascade, which calls held for each task it holds
+	// back. The multi limiter around it reserves on it whether the scheduler asks it to
+	// allow a task or to reserve for one, so a reservation that isn't OK, or that would
+	// wait, holds a task back.
+	heldBack struct {
+		quotas.RequestRateLimiter
+		held func()
 	}
 )
 
@@ -83,15 +103,18 @@ enabled.`,
 )
 
 // NewSchedulerLimiter couples limiter, history's task scheduler rate limiter, to
-// persistence. persistenceRate is the host's static persistence rate.
+// persistence. persistenceRate is the host's static persistence rate. While the coupled
+// rate is below it, refusals records the tasks the coupling holds back.
 func NewSchedulerLimiter(
 	limiter quotas.RequestRateLimiter,
 	plane *signals.Plane,
 	collection *dynamicconfig.Collection,
 	persistenceRate func() float64,
+	refusals RefusalRecorder,
 	handler metrics.Handler,
 ) quotas.RequestRateLimiter {
-	return newSchedulerLimiter(limiter, DriveRate(plane, collection, persistenceRate, handler))
+	driven := DriveRate(plane, collection, persistenceRate, handler)
+	return newSchedulerLimiter(limiter, driven, persistenceRate, Config.Get(collection), refusals)
 }
 
 // DriveRate drives the scheduler's rate from the plane's snapshots, for a limiter that
@@ -107,8 +130,14 @@ func DriveRate(
 	return signals.DriveFunc(plane, persistenceRate, ctrl, adaptive.Frozen.Get(collection), adaptive.HostKey(), handler)
 }
 
-func newSchedulerLimiter(limiter quotas.RequestRateLimiter, driven applier) *schedulerLimiter {
-	l := &schedulerLimiter{original: limiter, driven: driven}
+func newSchedulerLimiter(
+	limiter quotas.RequestRateLimiter,
+	driven applier,
+	static func() float64,
+	settings func() Settings,
+	refusals RefusalRecorder,
+) *schedulerLimiter {
+	l := &schedulerLimiter{original: limiter, driven: driven, static: static, settings: settings, refusals: refusals}
 	rateLimiters := make(map[int]quotas.RequestRateLimiter, len(tasks.PriorityName))
 	for priority := range tasks.PriorityName {
 		bucket := quotas.NewRateLimiter(1, 1)
@@ -116,7 +145,7 @@ func newSchedulerLimiter(limiter quotas.RequestRateLimiter, driven applier) *sch
 		rateLimiters[int(priority)] = quotas.NewRequestRateLimiterAdapter(bucket)
 	}
 	l.coupled = quotas.NewMultiRequestRateLimiter(
-		quotas.NewPriorityRateLimiter(requestPriority, rateLimiters),
+		&heldBack{RequestRateLimiter: quotas.NewPriorityRateLimiter(requestPriority, rateLimiters), held: l.held},
 		limiter,
 	)
 	return l
@@ -157,6 +186,23 @@ func (l *schedulerLimiter) limiter() quotas.RequestRateLimiter {
 		l.mu.Unlock()
 	}
 	return l.coupled
+}
+
+// held records a task the buckets held back, while their rate is below the static rate.
+// At the static rate, the controller's ceiling, a higher persistence rate wouldn't let more
+// tasks through.
+func (l *schedulerLimiter) held() {
+	if l.refusals != nil && math.Float64frombits(l.rate.Load()) < l.static() {
+		l.refusals.RecordCoupledRefusal(l.settings().Headroom)
+	}
+}
+
+func (h *heldBack) Reserve(now time.Time, request quotas.Request) quotas.Reservation {
+	r := h.RequestRateLimiter.Reserve(now, request)
+	if !r.OK() || r.DelayFrom(now) > 0 {
+		h.held()
+	}
+	return r
 }
 
 func (c *controller) Name() string {

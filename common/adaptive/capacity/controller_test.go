@@ -1,6 +1,8 @@
 package capacity
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -460,5 +462,132 @@ func TestBaselineAlertOff(t *testing.T) {
 		if d := c.Step(env, 1000, healthy(time.Duration(m)*time.Minute, p99, false)); d.BaselineMovedFrom != 0 {
 			t.Fatalf("BaselineAlert 0 reported a move: %+v", d)
 		}
+	}
+}
+
+// coupled is a healthy step in which the limiter denied nothing and history's task scheduler
+// refused tasks, coupled at a Headroom of 0.9, with calls offered a second over a 3 s window.
+func coupled(at time.Duration, offered float64) Signals {
+	s := healthy(at, 10*time.Millisecond, false)
+	s.Span, s.Samples = 3*time.Second, int(offered*3)
+	s.CoupledRefusals, s.CoupledHeadroom = 40, 0.9
+	return s
+}
+
+func coupledEnvelope(static float64) Envelope {
+	env := DefaultEnvelope(static)
+	env.CoupledBindingShare = 0.9
+	return env
+}
+
+func TestCoupledRefusalsBindWhileTheCallsOfferedReachTheirShare(t *testing.T) {
+	env := coupledEnvelope(1000)
+	// At 500/s, the scheduler lets 0.9 x 500 = 450 calls a second through, and the share is
+	// 0.9 of that, 405.
+	c := New(500)
+	if d := c.Step(env, 1000, coupled(0, 400)); d.Reason != ReasonIdle || d.Proposed != 500 {
+		t.Fatalf("calls offered under the share must not bind, got %+v", d)
+	}
+	if d := c.Step(env, 1000, coupled(time.Second, 406)); d.Reason != ReasonProbe || d.Proposed <= 500 {
+		t.Fatalf("expected a probe once the calls offered reach the share, got %+v", d)
+	}
+	// The calls the limiter rejected were offered too.
+	s := coupled(2*time.Second, 300)
+	s.Rejected = 3 * 150
+	if d := c.Step(env, 1000, s); d.Reason != ReasonProbe {
+		t.Fatalf("expected the rejected calls to count as offered, got %+v", d)
+	}
+}
+
+func TestCoupledRefusalsNeedTheSettingAndTheSchedulersSignals(t *testing.T) {
+	without := func(f func(*Signals)) Signals {
+		s := coupled(0, 450)
+		f(&s)
+		return s
+	}
+	for name, tc := range map[string]struct {
+		env Envelope
+		s   Signals
+	}{
+		"the setting off": {env: DefaultEnvelope(1000), s: coupled(0, 450)},
+		"no refusals":     {env: coupledEnvelope(1000), s: without(func(s *Signals) { s.CoupledRefusals = 0 })},
+		"no Headroom":     {env: coupledEnvelope(1000), s: without(func(s *Signals) { s.CoupledHeadroom = 0 })},
+		"no window":       {env: coupledEnvelope(1000), s: without(func(s *Signals) { s.Span = 0 })},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if d := New(500).Step(tc.env, 1000, tc.s); d.Reason != ReasonIdle || d.Proposed != 500 {
+				t.Fatalf("expected an idle hold, got %+v", d)
+			}
+		})
+	}
+}
+
+// The limiter's own denials bind whatever the calls offered, as before; the scheduler's
+// refusals bind only through their share.
+func TestTheLimitersDenialsBindWithoutTheShare(t *testing.T) {
+	env := coupledEnvelope(1000)
+	s := coupled(0, 100)
+	if d := New(500).Step(env, 1000, s); d.Reason != ReasonIdle {
+		t.Fatalf("refusals with few calls offered must not bind, got %+v", d)
+	}
+	s.Binding = true
+	if d := New(500).Step(env, 1000, s); d.Reason != ReasonProbe {
+		t.Fatalf("expected the limiter's denials to bind, got %+v", d)
+	}
+}
+
+// After a cut, the task scheduler's rate follows the controller's and keeps the calls at
+// its Headroom of it, so the limiter denies nothing once the store recovers. Without the
+// scheduler's refusals the controller holds its cut as idle; with them it returns to what
+// the store delivered after the cut.
+func TestCoupledRefusalsLetTheRateRecoverAfterACut(t *testing.T) {
+	for _, tc := range []struct {
+		share  float64
+		reason Reason
+		rate   float64
+	}{
+		{share: 0, reason: ReasonIdle, rate: 150},
+		{share: 0.9, reason: ReasonRecover, rate: 225},
+	} {
+		env := DefaultEnvelope(300)
+		env.CoupledBindingShare = tc.share
+		c := New(300)
+		c.Step(env, 300, healthy(0, 10*time.Millisecond, false))
+		if d := c.Step(env, 300, storm(time.Second)); d.Reason != ReasonErrors || d.Proposed != 150 {
+			t.Fatalf("expected the storm to halve the rate, got %+v", d)
+		}
+		c.Step(env, 300, draining(4*time.Second, 500*time.Millisecond, 250))
+		// The scheduler lets 0.9 x 150 = 135 calls a second through, and they're offered.
+		d := c.Step(env, 300, coupled(8*time.Second, 135))
+		if d.Reason != tc.reason || d.Proposed != tc.rate {
+			t.Fatalf("CoupledBindingShare %v: expected %s at %v, got %+v", tc.share, tc.reason, tc.rate, d)
+		}
+	}
+}
+
+// A detail leaves the scheduler's signals and CoupledBindingShare out while they're zero,
+// so details from before them decode with them at zero, which leaves them off.
+func TestCoupledFieldsAreLeftOutOfDetailsWhileZero(t *testing.T) {
+	b, err := json.Marshal(Detail{Envelope: DefaultEnvelope(1000), Signals: healthy(0, 10*time.Millisecond, false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"CoupledBindingShare", "Rejected", "CoupledRefusals", "CoupledHeadroom"} {
+		if strings.Contains(string(b), field) {
+			t.Fatalf("%s is in a detail while zero: %s", field, b)
+		}
+	}
+
+	want := Detail{Envelope: coupledEnvelope(1000), Signals: coupled(0, 450)}
+	want.Signals.Rejected = 20
+	if b, err = json.Marshal(want); err != nil {
+		t.Fatal(err)
+	}
+	var got Detail
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Envelope != want.Envelope || got.Signals.Rejected != 20 || got.Signals.CoupledRefusals != 40 || got.Signals.CoupledHeadroom != 0.9 {
+		t.Fatalf("the coupled fields didn't round-trip: %+v", got)
 	}
 }

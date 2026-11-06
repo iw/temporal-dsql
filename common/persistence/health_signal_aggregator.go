@@ -33,6 +33,10 @@ type (
 		// RecordScheduleLatency records how long a history task attempt waited in its
 		// scheduler, for the queueing delay that RecentSnapshot reports.
 		RecordScheduleLatency(latency time.Duration)
+		// RecordCoupledRefusal records a task that history's task scheduler held back while
+		// its rate, coupled to the persistence rate, was below the static rate, and the share
+		// of the persistence rate it coupled at, its Headroom.
+		RecordCoupledRefusal(headroom float64)
 		AverageLatency() float64
 		LatencyQuantile(quantile float64) float64
 		ErrorRatio() float64
@@ -64,6 +68,11 @@ type (
 		// Rejected counts the calls the persistence rate limiter rejected over the same
 		// span. They're left out of the other fields.
 		Rejected int
+		// CoupledRefusals counts the tasks history's task scheduler held back over the same
+		// span while its rate, coupled to the persistence rate, was below the static rate.
+		// CoupledHeadroom is the Headroom the newest of them coupled at.
+		CoupledRefusals int
+		CoupledHeadroom float64
 	}
 
 	healthSignalAggregatorImpl struct {
@@ -79,7 +88,7 @@ type (
 
 		latencyAverage      aggregate.MovingWindowAverage
 		latencyDistribution stats.TimeWindowedStats
-		counters            *windowedCounter        // calls, rejections, facts and task attempts
+		counters            *windowedCounter        // calls, rejections, facts, task attempts and refusals
 		scheduleLatency     stats.TimeWindowedStats // how long task attempts waited
 		errorRatio          aggregate.MovingWindowAverage
 		factsDeclared       atomic.Bool
@@ -214,6 +223,12 @@ func (s *healthSignalAggregatorImpl) RecordScheduleLatency(latency time.Duration
 	}
 }
 
+func (s *healthSignalAggregatorImpl) RecordCoupledRefusal(headroom float64) {
+	if s.aggregationEnabled && s.percentilesEnabled() && s.latencyDistribution != nil {
+		s.counters.recordRefusal(time.Now(), headroom)
+	}
+}
+
 func (s *healthSignalAggregatorImpl) AverageLatency() float64 {
 	return s.latencyAverage.Average()
 }
@@ -257,6 +272,8 @@ func (s *healthSignalAggregatorImpl) RecentSnapshot(windows int) HealthSnapshot 
 		Acquired:          int(counts.facts[StoreFactAcquired]),
 		Rejected:          int(counts.rejected),
 		ScheduleSamples:   int(counts.attempts),
+		CoupledRefusals:   int(counts.refusals),
+		CoupledHeadroom:   counts.headroom,
 	}
 	if counts.total > 0 {
 		snap.ErrorRatio = float64(counts.errors) / float64(counts.total)

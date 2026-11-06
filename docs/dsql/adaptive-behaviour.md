@@ -180,7 +180,7 @@ The control law has no latency threshold in milliseconds. It borrows from TCP BB
 1. **Target.** Learn a baseline as the 10-minute minimum of p99; aim for p99 at baseline × 2, capped at an absolute ceiling (750 ms) that guards against slow baseline drift.
 2. **Cut on overload.** When p99 exceeds the target or unhealthy errors exceed 1%, cut to 90% of the throughput the database actually delivered. Never cut more than half in one step.
 3. **Act once per signal.** The cooldown between cuts is at least twice the signal span, so the controller never acts twice on the same stale data.
-4. **Probe only when binding.** Increase only while the limiter is rejecting requests, so the limit cannot inflate while idle. Near the last overload point, start at 0.5% per step and ramp to 5% over 30s.
+4. **Probe only when binding.** Increase only while the limiter is rejecting requests, so the limit cannot inflate while idle. Near the last overload point, start at 0.5% per step and ramp to 5% over 30s. On this branch, the task scheduler's limit, which is coupled to the controller's rate, can bind for it too, as *Count the task scheduler's refusals* below describes.
 
 The Phase 1 patch implements this as an opt-in mode of the existing struct-valued setting, so it reaches history, matching, frontend and worker with no new wiring:
 
@@ -234,6 +234,24 @@ history.taskSchedulerRateController:
   - value:
       Mode: enabled
 ```
+
+**Count the task scheduler's refusals.** With both enabled, the task scheduler rate keeps persistence's calls at its `Headroom`, 90%, of the capacity controller's rate. Once the scheduler's limit binds, the persistence limiter denies nothing, so after a cut the controller holds its rate as `idle` while tasks wait in the scheduler. In the simulator's slow store, capacity held its cut for the rest of the load after the store recovered, and 6,648 tasks were waiting when the load ended. On this branch, `CoupledBindingShare` counts the scheduler's refusals as the controller's limit binding:
+
+- **The count.** The task scheduler's limiter records each task its coupled buckets hold back, refused or made to wait, while their rate is below the static rate. It records them in the persistence health signals, beside the task attempts, with the `Headroom` it coupled at. At the static rate, the task rate's ceiling, a higher persistence rate wouldn't let more tasks through, and the scheduler's own limit's refusals aren't the coupling's, so neither counts.
+- **The law.** The controller counts the refusals as its limit binding while the calls offered, made and rejected, reach `CoupledBindingShare` of the calls the scheduler lets through: `Headroom` times the controller's rate. Calls offered well below that say that something other than the rate held the tasks back, such as a mix of calls the task rate hasn't caught up with yet. The store's facts and latency still cut as before.
+- **Replay.** Each decision's detail carries the refusals, their `Headroom`, the rejected calls and the share, so a trace replays the step, and a replay can set the share on a trace recorded with it at 0.
+- **Off by default.** At 0, its default, the controller ignores the refusals, so enabling both controllers keeps the behaviour above until it's set. It applies in shadow mode too, so a shadow run shows the probes.
+
+```yaml
+history.persistenceDynamicRateLimitingParams:
+  - value:
+      Enabled: true
+      Capacity:
+        Mode: enabled
+        CoupledBindingShare: 0.9
+```
+
+In `tools/adaptivesim`, at 0.9, the slow store's capacity probes from about 100 a second to about 200 within 20 s of the store recovering, 880 tasks are waiting when the load ends, and every task completes. The task rate still follows each cut while the store is slow. After the recovery, the queued share cuts the rate five times as the rescheduler's retries release the waiting tasks in batches. Through a surge, capacity probes to about half of its ceiling. Where the task rate's step limit lags a surge of tasks while the calls stay far below capacity's rate, the calls offered don't reach the share, and capacity stays at its static rate. [The simulator's README](../../tools/adaptivesim/README.md#what-the-runs-show) has the runs.
 
 **On DSQL, hear the plugin's facts.** The design for passing the DSQL plugin's throttling, contention and pool pressure to the controller, rather than inferring the store's health from latency, is in [Store facts for the capacity controller](adaptive-store-facts.md).
 
@@ -501,6 +519,7 @@ The timeline shows three failure modes. Static admits past capacity, every queue
 |---|---|---|
 | Baseline drift | A slowly degrading database raises the learned minimum and the target with it | Absolute latency ceiling in the envelope; on this branch, a warning and a `baseline-up` or `baseline-down` decision when the baseline moves by `BaselineAlert` |
 | Over-cut on a step drop | Successful throughput collapses during a timeout storm, so the cut overshoots | Cooldown at least 2× signal span; on this branch, a BBR-style max-filter returns the rate to 90% of what the store delivered after the cut |
+| A coupled limit binds instead | The task scheduler rate keeps persistence's calls under the capacity controller's rate, so after a cut the persistence limit stops binding and the cut stays | On this branch, `CoupledBindingShare`, off by default, counts the scheduler's refusals as the limit binding while the calls offered come close to what it lets through |
 | Controllers fighting | Worker, persistence and partition loops act on overlapping resources | Timescale separation; workers back off when persistence does. The [system appreciation](adaptive-appreciation.md#loops-and-timescales) saw no two loops chase each other |
 | Open-loop shadow | Shadow proposals never feel their own effect | Treat shadow as a direction check; canary small cohorts in enabled mode |
 | Hidden state | Learned values are not in YAML, so incidents need a new way to see them | Decision reasons as metrics; a describe API for current controller state |

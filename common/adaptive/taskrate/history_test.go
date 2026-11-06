@@ -99,6 +99,33 @@ func (s *snapshotSource) Read(time.Time, int) signals.Snapshot { return s.Snapsh
 
 func (s *snapshotSource) Idle() {}
 
+// staticRate is a static persistence rate.
+func staticRate(rate float64) func() float64 {
+	return func() float64 { return rate }
+}
+
+func defaultSettings() Settings { return DefaultSettings }
+
+// recordedRefusals stands in for the persistence health aggregator.
+type recordedRefusals struct {
+	headrooms []float64
+}
+
+func (r *recordedRefusals) RecordCoupledRefusal(headroom float64) {
+	r.headrooms = append(r.headrooms, headroom)
+}
+
+// refusingLimiter stands in for a scheduler's own limiter that refuses every task.
+type refusingLimiter struct {
+	quotas.RequestRateLimiter
+}
+
+func (refusingLimiter) Allow(time.Time, quotas.Request) bool { return false }
+
+func (refusingLimiter) Reserve(time.Time, quotas.Request) quotas.Reservation {
+	return quotas.NewMultiReservation(false, nil)
+}
+
 // fixedRate is a driven rate.
 type fixedRate struct {
 	rate float64
@@ -134,7 +161,7 @@ func taskRequest(priority tasks.Priority) quotas.Request {
 func TestSchedulerLimiterIsTheSchedulersOwnWhileOff(t *testing.T) {
 	original := newCountingLimiter()
 	rate := &fixedRate{rate: 0.001}
-	l := newSchedulerLimiter(original, rate)
+	l := newSchedulerLimiter(original, rate, staticRate(9000), defaultSettings, nil)
 	now := time.Now()
 	for range 10 {
 		require.True(t, l.Allow(now, taskRequest(tasks.PriorityLow)))
@@ -148,7 +175,7 @@ func TestSchedulerLimiterIsTheSchedulersOwnWhileOff(t *testing.T) {
 
 func TestSchedulerLimiterHoldsTasksToTheControllersRate(t *testing.T) {
 	original := newCountingLimiter()
-	l := newSchedulerLimiter(original, &fixedRate{rate: 10, on: true})
+	l := newSchedulerLimiter(original, &fixedRate{rate: 10, on: true}, staticRate(9000), defaultSettings, nil)
 	now := time.Now()
 
 	// A bucket set to a new rate starts with one token and fills at the rate.
@@ -169,4 +196,59 @@ func TestRequestPriorityIsTheTasks(t *testing.T) {
 	require.Equal(t, int(tasks.PriorityHigh), requestPriority(taskRequest(tasks.PriorityHigh)))
 	require.Equal(t, int(tasks.PriorityLow), requestPriority(taskRequest(tasks.PriorityLow)))
 	require.Equal(t, int(tasks.PriorityPreemptable), requestPriority(quotas.NewRequest("api", 1, "namespace", headers.CallerTypeOperator, 0, "")))
+}
+
+func TestSchedulerLimiterRecordsTheTasksItsBucketsHoldBack(t *testing.T) {
+	refusals := &recordedRefusals{}
+	settings := DefaultSettings
+	settings.Headroom = 0.8
+	l := newSchedulerLimiter(newCountingLimiter(), &fixedRate{rate: 10, on: true}, staticRate(100), func() Settings { return settings }, refusals)
+	now := time.Now()
+
+	allowed := 0
+	for range 20 {
+		if l.Allow(now, taskRequest(tasks.PriorityLow)) {
+			allowed++
+		}
+	}
+	require.Equal(t, 1, allowed)
+	require.Len(t, refusals.headrooms, 19)
+	require.InDelta(t, 0.8, refusals.headrooms[0], 1e-9, "the Headroom the rate coupled at")
+
+	// The scheduler's Submit reserves, and waits for the reservation: a task that has to
+	// wait is held back too.
+	r := l.Reserve(now, taskRequest(tasks.PriorityLow))
+	require.True(t, r.OK())
+	require.Positive(t, r.DelayFrom(now))
+	require.Len(t, refusals.headrooms, 20)
+}
+
+func TestSchedulerLimiterRecordsOnlyItsBucketsRefusalsBelowTheStaticRate(t *testing.T) {
+	now := time.Now()
+	refuse := func(l *schedulerLimiter) {
+		for range 20 {
+			l.Allow(now, taskRequest(tasks.PriorityLow))
+		}
+	}
+	for name, l := range map[string]func(*recordedRefusals) *schedulerLimiter{
+		// At the static rate, the controller's ceiling, a higher persistence rate wouldn't
+		// let more tasks through.
+		"at the static rate": func(r *recordedRefusals) *schedulerLimiter {
+			return newSchedulerLimiter(newCountingLimiter(), &fixedRate{rate: 10, on: true}, staticRate(10), defaultSettings, r)
+		},
+		"the scheduler's own limit": func(r *recordedRefusals) *schedulerLimiter {
+			return newSchedulerLimiter(refusingLimiter{}, &fixedRate{rate: 1000, on: true}, staticRate(9000), defaultSettings, r)
+		},
+		"the controller off": func(r *recordedRefusals) *schedulerLimiter {
+			return newSchedulerLimiter(refusingLimiter{}, &fixedRate{rate: 10}, staticRate(9000), defaultSettings, r)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			refusals := &recordedRefusals{}
+			l := l(refusals)
+			refuse(l)
+			require.False(t, l.Allow(now, taskRequest(tasks.PriorityLow)))
+			require.Empty(t, refusals.headrooms)
+		})
+	}
 }

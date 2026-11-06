@@ -30,8 +30,10 @@ go run ./cmd/tools/adaptivereplay /tmp/adaptivesim/*.jsonl
   default. `-list` lists them.
 - `-seed n` runs with another random seed. A run with the same scenario and seed gives
   the same result.
-- `-capacity mode` runs the capacity controller `disabled`, in `shadow` or `enabled`, and
-  `-queued-grace duration` sets its `QueuedGrace`. `-task-rate mode`, `-workers mode`,
+- `-capacity mode` runs the capacity controller `disabled`, in `shadow` or `enabled`,
+  `-queued-grace duration` sets its `QueuedGrace`, and `-coupled-binding-share share` its
+  `CoupledBindingShare`, 0 and off in every scenario. At 0.9 it counts the task scheduler's
+  coupled refusals as its limit binding. `-task-rate mode`, `-workers mode`,
   `-memory mode`, `-partitions mode` and `-fair-share mode` do the same for the task
   scheduler rate, the worker counts, the memory budget, the partition scaler and fair
   share. The partition scaler needs a scenario whose workflows run through matching, and
@@ -71,7 +73,8 @@ seconds, with no AWS.
 | `fleet-start` | | `tools/poolsim`'s `pgxpool-fleet-start.yaml`, for the [cross-check](#cross-check-with-poolsim) |
 | `workflows` | | Two hosts run 10 workflows/s each through 32 pollers a host, on the plugin's current path |
 | `slow-store` | `cap`, `cap-tsr`, `cap-wrk`, `all` | The appreciation's slow store: one host of 48 connections, whose static persistence rate is 300/s, runs 80 tasks/s and 10 workflows/s for 240 s, and the store's replies come 40 ms later from 60 s to 150 s. `cap` enables the capacity controller with the task scheduler rate in shadow; `cap-tsr` enables both; `cap-wrk` enables the capacity controller and the worker counts; `all` enables all three, every controller the host runs |
-| `surge` | `tsr`, `shadow` | One host whose static persistence rate is 100/s runs 50 tasks/s, 120/s from 60 s to 120 s, and 5 workflows/s, with the capacity controller in shadow and the task scheduler rate enabled or in shadow |
+| `surge` | `tsr`, `shadow`, `cap-tsr` | One host whose static persistence rate is 100/s runs 50 tasks/s, 120/s from 60 s to 120 s, and 5 workflows/s. `tsr` enables the task scheduler rate with the capacity controller in shadow; `shadow` runs both in shadow; `cap-tsr` enables both |
+| `mixed-surge` | `cap-tsr` | One host whose static persistence rate is 1000/s, and whose calls are mostly the workflows', runs 80 workflows/s and 5 tasks/s, 150/s from 60 s to 120 s, for 240 s, with the capacity controller and the task scheduler rate enabled. The calls never approach the static rate |
 | `busy-queue` | `wrk`, `shadow` | One host whose queues have 8 workers each, so that the workers bind first, runs 60 tasks/s for 90 s, then 5 tasks/s until 540 s, with the worker counts enabled or in shadow |
 | `partitions` | `partitions`, `pollers`, `shadow` | A workflow task queue whose add rate passes the 50 tasks/s the partition scaler's trials need, which the appreciation never reached: one host of 128 shards in the local rig starts 80 workflows/s for 360 s, each a single workflow task, through matching's 4 partitions. In `partitions`, each partition dispatches at most 15 tasks/s and 32 pollers wait; in `pollers`, the partitions have no limit and 14 pollers wait. The scaler is enabled, or in shadow in `shadow`, which is `partitions`' host |
 | `uneven-frontends` | `fair`, `shadow`, `all` | The appreciation's uneven frontends, on its rig: two history hosts of 16 shards, matching with 32 workflow and 32 activity pollers, and two frontends that take 80% and 20% of 5 workflows/s, each one activity and a 1 s timer. From 30 s to 270 s, a second namespace whose limit across the cluster is 60/s gets 72 requests/s through the first frontend and 18 through the second. `fair` enables fair share with the other controllers in shadow; `shadow` runs every controller in shadow, and `all` enables every one |
@@ -125,8 +128,9 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
   health signal aggregator records each attempt. A call that returns `Unavailable` is
   retried once, 50 ms later.
 - **Health signals**, as `healthSignalAggregatorImpl.RecentSnapshot` reads them: calls,
-  unhealthy errors, rejections, facts and task attempts counted in fixed windows, and
-  latencies in windows that start at their first sample. The real aggregator reads the
+  unhealthy errors, rejections, facts, task attempts and the task scheduler's coupled
+  refusals counted in fixed windows, and latencies in windows that start at their first
+  sample. The real aggregator reads the
   wall clock, so the simulator keeps its own on simulated time, with exact quantiles where
   the real one uses t-digests.
 - **The capacity controller.** The real controller, stepped from the calls every
@@ -154,9 +158,11 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
 - **The scheduler's rate limiter**, where a scenario turns it on, as
   `history.taskSchedulerEnableRateLimiter` does: its own limit is the static persistence
   rate, with a burst of twice that, and the task scheduler rate holds tasks to its own
-  rate on top while it's enabled. A task the limiter refuses waits in its queue's
-  rescheduler for 1 s × 1.1ⁿ, then goes back to the scheduler in time order; when the
-  scheduler refuses it again, the rescheduler tries again 1–3 s later.
+  rate on top while it's enabled. While that rate is below the static rate, the tasks it
+  refuses go to the health signals with its `Headroom`, as `taskrate` records them for the
+  capacity controller's `CoupledBindingShare`. A task the limiter refuses waits in its
+  queue's rescheduler for 1 s × 1.1ⁿ, then goes back to the scheduler in time order; when
+  the scheduler refuses it again, the rescheduler tries again 1–3 s later.
 - **Workers.** Without matching, a fixed number of pollers, 32 a host. A workflow is a
   start, then a few tasks, each held by a poller until history has written the worker's
   response.
@@ -380,6 +386,26 @@ config is a static collection of the scenario's controller settings.
   ends. A rate that isn't binding says nothing about the store, which is why `idle` holds;
   here the task rate is what keeps it from binding. In the appreciation, the task rate
   stayed far above the tasks' rate except in the short pool, so this didn't show there.
+  `CoupledBindingShare` lets the task scheduler's refusals bind for capacity, as the next
+  finding shows.
+- **With `CoupledBindingShare` at 0.9, the task scheduler's refusals bind, and the cut
+  doesn't stay.** Capacity counts the tasks the task scheduler's coupled limit refuses,
+  while its rate is below the static rate, as its own limit binding, as long as the calls
+  offered reach 0.9 of what the scheduler lets through. In `slow-store`'s `cap-tsr`, with
+  `-coupled-binding-share 0.9`, capacity cuts to 80.5 a second at 1:08 as before, and the
+  task rate follows each cut. While the store is slow, the refusals let capacity recover
+  and probe, and the queued share cuts it back. Once the store recovers at 2:30, capacity
+  probes from 103 a second to 199 by 2:50. The queued share then cuts it to about 130 a
+  second five times by the load's end, as the rescheduler's retries release the waiting
+  tasks in batches, and twice in the drain. 880 tasks are waiting when the load ends,
+  against 6,648 with the share at 0, and every task completes; their p99 is 1m51s, against
+  3m4s. In `surge`'s `cap-tsr`, capacity probes to 155 a second, against 110 with the
+  share at 0, below its ceiling of 300, and the scheduler refuses 1,307 submissions,
+  against 2,234. Only the coupled limit's refusals below the static rate count, so the
+  scheduler's own limit doesn't take capacity to its ceiling. In `mixed-surge`, the task
+  rate's 25% step limit lags the surge, so the scheduler refuses 809 submissions while the
+  calls stay far below capacity's 1,000 a second. The calls offered don't reach the share,
+  so capacity stays at 1,000; with the share at 0.01 it rises to 2,183.
 - **A busy queue's worker count grows, then shrinks.** In `busy-queue`, the transfer
   queue's count grows from 8 to 16 by 11 s, which serves the 60 tasks a second: the tasks'
   p99 was 1.8 s, against 55 s with the count in shadow. At 16 workers its tasks wait
@@ -473,5 +499,6 @@ config is a static collection of the scenario's controller settings.
   decisions are `cap-tsr`'s: capacity holds its cut of 80.5 a second as `idle` from 1m17s
   to the load's end, the task rate stays at about 42 a second, and 6,648 tasks are still
   waiting when the load ends. The worker counts back off after each cut and shrink to 361,
-  which changes nothing else. In the ramp's and the uneven frontends' `all`, capacity never
-  cuts, so there's no cut for the task rate to hold.
+  which changes nothing else. With `-coupled-binding-share 0.9`, `all`'s tasks and
+  capacity decisions are again `cap-tsr`'s. In the ramp's and the uneven frontends' `all`,
+  capacity never cuts, so there's no cut for the task rate to hold.

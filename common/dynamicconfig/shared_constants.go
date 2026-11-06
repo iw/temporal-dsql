@@ -146,6 +146,14 @@ type CapacityControllerParams struct {
 	SignalWindows int
 	// MinSamples below which the controller holds.
 	MinSamples int
+	// CoupledBindingShare counts the refusals of history's task scheduler, whose rate
+	// history.taskSchedulerRateController couples to the persistence rate, as the limit
+	// binding while the calls offered reach this share of the calls the scheduler lets
+	// through: its Headroom times the controller's rate. Once the scheduler's limit binds,
+	// this one denies nothing, so without them the controller holds a cut as idle while
+	// tasks wait. At 0.9 they count while the calls come within 10% of what the scheduler
+	// lets through. 0 turns it off, as by default.
+	CoupledBindingShare float64
 }
 
 var DefaultDynamicRateLimitingParams = DynamicRateLimitingParams{

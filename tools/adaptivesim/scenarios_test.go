@@ -145,21 +145,27 @@ func TestTracesReplay(t *testing.T) {
 		t.Run(run.scenario+"/"+run.variant, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			r := runScenario(t, run.scenario, run.variant, Options{TraceDir: dir})
-			for _, h := range tracedHosts(r) {
-				path := filepath.Join(dir, fmt.Sprintf("%s-%s-%d.jsonl", h.service, h.name, h.pid))
-				f, err := os.Open(path)
-				require.NoError(t, err)
-				traces, err := adaptivereplay.Read(filepath.Base(path), f)
-				require.NoError(t, f.Close())
-				require.NoError(t, err)
-				require.Len(t, traces, 1)
-				require.Equal(t, h.name, traces[0].Header.Host)
-				require.Positive(t, traces[0].Ticks)
-
-				requireReplays(t, traces[0], h.decisions)
-			}
+			requireTracesReplay(t, dir, runScenario(t, run.scenario, run.variant, Options{TraceDir: dir}))
 		})
+	}
+}
+
+// requireTracesReplay checks that the trace each host of a run wrote to dir replays every
+// decision the host recorded.
+func requireTracesReplay(t *testing.T, dir string, r *Result) {
+	t.Helper()
+	for _, h := range tracedHosts(r) {
+		path := filepath.Join(dir, fmt.Sprintf("%s-%s-%d.jsonl", h.service, h.name, h.pid))
+		f, err := os.Open(path)
+		require.NoError(t, err)
+		traces, err := adaptivereplay.Read(filepath.Base(path), f)
+		require.NoError(t, f.Close())
+		require.NoError(t, err)
+		require.Len(t, traces, 1)
+		require.Equal(t, h.name, traces[0].Header.Host)
+		require.Positive(t, traces[0].Ticks)
+
+		requireReplays(t, traces[0], h.decisions)
 	}
 }
 
@@ -285,6 +291,104 @@ func TestTaskRateHoldsTasksInTheScheduler(t *testing.T) {
 	require.Less(t, held.Tasks.Attempts, unheld.Tasks.Attempts)
 	require.Less(t, held.Tasks.Backlog, unheld.Tasks.Backlog)
 	require.Less(t, held.Workflows.P99*10, unheld.Workflows.P99, "the workflows' calls keep their share")
+}
+
+// runCoupled runs a scenario's variant with the capacity controller's CoupledBindingShare
+// at share.
+func runCoupled(t *testing.T, name, variant string, share float64, opts Options) HostResult {
+	t.Helper()
+	sc, err := Lookup(name, variant)
+	require.NoError(t, err)
+	sc.Host.Capacity.Params.Capacity.CoupledBindingShare = share
+	r, err := Run(sc, opts)
+	require.NoError(t, err)
+	require.Len(t, r.Hosts, 1)
+	if opts.TraceDir != "" {
+		requireTracesReplay(t, opts.TraceDir, r)
+	}
+	return r.Hosts[0]
+}
+
+// capacityDetails are a host's capacity decisions' details.
+func capacityDetails(h HostResult) []capacity.Detail {
+	var details []capacity.Detail
+	for _, d := range h.Decisions.Of(capacity.Name) {
+		details = append(details, d.Detail.(capacity.Detail))
+	}
+	return details
+}
+
+// With both enabled in the slow store, the task scheduler rate keeps persistence's calls at
+// its Headroom of capacity's rate, so once the store recovers the persistence limit doesn't
+// bind and capacity holds its cut as idle while tasks wait in the scheduler. With
+// CoupledBindingShare at 0.9, the scheduler's refusals bind for capacity, which returns to
+// what the store delivered and probes up: far fewer tasks are waiting when the load ends,
+// and the backlog clears. The task rate still follows capacity's cuts, and the trace, with
+// the scheduler's signals, replays.
+func TestCoupledRefusalsLetCapacityRecoverAfterTheSlowStore(t *testing.T) {
+	t.Parallel()
+	held := runCoupled(t, "slow-store", "cap-tsr", 0.9, Options{TraceDir: t.TempDir()})
+	latched := runCoupled(t, "slow-store", "cap-tsr", 0, Options{})
+
+	require.Less(t, held.Tasks.Backlog*4, latched.Tasks.Backlog, "far fewer tasks are waiting when the load ends")
+	require.Equal(t, held.Tasks.Arrived, held.Tasks.Completed, "the backlog clears")
+	require.Less(t, latched.Tasks.Completed, latched.Tasks.Arrived)
+
+	// After the store recovers at 150 s, the persistence limiter denies nothing while
+	// capacity recovers and probes: the scheduler's refusals bind.
+	recovered := 0
+	for _, d := range capacityDetails(held) {
+		reason := d.Decision.Reason
+		if d.Signals.Now.Sub(epoch) < 150*time.Second || reason != capacity.ReasonRecover && reason != capacity.ReasonProbe {
+			continue
+		}
+		if !d.Signals.Binding {
+			require.Positive(t, d.Signals.CoupledRefusals, "at %s", d.Signals.Now.Sub(epoch))
+			recovered++
+		}
+	}
+	require.Positive(t, recovered)
+
+	cut := firstCut(held)
+	require.NotNil(t, cut)
+	rates := held.Decisions.Of(taskrate.Name)
+	require.Less(t, proposedAt(rates, cut.Time.Add(3*time.Second)), proposedAt(rates, cut.Time), "the task rate follows the cut")
+}
+
+// In the mixed surge, the task scheduler rate's step limit lags a surge of tasks, so its
+// coupled limit refuses tasks while the calls stay far below capacity's rate. The calls
+// offered don't reach CoupledBindingShare of what the scheduler lets through, so capacity
+// stays at its static rate.
+func TestCoupledRefusalsDontBindWhileTheCallsStayBelowTheirShare(t *testing.T) {
+	t.Parallel()
+	h := runCoupled(t, "mixed-surge", "cap-tsr", 0.9, Options{})
+	refused := 0
+	for _, d := range h.Decisions.Of(capacity.Name) {
+		require.LessOrEqual(t, d.Proposed, d.Static, "at %s", d.Time.Sub(epoch))
+		if d.Detail.(capacity.Detail).Signals.CoupledRefusals > 0 {
+			refused++
+		}
+	}
+	require.Positive(t, refused, "the scheduler refused tasks")
+	require.Equal(t, h.Tasks.Arrived, h.Tasks.Completed)
+}
+
+// Through a surge with both enabled, the scheduler's refusals let capacity probe while the
+// limiter denies nothing, and capacity stays below its ceiling: only the coupled limit's
+// refusals below the static rate count, not the scheduler's own limit's.
+func TestCoupledRefusalsKeepCapacityBelowItsCeilingThroughASurge(t *testing.T) {
+	t.Parallel()
+	h := runCoupled(t, "surge", "cap-tsr", 0.9, Options{})
+	probes := 0
+	for _, d := range capacityDetails(h) {
+		require.Less(t, d.Decision.Proposed, d.Envelope.MaxRPS, "at %s", d.Signals.Now.Sub(epoch))
+		if d.Decision.Reason == capacity.ReasonProbe && !d.Signals.Binding {
+			require.Positive(t, d.Signals.CoupledRefusals)
+			probes++
+		}
+	}
+	require.Positive(t, probes, "the scheduler's refusals bind")
+	require.Equal(t, h.Tasks.Arrived, h.Tasks.Completed, "the backlog clears")
 }
 
 // While its tasks wait longer than the target, a queue's worker count grows, to at most
@@ -471,12 +575,20 @@ func TestTool(t *testing.T) {
 
 	out.Reset()
 	dir := t.TempDir()
-	require.NoError(t, run([]string{"-scenario", "short-pool-burst", "-variant", "pipeline-gate", "-capacity", "enabled", "-queued-grace", "0s", "-trace", dir}, &out))
+	require.NoError(t, run([]string{"-scenario", "short-pool-burst", "-variant", "pipeline-gate", "-capacity", "enabled", "-queued-grace", "0s", "-coupled-binding-share", "0.9", "-trace", dir}, &out))
 	require.Contains(t, out.String(), "Connections:")
 	require.Contains(t, out.String(), "enabled")
 	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	require.NoError(t, err)
 	require.Len(t, files, 1)
+
+	// -coupled-binding-share sets the capacity controller's share; left out, the scenario's stays.
+	sc, err := Lookup("slow-store", "cap-tsr")
+	require.NoError(t, err)
+	require.NoError(t, overrides{grace: -1, coupledShare: 0.9}.apply(&sc))
+	require.InDelta(t, 0.9, sc.Host.Capacity.Params.Capacity.CoupledBindingShare, 0)
+	require.NoError(t, overrides{grace: -1, coupledShare: -1}.apply(&sc))
+	require.InDelta(t, 0.9, sc.Host.Capacity.Params.Capacity.CoupledBindingShare, 0)
 
 	require.ErrorContains(t, run([]string{"-scenario", "nonesuch"}, &out), "no scenario")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-variant", "nonesuch"}, &out), "no variant")

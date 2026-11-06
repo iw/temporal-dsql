@@ -114,6 +114,58 @@ func TestRecentSnapshotReportsScheduleLatency(t *testing.T) {
 	require.Equal(t, 100, agg.RecentSnapshot(3).ScheduleSamples)
 }
 
+func TestRecentSnapshotReportsCoupledRefusals(t *testing.T) {
+	percentiles := true
+	agg := NewHealthSignalAggregator(
+		true,
+		func() bool { return percentiles },
+		time.Minute,
+		1000,
+		metrics.NoopMetricsHandler,
+		log.NewNoopLogger(),
+		time.Second,
+		10,
+	)
+	t.Cleanup(agg.emitMetricsTimer.Stop)
+	snap := agg.RecentSnapshot(3)
+	require.Zero(t, snap.CoupledRefusals)
+	require.Zero(t, snap.CoupledHeadroom)
+
+	for range 40 {
+		agg.RecordCoupledRefusal(0.9)
+	}
+	agg.RecordScheduleLatency(time.Millisecond)
+	snap = agg.RecentSnapshot(3)
+	require.Equal(t, 40, snap.CoupledRefusals)
+	require.InDelta(t, 0.9, snap.CoupledHeadroom, 1e-9)
+	require.Equal(t, 1, snap.ScheduleSamples, "refusals aren't attempts")
+	require.Zero(t, snap.Samples, "or persistence calls")
+
+	// Like the persistence windows, refusals are recorded only with percentiles on.
+	percentiles = false
+	agg.RecordCoupledRefusal(0.75)
+	percentiles = true
+	snap = agg.RecentSnapshot(3)
+	require.Equal(t, 40, snap.CoupledRefusals)
+	require.InDelta(t, 0.9, snap.CoupledHeadroom, 1e-9)
+}
+
+func TestCoupledHeadroomIsTheNewestWindows(t *testing.T) {
+	c := newWindowedCounter(time.Second, 10)
+	now := time.Unix(1_700_000_000, 0)
+	c.recordRefusal(now.Add(-2*time.Second), 0.9)
+	c.recordRefusal(now.Add(-time.Second), 0.75)
+	c.recordAttempt(now) // the newest window has no refusals
+	counts, _ := c.sum(now, 3)
+	require.Equal(t, uint64(2), counts.refusals)
+	require.InDelta(t, 0.75, counts.headroom, 1e-9)
+
+	// Past the span, the refusals are left out, and so is their Headroom.
+	counts, _ = c.sum(now.Add(2*time.Second), 3)
+	require.Zero(t, counts.refusals)
+	require.Zero(t, counts.headroom)
+}
+
 func TestRecentSnapshotLeavesOutLimiterRejections(t *testing.T) {
 	agg := NewHealthSignalAggregator(
 		true,

@@ -106,12 +106,22 @@ var scenarios = []scenarioDef{
 	{
 		name: "surge",
 		about: "one host whose static persistence rate is 100/s: 50 tasks/s, 120/s from 60 s to 120 s, " +
-			"and 5 workflows/s, for 240 s, with the scheduler's rate limiter on and the capacity controller in shadow",
+			"and 5 workflows/s, for 240 s, with the scheduler's rate limiter on",
 		variants: []variant{
-			{name: "tsr", about: "the task scheduler rate enabled", taskRate: adaptive.ModeNameEnabled},
-			{name: "shadow", about: "the task scheduler rate in shadow", taskRate: adaptive.ModeNameShadow},
+			{name: "tsr", about: "the task scheduler rate enabled, the capacity controller in shadow", taskRate: adaptive.ModeNameEnabled},
+			{name: "shadow", about: "both in shadow", taskRate: adaptive.ModeNameShadow},
+			{name: "cap-tsr", about: "both enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled},
 		},
 		build: surge,
+	},
+	{
+		name: "mixed-surge",
+		about: "one host whose static persistence rate is 1000/s, and whose calls are mostly the workflows': " +
+			"80 workflows/s, and 5 tasks/s, 150/s from 60 s to 120 s, for 240 s, with the scheduler's rate limiter on",
+		variants: []variant{
+			{name: "cap-tsr", about: "the capacity controller and the task scheduler rate enabled", capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled},
+		},
+		build: mixedSurge,
 	},
 	{
 		name: "memory-pressure",
@@ -411,6 +421,35 @@ func surge(v variant) Scenario {
 				{At: 120 * time.Second, Duration: 120 * time.Second, Rate: 50},
 			},
 			Workflows: []Phase{{Duration: 240 * time.Second, Rate: 5}},
+		},
+	}
+}
+
+// mixedSurge is a surge of tasks on a host whose calls are mostly the workflows', 240 a
+// second, against a static rate of 1,000 a second that the calls never approach. The task
+// rate starts at its floor, since the tasks make 2% of the calls, and its step limit lags
+// the surge, so its coupled limit refuses tasks while the calls stay far below the capacity
+// controller's rate.
+func mixedSurge(v variant) Scenario {
+	host := taskHost(160, 128, 1000, v)
+	host.Workers.Pollers = 64
+	return Scenario{
+		Name:     "mixed-surge",
+		Seed:     1,
+		Duration: 240 * time.Second,
+		Drain:    60 * time.Second,
+		Cluster:  dsqlCluster(),
+		Network:  rigNetwork(),
+		Hosts:    1,
+		Host:     host,
+		Signals:  signalWindows(),
+		Load: Load{
+			Tasks: []Phase{
+				{Duration: 60 * time.Second, Rate: 5},
+				{At: 60 * time.Second, Duration: 60 * time.Second, Rate: 150},
+				{At: 120 * time.Second, Duration: 120 * time.Second, Rate: 5},
+			},
+			Workflows: []Phase{{Duration: 240 * time.Second, Rate: 80}},
 		},
 	}
 }
