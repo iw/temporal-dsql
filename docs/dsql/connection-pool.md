@@ -52,6 +52,10 @@ The plugin never asks `DatabaseHandle` to rebuild a healthy pool after a connect
 
 The connector wraps `stdlib.GetPoolConnector` and implements `io.Closer`. Closing the plugin DB closes the handle and `sql.DB`, cancels background hook waits, joins the metrics collector, and closes the pool. Failed startup pings close the same resources before trying another default database name. pgxpool closes all physical connections and rejects subsequent acquires; its internal health-check goroutine and 500 ms health-check notifications may finish asynchronously after `Pool.Close()` returns. There is no plugin-owned refiller or driver registration to leak.
 
+## Cancel requests
+
+pgx sends a cancel request on a new connection whenever it cuts a statement off at its context's deadline, or closes a connection after an error. DSQL answers each one with `0A000 cancelling requests is not yet supported` and runs the statement to the end. So the plugin skips them: once a connection is established, its `DialFunc` refuses further dials, and `dsql_cancel_requests_skipped_total` counts each one refused. The caller still gets its context error at the deadline, and pgxpool replaces the closed connection through `BeforeConnect`, paced like any other.
+
 ## Deployment checks
 
 Configure the database role and IAM mapping before starting the server. See
