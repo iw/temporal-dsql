@@ -272,6 +272,8 @@ Service pools use `MinConns == MaxConns == maxConns` (default 100). Ephemeral po
 
 The `sql.DB` uses a closing wrapper around `stdlib.GetPoolConnector`, zero idle connections and unlimited open connections. It retains pgx driver fast paths and sqlx's snake-case mapper. The connector cancels hook waits, joins metrics collection, and closes pgxpool when the handle closes. Stock pgxpool internal health-check notifications can finish asynchronously. See [connection pool](connection-pool.md) for lifecycle and expiry limitations.
 
+After the plugin's `BeforeConnect` succeeds, `openPoolDB` wraps the connection's `DialFunc` and `AfterConnect`, so that once the connection is up, further dials are refused. pgx makes those dials only to send cancel requests, which DSQL answers with 0A000. `dsql_cancel_requests_skipped_total` counts the refusals; see [cancel requests](connection-pool.md#cancel-requests).
+
 `DatabaseHandle` receives an always-false refresh predicate. `maybeConvertError` performs its own mapping without calling the upstream `ConvertError`: limiter failures and 53300/53400 become overload; socket errors, `pgconn.ConnectError`, class 08 and IAM access denied become unavailable; 40001/0A000 remain raw; 54000 becomes a size-limit error. Other errors pass through. pgxpool replaces broken connections without rebuilding the pool.
 
 ## Pool Metrics Collection
