@@ -11,6 +11,7 @@
 - No two controllers chased each other, and their timescales stayed apart, from the task scheduler's rate every second to the memory budget once.
 - Replaying the traces reproduced every one of the controllers' 233,980 decisions.
 - It found seven things to follow up. A pool still opening its connections reads as a queue, so the capacity controller cut at most host starts. The latency law, in shadow, would have cut in every scenario but the short pool, though the store was never short of capacity. And a rate limit can't help a pool too short for its load.
+- [Follow-up runs on 9 November](#follow-up-runs-9-november) confirmed on DSQL the fixes for the start-up cuts and fair share's overshoot, #107 and #106. In a slow store that makes capacity's cuts bind, `CoupledBindingShare` and `CoupledRetry` let capacity probe back once the store recovered, but at low rates the task rate's `no-data` hold can pause the probes, or stop them.
 
 ## How it ran
 
@@ -289,3 +290,98 @@ Outside the short pool, enabling the controllers, alone or together, changed no 
 - **One machine.** The four processes shared one laptop's CPU and memory, and one network path to the cluster.
 - **Five minutes of load.** The memory budget and the partition scaler move over minutes, so the runs show their first steps more than where they settle.
 - **Growth.** Only the short pool's schedulers queued, and there the worker controllers held while persistence backed off. No task queue's add rate reached 50 a second. So the worker controllers never grew workers, and the partition scaler ran no trials.
+
+## Follow-up runs, 9 November
+
+*Run on 9 November 2026 on the branch as of #117. They confirm #106 and #107 live, and try `CoupledBindingShare` with `CoupledRetry` on DSQL before either is enabled by default.*
+
+**How they ran.** The rig, settings and measures were those above, on a new throwaway cluster, deleted after the last run. There were three scenarios:
+
+| Scenario | Load and conditions | Configs | Schema |
+|---|---|---|---|
+| Uneven frontends | As above | `shadow`, `fair`, `all`, and `fair2`, which repeats `fair` | One for all four runs, so each run after the first reloads the one before's tasks as it starts |
+| Pool pressure | As above, with 10 connections a history host | `cap`, `all`, and `cap2`, which repeats `cap` | One for all three runs |
+| Coupled slow store | 5 workflows a second for 390 s. Each history host has 10 connections, and history's static persistence rate is 300 calls a second, so capacity's cuts bind. From 90 s to 240 s, every reply from the store comes 40 ms later | `shadow`; `cap`, capacity enabled alone; `ct`, capacity and the task rate enabled; `ctc`, as `ct` with `CoupledBindingShare` at 0.9 and `CoupledRetry` at 200 ms; `allc`, every controller enabled, with both settings | A fresh one for each run |
+
+Every run completed all its workflows but three of the coupled slow store's, below. Replaying the 72 traces reproduced all 83,744 of the controllers' decisions.
+
+### Start-up, with the grace
+
+| Connections | Reloads the run before's tasks | Host starts | Queued share over 0.25 in the first 30 s | Cuts made in the first 30 s | Cuts in a replay without the grace |
+|---|---|---|---|---|---|
+| 64 | Yes | 6 | 3 | 0 | 3 |
+| 64 | No | 2 | 0 | 0 | 0 |
+| 10 | Yes | 4 | 4 | 0 | 4 |
+| 10 | No | 12 | 12 | 0 | 12 |
+
+- In 19 of the 24 host starts, the queued share reached 0.57–0.98 in the host's first seconds, as on 3 November. Each time, it passed 0.25 within 6 s of the capacity controller's first step, well inside the 30 s `QueuedGrace`, and the controller made no cut.
+- Replayed with `QueuedGrace` at 0, as before #107, the controller cuts for `queued` at each of those 19 starts, 2–5 s after its first step.
+- After the grace, no host's queued share passed 0.25 before its load began. No start-up saw a throttled call or an error, so #108's pool gate refused nothing as the hosts started.
+- During the load, before any slowdown, the controller cut three times for a queue, each time on the host with 21 shards and 10 connections, by half, at a queued share of 0.28–0.38. None of the cuts bound: the host made about 76 calls a second.
+
+### Uneven frontends, with #106 and #115
+
+| Config | Admitted a second over the 240 s: first frontend / second / together | Throttled a second: first / second | Shares the limiters took at 20 s, then at 80 s: first / second | Admitted together a second: 20–80 s / from 100 s | Most the shares added up to |
+|---|---|---|---|---|---|
+| `shadow` | 30.2 / 18.0 / 48.2 | 41.8 / 0.0 | 30 / 30, then 30 / 30 | 48.0 / 48.0 | 60 |
+| `fair` | 42.6 / 16.3 / 59.0 | 29.4 / 1.7 | 43.4 / 17.3, then 43.4 / 15.6 | 61.3 / 59.0 | 68.6 |
+| `all` | 39.8 / 16.5 / 56.3 | 32.2 / 1.5 | 30 / 30, then 44.3 / 15.6 | 48.0 / 59.9 | 60.0 |
+| `fair2` | 39.8 / 16.5 / 56.3 | 32.2 / 1.5 | 30 / 30, then 44.3 / 15.6 | 48.0 / 59.9 | 60.0 |
+
+- Once settled, the shares added up to 59.0 in `fair` and 59.9 in `all` and `fair2`, within the namespace's limit of 60, where on 3 November they held at 63–64 (#106). From 100 s on, each frontend admitted its share exactly.
+- A frontend's limiter for a namespace takes its share once a minute, from the frontend's first request for the namespace, as the design expects. Here each frontend's limiter started as the namespace was registered, 40 s before the uneven requests, so the limiters took their shares 20 s and 80 s after the requests began. The first frontend's admitted rate stepped from 30 to 44 a second at one of those two moments in each run.
+- In `all` and `fair2`, both shares stayed equal, with the reason `filling`, until the frontends' windows had filled, then moved to 44.3 and 15.6 within 2 s of each other, 29–31 s after the requests began. They never added up to more than 60 (#115). The limiters took them at 80 s, so after its first second's burst the first frontend admitted 30 a second until then, and over the 240 s the frontends together admitted 56.3 a second.
+- In `fair`, the shares moved from the first round, 3–5 s after the requests began, on windows still filling, and for 25 s they added up to more than 60, at most 68.6. A few calls for the new namespace as it was registered had counted as its demand on both frontends, so neither window counted as filling when the uneven requests began. In `all` and `fair2`, those calls counted on the second frontend only.
+- The overshoot in `fair` reached the limiters only as the shares they took at 20 s, which added up to 60.7. Between 20 s and 80 s, the frontends together admitted 61.3 a second, a little over the limit, while the second frontend's burst let through the 18 a second it was sent.
+
+### Coupled slow store
+
+![coupled slow store, host with 11 shards · 4 runs](adaptive-behaviour/appreciation-coupled-h1.svg)
+
+![coupled slow store, host with 21 shards · 4 runs](adaptive-behaviour/appreciation-coupled-h2.svg)
+
+![coupled slow store, workflows closed · 5 runs](adaptive-behaviour/appreciation-coupled-goodput.svg)
+
+| Config | Completed | Running when the load ended | Running after the drain | Closed a second: while slow / from 240 s to 390 s | End-to-end p50 / p99 |
+|---|---|---|---|---|---|
+| `shadow` | 1,948 of 1,948 | 53 | None, 9 s in | 0.9 / 8.8 | 34 / 208 s |
+| `cap` | 1,928 of 1,945 | 631 | 17, after 180 s | 0.4 / 5.4 | 35 / 456 s |
+| `ct` | 826 of 1,947 | 1,157 | 991, after 180 s | 0.7 / 0.8 | – |
+| `ctc` | 1,947 of 1,947 | 951 | None, 144 s in | 0.7 / 3.0 | 117 / 410 s |
+| `allc` | 783 of 1,948 | 990 | 847, after 180 s | 0.7 / 0.7 | – |
+
+The counts come from visibility. In `ct` and `allc`, visibility's own tasks waited in the same throttled scheduler, so it hadn't recorded 130 and 318 of the starts: more workflows were running than it shows, and their end-to-end times are left out.
+
+Capacity's rate in calls a second, and the task rate's in tasks a second, on the host with 11 shards, then the one with 21:
+
+| Config | Capacity while slow, least | At 240 s | Most from 240 s to 390 s | At 390 s | Task rate at 390 s | Queued cuts from 240 s to 390 s |
+|---|---|---|---|---|---|---|
+| `cap` | 24 / 25 | 27 / 30 | 125 at 274 s / 143 at 281 s | 103 / 98 | In shadow | 2 / 7 |
+| `ct` | 25 / 30 | 31 / 36 | 38 at 245 s / 44 at 268 s | 38 / 44 | 7 / 6 | 0 / 0 |
+| `ctc` | 27 / 26 | 37 / 36 | 124 at 367 s / 143 at 336 s | 107 / 109 | 53 / 31 | 1 / 3 |
+| `allc` | 24 / 29 | 32 / 35 | 47 at 326 s / 56 at 351 s | 47 / 56 | 7 / 6 | 0 / 0 |
+
+- While the store was slow, the hosts made about the same calls in every config, 30–38 a second, and closed 0.4–0.9 workflows a second. Enabled, capacity cut to 24–30 calls a second for the pool's queued and throttled facts, and the queue moved out of the pool: on the host with 21 shards, the queued share fell from 0.95 in `shadow` to 0.19–0.29, and the store's p99 from 3.3 s to 0.7 s.
+- **Without the coupled settings** (`ct`), capacity held its cut after the store recovered, as the simulator showed. It probed to 38 and 44 calls a second within 30 s, then held as `idle` for the rest of the run, while the task rate held 6–8 tasks a second.
+- **With both** (`ctc`), capacity probed back up, to 124 and 143 calls a second, 127 s and 96 s after the store recovered, and every workflow completed, 144 s into the drain. In the simulator, the share took capacity from about 100 a second to about 200 within 35 s. On the host with 21 shards, the queued share then cut the rate three times during the load and four times in the drain, each time to 94–109, as the waiting tasks were released.
+- **The probes paused**, for 51 s on the host with 11 shards and 20 s on the other. At these rates, most of the task rate's steps saw fewer than its `MinSamples`, 100 calls, so it held its rate as `no-data` while capacity's rose. History's calls then stayed below `CoupledBindingShare` of what the scheduler let through, so capacity held as `idle` until a step saw 100 calls and the task rate moved.
+- **With every controller enabled** (`allc`), the probes didn't resume. Both hosts' task rates held 6–7 tasks a second, at or near their floor of 6, as `no-data` on all but 8 of their 300 steps from 240 s to 390 s, and capacity rose no further than 47 and 56 calls a second. With one run per config, these runs can't say whether the other controllers made the difference; the hold is the same as in `ctc`'s pauses.
+- **Capacity alone** (`cap`) probed back fastest, to 125 and 143 calls a second within 34 s and 41 s of the recovery. With the task rate in shadow, its limit bound on history's calls themselves: they saw 33,569 `ResourceExhausted`, against 605–1,197 with the task rate enabled.
+- No enabled config cleared the backlog as quickly as `shadow`. After the recovery, `shadow`'s host with 21 shards made 121 calls a second with its pool's queued share at 1.0, and 8.8 workflows closed a second, where 5.4 did in `cap` and 3.0 in `ctc`. Capacity keeps the pool's queue under `MaxQueuedRatio`, 0.25: with 10 connections, its queued cuts held that host at 85–109 calls a second.
+- With `CoupledRetry` at 200 ms, the task scheduler's throttled submissions rose to 172,592 in `ctc` and 234,097 in `allc`, from 34,791 in `ct`: about 320 and 410 a second across the two hosts, against 60.
+
+### What they found
+
+1. **The grace keeps the start-up cuts away.** In 19 of 24 host starts the pool's warm-up read as a queue, and a replay without #107's grace cuts at each of them. With it, the controller made none.
+2. **Fair share's settled shares fit the limit.** They added up to 59.0–59.9 a second against the namespace's 60, where on 3 November they held at 63–64 (#106).
+3. **Fair share's hold covers only a frontend's first requests for a namespace.** A namespace with earlier requests, as registration made here, moves on windows that are still filling. Starting the hold again after a window with no demand would cover a namespace that's been quiet. Letting a rising share wait a round for the falling ones, as it does after the hold, would cover a step in load.
+4. **A share applies at the limiter's next refresh.** Each frontend's namespace limiter takes its share once a minute, as the design expects, so with the hold the uneven shares here applied 80 s after the requests began. Refreshing a namespace's limiters when the exchange changes its share would apply each share within a round.
+5. **The coupled settings let capacity probe back on DSQL.** Without them, capacity and the task rate held the cut after the store recovered, and 991 workflows were still running after the drain. With them, every workflow completed.
+6. **The task rate's `no-data` hold can stall the coupling at low rates.** Below `MinSamples` calls a step, the task rate keeps its rate rather than follow capacity's, so history's calls stay below `CoupledBindingShare` and capacity holds as `idle`. It paused the probes for 20–51 s in `ctc`, and held them for the rest of the run in `allc`. Following the persistence rate on those steps with the mix it last measured, as `held` steps do, would let the probes through.
+7. **With a short pool, capacity's queued cuts trade throughput for a short queue after a store recovers.** They held the rate where the pool's queued share stays under 0.25, about 100 calls a second here, so the backlog drained more slowly than with no limit, which reached 121 calls a second with a full queue.
+
+### What they don't cover
+
+- **One run per config.** `ctc` and `allc` differ in the other controllers and in how often a step saw 100 calls, and one run each can't separate the two.
+- **A static rate this low.** The stall needs history's calls under about 40 a second while the coupling binds. That took this rig's static rate of 300, whose floor, 5% of it, is 15 calls a second; at the 2,000 of the other scenarios, the floor is 100.
+- **The store's own limits.** The throttled facts came from #108's pool gate, which refused 6,220 calls in `shadow` and 45–78 in the enabled configs. The servers logged no throttling error from DSQL.
