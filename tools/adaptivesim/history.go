@@ -206,6 +206,15 @@ func (h *history) trySubmit(t *task) bool {
 	return true
 }
 
+// submitRetry is the scheduler's hint to the rescheduler after a refusal, while its rate
+// limiter is on.
+func (h *history) submitRetry(now time.Time) (time.Duration, bool) {
+	if h.scheduler == nil {
+		return 0, false
+	}
+	return h.scheduler.submitRetry(now)
+}
+
 // run is a task attempt: read the workflow's state if it isn't cached, then write, within
 // the attempt's deadline.
 func (h *history) run(t *task) {

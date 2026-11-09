@@ -37,6 +37,10 @@ type (
 		// DecisionHold is how recent the capacity controller's decision must be for its
 		// rate to count. Without one, the controller couples to the static rate.
 		DecisionHold time.Duration
+		// CoupledRetry, when set, is how soon history's rescheduler retries after the
+		// controller's buckets refuse a task below the static rate, jittered by half either
+		// way, in place of its 2s wait after any refusal. At 0, its default, it waits 2s.
+		CoupledRetry time.Duration
 	}
 
 	controller struct {
@@ -58,7 +62,7 @@ type (
 	// schedulerLimiter limits history's task scheduler to the controller's rate while it's
 	// enabled, on top of the scheduler's own limiter. Otherwise it's the scheduler's own.
 	// While the controller's rate is below the static rate, it records each task the
-	// controller's buckets hold back.
+	// controller's buckets hold back, and when it last held one.
 	schedulerLimiter struct {
 		original quotas.RequestRateLimiter
 		coupled  quotas.RequestRateLimiter // the buckets' priority cascade, then original
@@ -67,6 +71,7 @@ type (
 		static   func() float64
 		settings func() Settings
 		refusals RefusalRecorder
+		heldAt   atomic.Int64 // when the buckets last held a task back below the static rate, in Unix ns
 
 		mu      sync.Mutex // guards the buckets' updates
 		buckets []*quotas.RateLimiterImpl
@@ -78,7 +83,7 @@ type (
 	// wait, holds a task back.
 	heldBack struct {
 		quotas.RequestRateLimiter
-		held func()
+		held func(now time.Time)
 	}
 )
 
@@ -104,7 +109,8 @@ the persistence calls each task attempt makes. It keeps the mix it was set from 
 mix stays within Deadband of it. The rate stays between MinMultiplier of the static persistence rate
 and the scheduler's fallback, that rate. It acts only while
 history.taskSchedulerEnableRateLimiter is set and its shadow mode is off. Mode is disabled, shadow or
-enabled.`,
+enabled. CoupledRetry, when set, is how soon history's rescheduler retries after the controller's
+limit refuses a task below the static rate, in place of its 2s wait after any refusal.`,
 )
 
 // NewSchedulerLimiter couples limiter, history's task scheduler rate limiter, to
@@ -195,17 +201,33 @@ func (l *schedulerLimiter) limiter() quotas.RequestRateLimiter {
 
 // held records a task the buckets held back, while their rate is below the static rate.
 // At the static rate, the controller's ceiling, a higher persistence rate wouldn't let more
-// tasks through.
-func (l *schedulerLimiter) held() {
-	if l.refusals != nil && math.Float64frombits(l.rate.Load()) < l.static() {
+// tasks through, and the buckets refuse what the scheduler's own limit would.
+func (l *schedulerLimiter) held(now time.Time) {
+	if math.Float64frombits(l.rate.Load()) >= l.static() {
+		return
+	}
+	l.heldAt.Store(now.UnixNano())
+	if l.refusals != nil {
 		l.refusals.RecordCoupledRefusal(l.settings().Headroom)
 	}
+}
+
+// SubmitRetry returns CoupledRetry, and true, when it's set and the buckets held a task
+// back at or after now, below the static rate. History's rescheduler asks after the
+// scheduler refuses a task, so it retries a task the coupling refused while the buckets
+// refill, instead of after its wait for a busy scheduler.
+func (l *schedulerLimiter) SubmitRetry(now time.Time) (time.Duration, bool) {
+	retry := l.settings().CoupledRetry
+	if retry <= 0 || l.heldAt.Load() < now.UnixNano() {
+		return 0, false
+	}
+	return retry, true
 }
 
 func (h *heldBack) Reserve(now time.Time, request quotas.Request) quotas.Reservation {
 	r := h.RequestRateLimiter.Reserve(now, request)
 	if !r.OK() || r.DelayFrom(now) > 0 {
-		h.held()
+		h.held(now)
 	}
 	return r
 }

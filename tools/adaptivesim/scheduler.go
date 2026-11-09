@@ -26,7 +26,8 @@ type (
 	// it's enabled, as taskrate's schedulerLimiter holds it. A task takes a token from
 	// both, or from neither. Every task has the same priority, so one bucket stands for
 	// the controller's buckets. While the controller's rate is below the static rate, the
-	// tasks its bucket refuses go to the health windows, as taskrate records them.
+	// tasks its bucket refuses go to the health windows, as taskrate records them, and the
+	// last one's time gives the rescheduler its hint, as taskrate's SubmitRetry does.
 	schedulerLimiter struct {
 		original *rate.Limiter
 		coupled  *rate.Limiter
@@ -35,15 +36,18 @@ type (
 		static   float64
 		settings func() taskrate.Settings
 		health   *health
+		heldAt   time.Time // when the coupled bucket last refused a task below the static rate
 	}
 
 	// rescheduler is history's task rescheduler: the tasks the scheduler didn't take wait
 	// for their reschedule time, then go to the scheduler again in time order. When the
-	// scheduler refuses one, the rescheduler tries again after 1–3 s.
+	// scheduler refuses one, the rescheduler tries again after 1–3 s, or after the
+	// scheduler's hint, jittered by half either way, when it gives one.
 	rescheduler struct {
 		l      *loop
 		rng    *rand.Rand
 		submit func(*task) bool
+		retry  func(now time.Time) (time.Duration, bool)
 		tasks  rescheduled
 		seq    int64
 		gate   *event
@@ -96,6 +100,7 @@ func (s *schedulerLimiter) allow(now time.Time) bool {
 		coupled.CancelAt(now)
 		if r < s.static {
 			s.health.recordRefusal(now, s.settings().Headroom)
+			s.heldAt = now
 		}
 		return false
 	}
@@ -108,8 +113,24 @@ func (s *schedulerLimiter) allow(now time.Time) bool {
 	return true
 }
 
-func newRescheduler(l *loop, seed uint64, name string, submit func(*task) bool) *rescheduler {
-	return &rescheduler{l: l, rng: randoms(seed, name+"/rescheduler"), submit: submit}
+// submitRetry is taskrate's SubmitRetry: CoupledRetry, when it's set and the coupled
+// bucket refused a task at or after now, below the static rate.
+func (s *schedulerLimiter) submitRetry(now time.Time) (time.Duration, bool) {
+	retry := s.settings().CoupledRetry
+	if retry <= 0 || s.heldAt.Before(now) {
+		return 0, false
+	}
+	return retry, true
+}
+
+func newRescheduler(
+	l *loop,
+	seed uint64,
+	name string,
+	submit func(*task) bool,
+	retry func(now time.Time) (time.Duration, bool),
+) *rescheduler {
+	return &rescheduler{l: l, rng: randoms(seed, name+"/rescheduler"), submit: submit, retry: retry}
 }
 
 // add holds a task until at.
@@ -144,7 +165,11 @@ func (r *rescheduler) fire() {
 			return
 		}
 		if !r.submit(next.t) {
-			r.wake(now.Add(jittered(r.rng, rescheduleRetry, 0.5)))
+			wait := rescheduleRetry
+			if hint, ok := r.retry(now); ok {
+				wait = hint
+			}
+			r.wake(now.Add(jittered(r.rng, wait, 0.5)))
 			return
 		}
 		heap.Pop(&r.tasks)

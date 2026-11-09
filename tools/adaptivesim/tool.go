@@ -34,6 +34,7 @@ func run(args []string, stdout io.Writer) error {
 	fs.DurationVar(&o.grace, "queued-grace", -1, "set the capacity controller's QueuedGrace to this `duration`")
 	fs.Float64Var(&o.coupledShare, "coupled-binding-share", -1, "set the capacity controller's CoupledBindingShare to this `share`; 0.9 counts the task scheduler's coupled refusals")
 	fs.StringVar(&o.taskRate, "task-rate", "", "run the task scheduler rate controller in this `mode`")
+	fs.DurationVar(&o.coupledRetry, "coupled-retry", -1, "set the task scheduler rate's CoupledRetry to this `duration`; 200ms retries the scheduler's coupled refusals sooner")
 	fs.StringVar(&o.workers, "workers", "", "run the worker count controllers in this `mode`")
 	fs.StringVar(&o.memory, "memory", "", "run the memory budget controllers in this `mode`")
 	fs.StringVar(&o.partitions, "partitions", "", "run the partition scaler in this `mode`, where the workflows run through matching")
@@ -87,7 +88,7 @@ func run(args []string, stdout io.Writer) error {
 // overrides are the controllers' settings the command line sets.
 type overrides struct {
 	capacity, taskRate, workers, memory, partitions, fairShare string
-	grace                                                      time.Duration
+	grace, coupledRetry                                        time.Duration
 	coupledShare                                               float64
 }
 
@@ -115,6 +116,12 @@ func (o overrides) apply(sc *Scenario) error {
 			c.TaskRate = taskrate.DefaultSettings
 		}
 		c.TaskRate.Mode = o.taskRate
+	}
+	if o.coupledRetry >= 0 {
+		if c.TaskRate == (taskrate.Settings{}) {
+			c.TaskRate = taskrate.DefaultSettings
+		}
+		c.TaskRate.CoupledRetry = o.coupledRetry
 	}
 	if o.workers != "" {
 		if err := checkMode("workers", o.workers); err != nil {

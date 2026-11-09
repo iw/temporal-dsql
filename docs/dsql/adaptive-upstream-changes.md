@@ -29,6 +29,8 @@ The branch takes main's changes by merge or rebase, and reaches a new release ta
 | `service/history/fx.go` | `Module` provides `HistoryQueues`, decorates the task scheduler's rate limiter with its coupling to persistence, sizes the host-level caches from the memory budget, and gives the queues' pending-task limits the host's shard count. |
 | `service/history/workflow/cache/cache.go`, `service/history/events/cache.go` | The history and events caches pass `SetMaxSize` on to their LRU. |
 | `service/history/queues/queue_base_test.go`, `queue_scheduled_test.go` | Pass no recorder to `NewExecutableFactory`. |
+| `service/history/queues/rescheduler.go` | After the scheduler refuses a task, the rescheduler waits as long as the scheduler's retry hint says, when it gives one, in place of its 2 s ± 1 s. |
+| `service/history/queues/scheduler.go` | The rate-limited scheduler keeps its options and its rate limiter's retry hint, which `SubmitRetry` passes on while the limiter throttles. |
 | `service/matching/partition_scaler_interface.go` | Adds `PartitionStatsScaler`, a scaler that asks for the task queue's stats. `PartitionScalerInput` gains the read partitions and those stats. |
 | `service/matching/partition_scaler_mock.go` | Regenerated for `PartitionStatsScaler`. |
 | `service/matching/scale_manager.go` | For a scaler that asks for stats, describes the partitions with their stats, also while managed scaling is off, and before calling the scaler on its timer. Passes the read partitions and the latest stats to the scaler. |
@@ -53,6 +55,7 @@ These files extend existing packages without editing upstream files:
 - `common/adaptive/workers`: the worker-count controller and history's queues.
 - `common/adaptive/taskrate`: the task scheduler's coupling to persistence.
 - `service/history/task_scheduler_rate.go`: the decorator that applies it.
+- `service/history/queues/submit_retry.go`: `SubmitRetryHinter`, the rate-limited scheduler's `SubmitRetry`, and the rescheduler's wait after a refusal.
 - `common/adaptive/memory`: the memory budget's controllers for history's caches and its queues' pending tasks.
 - `service/history/memory_budget.go`: hands them the caches and the shard count.
 - `common/adaptive/partitions`: the partition scaler's controller and its `matching.partitionScalerController` setting.
@@ -66,7 +69,7 @@ These files extend existing packages without editing upstream files:
 - `common/persistence/windowed_counter.go`: request, error, rejection, fact, task-attempt and coupled refusal counts over fixed windows.
 - `common/persistence/sql/store_facts.go`: passes the sink through the SQL factory and `DbConn`.
 - `common/persistence/sql/execution_store_creator.go`: forwards the optional `ExecutionStoreCreator` hook through `DbConn`, so the factory uses the execution store a plugin provides.
-- Their tests, and `common/persistence/health_signal_aggregator_snapshot_test.go`, `common/persistence/client/store_facts_test.go`, `common/stats/windowed_tdigest_recent_test.go`, `service/history/queues/executable_schedule_latency_test.go`, `service/history/queues/pending_task_size_test.go`, `service/matching/learned_partition_scaler_test.go`, `service/matching/scale_manager_stats_test.go` and `temporal/partition_scaler_option_test.go`.
+- Their tests, and `common/persistence/health_signal_aggregator_snapshot_test.go`, `common/persistence/client/store_facts_test.go`, `common/stats/windowed_tdigest_recent_test.go`, `service/history/queues/executable_schedule_latency_test.go`, `service/history/queues/pending_task_size_test.go`, `service/history/queues/submit_retry_test.go`, `service/history/shard/shard_waits_test.go`, `service/matching/learned_partition_scaler_test.go`, `service/matching/scale_manager_stats_test.go` and `temporal/partition_scaler_option_test.go`.
 
 The DSQL plugin's store facts live in its own directory, `common/persistence/sql/sqlplugin/dsql`.
 

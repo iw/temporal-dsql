@@ -33,7 +33,9 @@ go run ./cmd/tools/adaptivereplay /tmp/adaptivesim/*.jsonl
 - `-capacity mode` runs the capacity controller `disabled`, in `shadow` or `enabled`,
   `-queued-grace duration` sets its `QueuedGrace`, and `-coupled-binding-share share` its
   `CoupledBindingShare`, 0 and off in every scenario. At 0.9 it counts the task scheduler's
-  coupled refusals as its limit binding. `-task-rate mode`, `-workers mode`,
+  coupled refusals as its limit binding. `-coupled-retry duration` sets the task scheduler
+  rate's `CoupledRetry`, also 0 and off in every scenario. At 200ms the rescheduler retries
+  the coupled limit's refusals that soon. `-task-rate mode`, `-workers mode`,
   `-memory mode`, `-partitions mode` and `-fair-share mode` do the same for the task
   scheduler rate, the worker counts, the memory budget, the partition scaler and fair
   share. The partition scaler needs a scenario whose workflows run through matching, and
@@ -162,7 +164,9 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
   refuses go to the health signals with its `Headroom`, as `taskrate` records them for the
   capacity controller's `CoupledBindingShare`. A task the limiter refuses waits in its
   queue's rescheduler for 1 s × 1.1ⁿ, then goes back to the scheduler in time order; when
-  the scheduler refuses it again, the rescheduler tries again 1–3 s later.
+  the scheduler refuses it again, the rescheduler tries again 1–3 s later. With
+  `CoupledRetry` set, it tries again after half to one and a half times that instead when
+  the task rate's limit refused it below the static rate, as taskrate's hint has it.
 - **Workers.** Without matching, a fixed number of pollers, 32 a host. A workflow is a
   start, then a few tasks, each held by a poller until history has written the worker's
   response.
@@ -408,6 +412,16 @@ config is a static collection of the scenario's controller settings.
   rate's 25% step limit lags the surge, so the scheduler refuses 809 submissions while the
   calls stay far below capacity's 1,000 a second. The calls offered don't reach the share,
   so capacity stays at 1,000; with the share at 0.01 it rises to 2,183.
+- **With `CoupledRetry` at 200ms too, the slow store's backlog clears.** The rescheduler
+  retries a task the coupled limit refused after 100–300 ms rather than 1–3 s, so the
+  buckets release the waiting tasks as they refill rather than in batches. In
+  `slow-store`'s `cap-tsr`, with `-coupled-binding-share 0.9 -coupled-retry 200ms`,
+  capacity probes from 100 a second at 2:31 to 240 by 3:03, and the queued share cuts it
+  to about 175 twice. 16 tasks are waiting when the load ends, against 1,513 with the share
+  alone, every task completes, and their p99 is 1m37s. `all` does the same. In `surge` and
+  `mixed-surge`, the outcomes stay as without it, and the scheduler counts more refusals,
+  3,597 against 2,718 in `surge`'s `tsr`, since each retry the coupled limit refuses
+  counts again.
 - **A busy queue's worker count grows, then shrinks.** In `busy-queue`, the transfer
   queue's count grows from 8 to 16 by 11 s, which serves the 60 tasks a second: the tasks'
   p99 was 1.8 s, against 55 s with the count in shadow. At 16 workers its tasks wait

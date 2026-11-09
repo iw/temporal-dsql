@@ -47,7 +47,7 @@ func newTaskQueue(h *history, name string, seed uint64, host string) *taskQueue 
 		workers:    h.cfg.Workers,
 		delays:     windowedSamples{size: queueWindow, windows: make([]sampleWindow, queueWindows)},
 	}
-	q.rescheduler = newRescheduler(h.l, seed, host+"/"+name, h.trySubmit)
+	q.rescheduler = newRescheduler(h.l, seed, host+"/"+name, h.trySubmit, h.submitRetry)
 	return q
 }
 

@@ -357,6 +357,26 @@ func TestCoupledRefusalsLetCapacityRecoverAfterTheSlowStore(t *testing.T) {
 	require.Less(t, proposedAt(rates, cut.Time.Add(3*time.Second)), proposedAt(rates, cut.Time), "the task rate follows the cut")
 }
 
+// With CoupledRetry at 200ms as well, the rescheduler retries a task the coupled limit
+// refused while its buckets refill, instead of 1–3 s later, so the waiting tasks reach the
+// scheduler as the rate allows rather than in batches. Few tasks are waiting when the load
+// ends, every task completes, and the trace replays.
+func TestCoupledRetryClearsTheSlowStoresBacklog(t *testing.T) {
+	t.Parallel()
+	sc, err := Lookup("slow-store", "cap-tsr")
+	require.NoError(t, err)
+	sc.Host.Capacity.Params.Capacity.CoupledBindingShare = 0.9
+	sc.Host.Controllers.TaskRate.CoupledRetry = 200 * time.Millisecond
+	dir := t.TempDir()
+	r, err := Run(sc, Options{TraceDir: dir})
+	require.NoError(t, err)
+	requireTracesReplay(t, dir, r)
+	h := r.Hosts[0]
+
+	require.Less(t, h.Tasks.Backlog, 100, "few tasks are waiting when the load ends")
+	require.Equal(t, h.Tasks.Arrived, h.Tasks.Completed, "the backlog clears")
+}
+
 // In the mixed surge, the task scheduler rate's step limit lags a surge of tasks, so its
 // coupled limit refuses tasks while the calls stay far below capacity's rate. The calls
 // offered don't reach CoupledBindingShare of what the scheduler lets through, so capacity

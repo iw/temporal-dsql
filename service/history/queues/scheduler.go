@@ -89,6 +89,8 @@ type (
 		tasks.Scheduler[Executable]
 
 		baseScheduler Scheduler
+		options       RateLimitedSchedulerOptions
+		retryHinter   SubmitRetryHinter // the rate limiter, if it gives retry hints
 	}
 )
 
@@ -244,6 +246,7 @@ func NewRateLimitedScheduler(
 	logger log.Logger,
 	metricsHandler metrics.Handler,
 ) Scheduler {
+	retryHinter := retryHinterOf(rateLimiter)
 	if delay := options.StartupDelay(); delay > 0 {
 		delayedRateLimiter, err := quotas.NewDelayedRequestRateLimiter(
 			rateLimiter,
@@ -289,6 +292,8 @@ func NewRateLimitedScheduler(
 	return &rateLimitedSchedulerImpl{
 		Scheduler:     rateLimitedScheduler,
 		baseScheduler: baseScheduler,
+		options:       options,
+		retryHinter:   retryHinter,
 	}
 }
 
