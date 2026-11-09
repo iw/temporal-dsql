@@ -18,6 +18,8 @@ The policy retries only SQLSTATE 40001, so `error_class` is always `retryable`. 
 
 The connector samples `pgxpool.Stat()` every 15 seconds. Gauges are snapshots; counters record increases since the last sample, including the first sample from zero. Collection stops and is joined when the DB closes.
 
+Every metric a pool records carries `db_kind`: `main` for the persistence store and `visibility` for the visibility store, so a host's two pools report apart. That includes the gate metrics and the cancel counter below.
+
 | Metric | Type | pgxpool source / meaning |
 |---|---|---|
 | `dsql_pool_open` | Gauge | `TotalConns`: idle + acquired + constructing |

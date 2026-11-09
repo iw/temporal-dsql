@@ -90,11 +90,12 @@ func (p *plugin) CreateDB(
 	}
 	// The database, its transactions and every pool the handle opens report through one holder.
 	facts := &storeFacts{}
+	poolHandler := poolMetricsHandler(metricsHandler, dbKind)
 	connect := func() (*sqlx.DB, error) {
 		if cfg.Connect != nil {
 			return cfg.Connect(cfg)
 		}
-		return p.connectWithSettings(cfg, resolved, r, logger, metricsHandler, facts)
+		return p.connectWithSettings(cfg, resolved, r, logger, metricsHandler, poolHandler, facts)
 	}
 
 	handle := sqlplugin.NewDatabaseHandle(dbKind, connect, func(error) bool { return false }, logger, metricsHandler, clock.NewRealTimeSource())
@@ -104,20 +105,31 @@ func (p *plugin) CreateDB(
 	return db, nil
 }
 
+// poolMetricsHandler labels the metrics of a store's pools with the store's kind, so a
+// host's persistence and visibility pools report apart. The rate limiter and the token
+// cache serve every pool in the process, so they keep the unlabelled handler.
+func poolMetricsHandler(handler metrics.Handler, kind sqlplugin.DbKind) metrics.Handler {
+	if handler == nil {
+		return nil
+	}
+	return handler.WithTags(metrics.PersistenceDBKindTag(kind.String()))
+}
+
 // connectWithSettings retains the default database fallback for callers without a name.
+// poolHandler is metricsHandler labelled for the store's pools.
 func (p *plugin) connectWithSettings(
 	cfg *config.SQL, resolved settings, r resolver.ServiceResolver, logger log.Logger, metricsHandler metrics.Handler,
-	facts *storeFacts,
+	poolHandler metrics.Handler, facts *storeFacts,
 ) (*sqlx.DB, error) {
 	if cfg.DatabaseName != "" {
-		return p.createDSQLConnectionWithAuth(cfg, resolved, r, logger, metricsHandler, facts)
+		return p.createDSQLConnectionWithAuth(cfg, resolved, r, logger, metricsHandler, poolHandler, facts)
 	}
 	copyConfig := *cfg
 	cfg = &copyConfig
 	var errs []error
 	for _, databaseName := range defaultDatabaseNames {
 		cfg.DatabaseName = databaseName
-		db, err := p.createDSQLConnectionWithAuth(cfg, resolved, r, logger, metricsHandler, facts)
+		db, err := p.createDSQLConnectionWithAuth(cfg, resolved, r, logger, metricsHandler, poolHandler, facts)
 		if err == nil {
 			return db, nil
 		}
@@ -128,7 +140,7 @@ func (p *plugin) connectWithSettings(
 
 func (p *plugin) createDSQLConnectionWithAuth(
 	cfg *config.SQL, resolved settings, r resolver.ServiceResolver, logger log.Logger, metricsHandler metrics.Handler,
-	facts *storeFacts,
+	poolHandler metrics.Handler, facts *storeFacts,
 ) (*sqlx.DB, error) {
 	p.initRateLimiter(resolved, logger, metricsHandler)
 
@@ -144,7 +156,7 @@ func (p *plugin) createDSQLConnectionWithAuth(
 	if err != nil {
 		return nil, err
 	}
-	db, connector, err := openPoolDB(poolConfig, metricsHandler)
+	db, connector, err := openPoolDB(poolConfig, poolHandler)
 	if err != nil {
 		return nil, err
 	}
