@@ -77,7 +77,7 @@ comparison. A controller the tool doesn't know gets a row of its own, marked not
   law's state catches up.
 - Fair share records a namespace's decision only when its mode, its reason or the share it
   applies changes, or the share it proposes moves by `Deadband`, so its series holds those
-  changes. A held or frozen step keeps the reason it recorded.
+  changes. A held, frozen or filling step keeps the reason it recorded.
 
 ## Test
 

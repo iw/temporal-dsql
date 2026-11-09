@@ -54,45 +54,56 @@ func (e *Exchange) Register(server *grpc.Server) {
 // serve answers another frontend's exchange: it keeps the other's report and replies with
 // this frontend's latest one, and how long ago it was measured.
 func (e *Exchange) serve(_ context.Context, request *structpb.Struct) (*structpb.Struct, error) {
-	host, running, _, demand := readReport(request)
+	host, running, _, peer := readReport(request)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.counting.Load() || e.report == nil {
-		return newReport(e.Self, false, nil), nil
+		return newReport(e.Self, false, nil, nil), nil
 	}
 	if running && host != "" && host != e.Self {
-		e.peers[host] = peerReport{received: e.TimeSource.Now(), demand: demand}
+		peer.received = e.TimeSource.Now()
+		e.peers[host] = peer
 	}
 	fields := maps.Clone(e.report.GetFields())
 	fields["age"] = structpb.NewNumberValue(e.TimeSource.Now().Sub(e.at).Seconds())
 	return &structpb.Struct{Fields: fields}, nil
 }
 
-// A report is a frontend's address, whether its controller runs, and the tokens a second
-// each namespace asked of each of its limits. A reply also says how long ago its report was
-// measured, so a frontend whose rounds stopped goes stale.
+// A report is a frontend's address, whether its controller runs, the tokens a second each
+// namespace asked of each of its limits, and, by limit, the namespaces whose window still
+// fills. A reply also says how long ago its report was measured, so a frontend whose rounds
+// stopped goes stale. A report without the namespaces whose window fills, from a frontend
+// before they were added, has none.
 const reportVersion = 1
 
-func newReport(host string, running bool, demand map[string]map[string]float64) *structpb.Struct {
-	limits := make(map[string]*structpb.Value, len(demand))
-	for name, rates := range demand {
-		fields := make(map[string]*structpb.Value, len(rates))
-		for namespace, rate := range rates {
-			fields[namespace] = structpb.NewNumberValue(rate)
-		}
-		limits[name] = structpb.NewStructValue(&structpb.Struct{Fields: fields})
-	}
+func newReport(host string, running bool, demand map[string]map[string]float64, filling map[string]map[string]bool) *structpb.Struct {
 	return &structpb.Struct{Fields: map[string]*structpb.Value{
 		"version": structpb.NewNumberValue(reportVersion),
 		"host":    structpb.NewStringValue(host),
 		"running": structpb.NewBoolValue(running),
-		"demand":  structpb.NewStructValue(&structpb.Struct{Fields: limits}),
+		"demand":  byLimit(demand, structpb.NewNumberValue),
+		"filling": byLimit(filling, structpb.NewBoolValue),
 	}}
 }
 
-func readReport(report *structpb.Struct) (host string, running bool, age time.Duration, demand map[string]map[string]float64) {
+// byLimit is a value for each namespace of each limit, as a report carries it.
+func byLimit[V any](values map[string]map[string]V, value func(V) *structpb.Value) *structpb.Value {
+	limits := make(map[string]*structpb.Value, len(values))
+	for name, namespaces := range values {
+		fields := make(map[string]*structpb.Value, len(namespaces))
+		for namespace, v := range namespaces {
+			fields[namespace] = value(v)
+		}
+		limits[name] = structpb.NewStructValue(&structpb.Struct{Fields: fields})
+	}
+	return structpb.NewStructValue(&structpb.Struct{Fields: limits})
+}
+
+// readReport reads a report. The peerReport it returns has the report's demand and the
+// namespaces whose window fills; the caller sets when it was received.
+func readReport(report *structpb.Struct) (host string, running bool, age time.Duration, peer peerReport) {
 	fields := report.GetFields()
-	demand = map[string]map[string]float64{}
+	peer.demand = map[string]map[string]float64{}
 	for name, rates := range fields["demand"].GetStructValue().GetFields() {
 		m := map[string]float64{}
 		for namespace, rate := range rates.GetStructValue().GetFields() {
@@ -100,8 +111,18 @@ func readReport(report *structpb.Struct) (host string, running bool, age time.Du
 				m[namespace] = r
 			}
 		}
-		demand[name] = m
+		peer.demand[name] = m
+	}
+	peer.filling = map[string]map[string]bool{}
+	for name, namespaces := range fields["filling"].GetStructValue().GetFields() {
+		m := map[string]bool{}
+		for namespace, filling := range namespaces.GetStructValue().GetFields() {
+			if filling.GetBoolValue() {
+				m[namespace] = true
+			}
+		}
+		peer.filling[name] = m
 	}
 	age = max(0, time.Duration(fields["age"].GetNumberValue()*float64(time.Second)))
-	return fields["host"].GetStringValue(), fields["running"].GetBoolValue(), age, demand
+	return fields["host"].GetStringValue(), fields["running"].GetBoolValue(), age, peer
 }

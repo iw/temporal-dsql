@@ -88,16 +88,29 @@ func (e *Exchange) count(c *class, request quotas.Request) {
 }
 
 // measure samples each namespace's count and returns the tokens a second each asked over
-// the last window, by limit, leaving out the namespaces that asked none.
-func (e *Exchange) measure(now time.Time, window time.Duration) map[string]map[string]float64 {
-	own := make(map[string]map[string]float64, len(e.classes))
+// the last window, by limit, leaving out the namespaces that asked none. It also returns,
+// by limit, the namespaces whose window is still filling: those whose count started after
+// an earlier round, so their rate counts from that round, before their first request, and
+// rises until the round leaves the window.
+func (e *Exchange) measure(now time.Time, window time.Duration) (own map[string]map[string]float64, filling map[string]map[string]bool) {
+	own = make(map[string]map[string]float64, len(e.classes))
+	filling = make(map[string]map[string]bool, len(e.classes))
 	for _, c := range e.classes {
 		rates := map[string]float64{}
+		fills := map[string]bool{}
 		c.counts.each(func(namespace string, count int64) {
 			samples := c.samples[namespace]
 			if len(samples) == 0 && !e.lastRound.IsZero() {
 				// The namespace's count started after the last round.
 				samples = append(samples, sample{time: e.lastRound})
+				c.fillsFrom[namespace] = e.lastRound
+			}
+			if from, ok := c.fillsFrom[namespace]; ok {
+				if now.Sub(from) <= window {
+					fills[namespace] = true
+				} else {
+					delete(c.fillsFrom, namespace)
+				}
 			}
 			samples = append(samples, sample{time: now, count: count})
 			first := 0
@@ -113,7 +126,8 @@ func (e *Exchange) measure(now time.Time, window time.Duration) map[string]map[s
 			}
 		})
 		own[c.name] = rates
+		filling[c.name] = fills
 	}
 	e.lastRound = now
-	return own
+	return own, filling
 }

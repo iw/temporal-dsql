@@ -2,6 +2,7 @@ package fairshare
 
 import (
 	"context"
+	"maps"
 	"math"
 	"slices"
 	"sync"
@@ -19,11 +20,21 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-// ReasonHeld is a step whose share rose less than Deadband, so the share applied stays. A
-// share that falls applies at once: a frontend never holds a share above the one Share
-// gives it, so once the frontends see the same demand, the shares they hold add up to at
-// most the limit.
-const ReasonHeld Reason = "held"
+const (
+	// ReasonHeld is a step whose share rose less than Deadband, so the share applied stays.
+	// A share that falls applies at once: a frontend never holds a share above the one Share
+	// gives it, so once the frontends see the same demand, the shares they hold add up to at
+	// most the limit.
+	ReasonHeld Reason = "held"
+	// ReasonFilling is a step that keeps a namespace's equal share while the frontends'
+	// windows for it fill. A frontend whose requests for a namespace start after one of its
+	// rounds counts them from that round, so their rate rises until the round leaves the
+	// window, and it reads its own rate fresher than the others' reports. So a namespace's
+	// first shares wait until no frontend's window for it reaches back to before its first
+	// requests. Then a share that rises waits a round more, so the shares that fall have
+	// fallen first.
+	ReasonFilling Reason = "filling"
+)
 
 // Exchanges counts a frontend's exchanges with the others, by outcome.
 var Exchanges = metrics.NewCounterDef(
@@ -75,25 +86,30 @@ type (
 
 	// class is one of a frontend's namespace rate limits, with the counts, shares and
 	// decisions the exchange keeps for it. Only the goroutine that runs the rounds uses
-	// samples, applied and last.
+	// samples, fillsFrom, applied and last.
 	class struct {
 		name    string
 		limit   func(namespace string) int // a namespace's limit across the cluster
 		counts  counters
 		samples map[string][]sample
-		shares  atomic.Pointer[map[string]share] // the shares the limit takes, by namespace
-		applied map[string]share
-		last    map[string]adaptive.Decision // the decisions last reported, by namespace
+		// fillsFrom is the round each namespace whose window still fills counts from.
+		fillsFrom map[string]time.Time
+		shares    atomic.Pointer[map[string]share] // the shares the limit takes, by namespace
+		applied   map[string]share
+		last      map[string]adaptive.Decision // the decisions last reported, by namespace
 	}
 
-	// share is the share applied for a namespace, and the limit it was a share of.
+	// share is the share applied for a namespace, and the limit it was a share of. filling
+	// is set while it's the equal share kept as the windows fill.
 	share struct {
 		limit, share float64
+		filling      bool
 	}
 
 	peerReport struct {
 		received time.Time
 		demand   map[string]map[string]float64 // tokens a second, by limit and namespace
+		filling  map[string]map[string]bool    // the namespaces whose window still fills, by limit
 	}
 )
 
@@ -122,7 +138,13 @@ func (e *Exchange) Shares(name string, limit func(namespace string) int) calcula
 	}
 	c := e.class(name)
 	if c == nil {
-		c = &class{name: name, limit: limit, samples: map[string][]sample{}, last: map[string]adaptive.Decision{}}
+		c = &class{
+			name:      name,
+			limit:     limit,
+			samples:   map[string][]sample{},
+			fillsFrom: map[string]time.Time{},
+			last:      map[string]adaptive.Decision{},
+		}
 		e.classes = append(e.classes, c)
 	}
 	return c
@@ -231,14 +253,14 @@ func (e *Exchange) round(ctx context.Context) {
 	}
 	e.counting.Store(true)
 	now := e.TimeSource.Now()
-	own := e.measure(now, s.Window)
+	own, filling := e.measure(now, s.Window)
 	members := e.Members()
-	report := newReport(e.Self, true, own)
+	report := newReport(e.Self, true, own, filling)
 	e.mu.Lock()
 	e.report, e.at = report, now
 	e.mu.Unlock()
 	e.exchange(ctx, s, members, report)
-	e.decide(e.TimeSource.Now(), s, members, own)
+	e.decide(e.TimeSource.Now(), s, members, own, filling)
 }
 
 // reset forgets the counts, reports and shares once the controller is disabled, so every
@@ -248,6 +270,7 @@ func (e *Exchange) reset() {
 	for _, c := range e.classes {
 		c.counts.clear()
 		c.samples = map[string][]sample{}
+		c.fillsFrom = map[string]time.Time{}
 		c.shares.Store(nil)
 		c.applied = nil
 		c.last = map[string]adaptive.Decision{}
@@ -284,8 +307,9 @@ func (e *Exchange) exchange(ctx context.Context, s Settings, members []string, r
 				e.Logger.Info("Fair share exchange with a frontend recovered", tag.Address(address))
 			}
 			// A frontend that reached itself under another address doesn't count itself twice.
-			if host, running, age, demand := readReport(reply); running && host != e.Self {
-				e.peers[address] = peerReport{received: e.TimeSource.Now().Add(-age), demand: demand}
+			if host, running, age, peer := readReport(reply); running && host != e.Self {
+				peer.received = e.TimeSource.Now().Add(-age)
+				e.peers[address] = peer
 			}
 		})
 	}
@@ -335,8 +359,9 @@ func (e *Exchange) failed(address string, err error) {
 }
 
 // decide sets each limit's shares from the demand this frontend and the others report, and
-// reports the decisions that changed.
-func (e *Exchange) decide(now time.Time, s Settings, members []string, own map[string]map[string]float64) {
+// reports the decisions that changed. filling is the namespaces whose window still fills
+// here, by limit.
+func (e *Exchange) decide(now time.Time, s Settings, members []string, own map[string]map[string]float64, filling map[string]map[string]bool) {
 	n := len(members)
 	if !slices.Contains(members, e.Self) {
 		n++
@@ -345,9 +370,14 @@ func (e *Exchange) decide(now time.Time, s Settings, members []string, own map[s
 	frozen := e.Frozen()
 	for _, c := range e.classes {
 		peers := map[string]float64{}
+		fills := map[string]bool{}
+		maps.Copy(fills, filling[c.name])
 		for _, report := range fresh {
-			for namespace, rate := range report[c.name] {
+			for namespace, rate := range report.demand[c.name] {
 				peers[namespace] += rate
+			}
+			for namespace := range report.filling[c.name] {
+				fills[namespace] = true
 			}
 		}
 		names := map[string]struct{}{}
@@ -359,7 +389,7 @@ func (e *Exchange) decide(now time.Time, s Settings, members []string, own map[s
 				}
 				names[namespace] = struct{}{}
 				demand := Demand{Own: own[c.name][namespace], Peers: peers[namespace], Members: n, Known: len(fresh)}
-				if applied, ok := e.step(c, s, now, frozen, namespace, demand); ok {
+				if applied, ok := e.step(c, s, now, frozen, fills[namespace], namespace, demand); ok {
 					next[namespace] = applied
 				}
 			}
@@ -372,9 +402,10 @@ func (e *Exchange) decide(now time.Time, s Settings, members []string, own map[s
 	}
 }
 
-// step decides a namespace's share of a limit and reports the decision. It returns the share
-// the limit takes, if the controller applies one.
-func (e *Exchange) step(c *class, s Settings, now time.Time, frozen bool, namespace string, demand Demand) (share, bool) {
+// step decides a namespace's share of a limit and reports the decision. filling is whether
+// a frontend's window for the namespace still fills. It returns the share the limit takes,
+// if the controller applies one.
+func (e *Exchange) step(c *class, s Settings, now time.Time, frozen, filling bool, namespace string, demand Demand) (share, bool) {
 	limit := float64(c.limit(namespace))
 	if limit <= 0 {
 		// Without a limit across the cluster, each frontend applies its own.
@@ -386,6 +417,7 @@ func (e *Exchange) step(c *class, s Settings, now time.Time, frozen bool, namesp
 	applied, decision := equal, adaptive.Reason(reason)
 	prev, had := c.applied[namespace]
 	held := prev.share * limit / max(prev.limit, 1)
+	keep := false // the equal share is kept while the windows fill
 	switch {
 	case mode != adaptive.ModeOn:
 	case frozen:
@@ -393,6 +425,12 @@ func (e *Exchange) step(c *class, s Settings, now time.Time, frozen bool, namesp
 		if had {
 			applied = held
 		}
+	case filling && (!had || prev.filling):
+		// A namespace's first shares wait for the windows to fill.
+		decision, keep = adaptive.Reason(ReasonFilling), true
+	case prev.filling && proposed > equal:
+		// Then a share that rises waits a round for those that fall.
+		decision = adaptive.Reason(ReasonFilling)
 	case had && proposed >= held && proposed-held < s.Deadband*equal:
 		applied, decision = held, adaptive.Reason(ReasonHeld)
 	default:
@@ -408,7 +446,7 @@ func (e *Exchange) step(c *class, s Settings, now time.Time, frozen bool, namesp
 		Applied:    applied,
 		Detail:     Detail{Class: c.name, Namespace: namespace, Limit: limit, Params: s.Params(), Demand: demand},
 	})
-	return share{limit: limit, share: applied}, mode == adaptive.ModeOn && (had || reason != ReasonNoDemand)
+	return share{limit: limit, share: applied, filling: keep}, mode == adaptive.ModeOn && (had || reason != ReasonNoDemand)
 }
 
 // forget reports that each namespace no frontend reports demand for anymore went back to an
@@ -429,14 +467,14 @@ func (e *Exchange) forget(c *class, now time.Time, names map[string]struct{}) {
 	}
 }
 
-// fresh is the demand the other frontends reported within staleAfter, by address.
-func (e *Exchange) fresh(now time.Time, staleAfter time.Duration, members []string) map[string]map[string]map[string]float64 {
+// fresh is the reports the other frontends sent within staleAfter, by address.
+func (e *Exchange) fresh(now time.Time, staleAfter time.Duration, members []string) map[string]peerReport {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	fresh := map[string]map[string]map[string]float64{}
+	fresh := map[string]peerReport{}
 	for _, address := range members {
 		if report, ok := e.peers[address]; ok && address != e.Self && now.Sub(report.received) <= staleAfter {
-			fresh[address] = report.demand
+			fresh[address] = report
 		}
 	}
 	return fresh

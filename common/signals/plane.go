@@ -43,6 +43,7 @@ type (
 		persistence PersistenceHealth
 		rpc         RPCHealth // nil on hosts that don't record RPC health
 		queues      *queueDelays
+		shards      *shardWaits
 		runtime     *runtimeSource
 		memory      *cgroupMemory
 	}
@@ -53,6 +54,7 @@ type (
 		source     Source
 		sink       adaptive.DecisionSink // nil unless NewPlane was given one
 		queues     queueDelays
+		shards     *shardWaits
 		timeSource clock.TimeSource
 
 		latest  atomic.Pointer[Snapshot]
@@ -94,6 +96,7 @@ func newPlane(
 		persistence: persistenceHealth,
 		rpc:         rpcHealth,
 		queues:      &p.queues,
+		shards:      p.shards,
 		runtime:     newRuntimeSource(),
 		memory:      memory,
 	}
@@ -123,6 +126,7 @@ func planeWith(settings func() Settings, timeSource clock.TimeSource, traceHeade
 	return &Plane{
 		settings:   settings,
 		queues:     queueDelays{byQueue: make(map[string]stats.TimeWindowedStats)},
+		shards:     newShardWaits(),
 		timeSource: timeSource,
 		decisions:  make(map[string]adaptive.Decision),
 		trace:      newTraceWriter(traceHeader, logger),
@@ -224,6 +228,7 @@ func (s *processSource) Read(now time.Time, windows int) Snapshot {
 	snap := Snapshot{
 		Persistence: s.persistence.RecentSnapshot(windows),
 		Queues:      s.queues.snapshot(windows, now),
+		ShardWrites: s.shards.snapshot(windows, now),
 	}
 	if s.rpc != nil {
 		if errorRatio, ok := s.rpc.ErrorRatio(); ok {

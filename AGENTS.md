@@ -96,7 +96,7 @@
 
 #### Observability
 - DSQL-specific transaction conflict, retry, backoff and exhaustion metrics
-- pgxpool gauges and counters (constructing, waits, new connections, lifetime destroys, canceled acquires)
+- pgxpool gauges and counters (constructing, waits, new connections, lifetime destroys, canceled acquires), labelled by `db_kind`
 - Connection pool metrics (open, idle, in-use)
 - Skipped cancel requests (`dsql_cancel_requests_skipped_total`)
 

@@ -44,3 +44,48 @@ func TestTaskRateStaysWithinItsBounds(t *testing.T) {
 	rate, _ = c.Step(params, taskrate.Signals{PersistenceRate: 90000, Attempts: 1000, Calls: 1000})
 	require.InDelta(t, params.Max, rate, 1e-9)
 }
+
+func TestTaskRateHoldsTheMixWithinTheDeadband(t *testing.T) {
+	p := params
+	p.Deadband = 0.1
+	c := taskrate.New(9000)
+	step := func(persistenceRate float64, attempts int) (float64, taskrate.Reason) {
+		return c.Step(p, taskrate.Signals{PersistenceRate: persistenceRate, Attempts: attempts, Calls: 1000})
+	}
+
+	rate, reason := step(2000, 500)
+	require.InDelta(t, 900, rate, 1e-9, "2000 x 0.9 x 0.5")
+	require.Equal(t, taskrate.ReasonCoupled, reason)
+
+	// A mix within a tenth of 0.5 holds it.
+	rate, reason = step(2000, 540)
+	require.InDelta(t, 900, rate, 1e-9)
+	require.Equal(t, taskrate.ReasonHeld, reason)
+
+	// The rate still follows the persistence rate, by less than a tenth too.
+	rate, reason = step(2100, 540)
+	require.InDelta(t, 945, rate, 1e-9)
+	require.Equal(t, taskrate.ReasonHeld, reason)
+	rate, reason = step(1000, 460)
+	require.InDelta(t, 450, rate, 1e-9)
+	require.Equal(t, taskrate.ReasonHeld, reason)
+
+	// A mix a tenth or more away sets it again.
+	rate, reason = step(1000, 600)
+	require.InDelta(t, 540, rate, 1e-9)
+	require.Equal(t, taskrate.ReasonCoupled, reason)
+}
+
+func TestTaskRateResetForgetsTheMix(t *testing.T) {
+	p := params
+	p.Deadband = 0.1
+	c := taskrate.New(9000)
+	rate, _ := c.Step(p, taskrate.Signals{PersistenceRate: 4000, Attempts: 200, Calls: 1000})
+	require.InDelta(t, 720, rate, 1e-9)
+
+	// 0.21 is within a tenth of the mix the rate was set from, but a reset forgets it.
+	c.Reset(9000)
+	rate, reason := c.Step(p, taskrate.Signals{PersistenceRate: 4000, Attempts: 210, Calls: 1000})
+	require.InDelta(t, 756, rate, 1e-9)
+	require.Equal(t, taskrate.ReasonCoupled, reason)
+}

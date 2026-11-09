@@ -230,7 +230,7 @@ func (r *reschedulerImpl) reschedule() {
 			executable.SetScheduledTime(now)
 			submitted := r.scheduler.TrySubmit(executable)
 			if !submitted {
-				r.timerGate.Update(now.Add(backoff.Jitter(taskChanFullBackoff, taskChanFullBackoffJitterCoefficient)))
+				r.timerGate.Update(now.Add(r.retryAfterRefusal(now)))
 				break
 			}
 

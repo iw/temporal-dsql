@@ -147,7 +147,7 @@ AWS's quotas page lists two throttling codes for DSQL, 53400 for the connection 
   - Not while the host starts. For `QueuedGrace`, 30 s by default, after the controller's first step, the queued share doesn't cut. A host's first seconds bring a burst of start-up work, such as history reloading each shard's queues as it takes the shard, and that queues even on a pool that has opened its connections. Timeouts and throttled facts still cut during the grace, and a queue after it cuts as before. 0 turns the grace off.
 - **On a store that reports facts, latency isn't a trigger.** The controller relies on facts and Temporal's own timeouts.
   - The learned p99 law keeps running in shadow for comparison. When it would have cut, the step is logged, and counted as `latency-shadow` in `adaptive_controller_decisions`, which records every step's reason under the controller `persistence_capacity`.
-  - If shadow runs show the facts miss nothing it catches, it goes for those stores.
+  - It stays in shadow there, rather than acting or going. In the [system appreciation](adaptive-appreciation.md#shadow-proposals), it would have cut in every scenario but the short pool while the store had capacity to spare, as in the October [shadow runs](#shadow-runs). Its `latency-shadow` steps are where a store that slows down without throttling, in a way the facts miss, would show, and that's the one reason to revisit this.
   - Stores whose plugins report no facts keep it.
 
 **The grace comes from the [system appreciation](adaptive-appreciation.md#start-up-in-every-scenario).** On 3 November 2026, in 51 of the 66 host starts with 10 connections or more, the controller cut to half for `queued` as history took its shards, then held the cut as `idle` for the rest of the run.
@@ -210,7 +210,7 @@ In October 2026 the controller ran in shadow mode three times: it made and recor
 
 **What they show:** queued facts catch a short pool within seconds, where the latency law can miss it. With a healthy pool, the facts made no cuts.
 
-**What they don't cover:** store-side overload. From a laptop, history's shard writes reach their limit long before DSQL does, so throttled facts have no live evidence yet. Whether the latency law can go for stores that report facts, as [section 5](#5-how-the-controller-uses-the-facts) proposes, is what the [simulator runs](#simulator-runs) test.
+**What they don't cover:** store-side overload. From a laptop, history's shard writes reach their limit long before DSQL does, so throttled facts have no live evidence yet. Whether the latency law could go for stores that report facts was left to the [simulator runs](#simulator-runs) and the [system appreciation](adaptive-appreciation.md#shadow-proposals). It stays in shadow, as [Decisions](#decisions) records.
 
 ## Simulator runs
 
@@ -288,3 +288,7 @@ Agreed on 29 October 2026:
 2. **Contention:** it's reported, not acted on.
 3. **Latency on DSQL:** the controller relies on facts and timeouts. The learned p99 law runs in shadow for comparison, and queued facts give the early warning.
 4. **Order:** fix 1 landed first, in #85, then the sink and the plugin's facts, in #86, then the controller acting on them.
+
+Settled on 9 November 2026, after the [system appreciation](adaptive-appreciation.md):
+
+5. **The latency law on stores that report facts:** it stays in shadow, for comparison, and doesn't act or go. It would have cut while the store had capacity in every scenario but the short pool. Revisit only if a slowdown without throttling appears that the facts miss.

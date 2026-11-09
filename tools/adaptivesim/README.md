@@ -33,7 +33,9 @@ go run ./cmd/tools/adaptivereplay /tmp/adaptivesim/*.jsonl
 - `-capacity mode` runs the capacity controller `disabled`, in `shadow` or `enabled`,
   `-queued-grace duration` sets its `QueuedGrace`, and `-coupled-binding-share share` its
   `CoupledBindingShare`, 0 and off in every scenario. At 0.9 it counts the task scheduler's
-  coupled refusals as its limit binding. `-task-rate mode`, `-workers mode`,
+  coupled refusals as its limit binding. `-coupled-retry duration` sets the task scheduler
+  rate's `CoupledRetry`, also 0 and off in every scenario. At 200ms the rescheduler retries
+  the coupled limit's refusals that soon. `-task-rate mode`, `-workers mode`,
   `-memory mode`, `-partitions mode` and `-fair-share mode` do the same for the task
   scheduler rate, the worker counts, the memory budget, the partition scaler and fair
   share. The partition scaler needs a scenario whose workflows run through matching, and
@@ -162,7 +164,9 @@ a workflow in one pipelined batch; `pipeline-gate` is both, the plugin's current
   refuses go to the health signals with its `Headroom`, as `taskrate` records them for the
   capacity controller's `CoupledBindingShare`. A task the limiter refuses waits in its
   queue's rescheduler for 1 s × 1.1ⁿ, then goes back to the scheduler in time order; when
-  the scheduler refuses it again, the rescheduler tries again 1–3 s later.
+  the scheduler refuses it again, the rescheduler tries again 1–3 s later. With
+  `CoupledRetry` set, it tries again after half to one and a half times that instead when
+  the task rate's limit refused it below the static rate, as taskrate's hint has it.
 - **Workers.** Without matching, a fixed number of pollers, 32 a host. A workflow is a
   start, then a few tasks, each held by a poller until history has written the worker's
   response.
@@ -370,8 +374,8 @@ config is a static collection of the scenario's controller settings.
 ## What the runs show
 
 - **Through a surge, the task scheduler rate keeps the tasks in the scheduler.** In
-  `surge`, with the rate enabled, the persistence rate limiter refused 20 calls, the
-  workflows' p99 was 982 ms, and the tasks made 16,216 attempts. In shadow, it refused
+  `surge`, with the rate enabled, the persistence rate limiter refused 21 calls, the
+  workflows' p99 was 983 ms, and the tasks made 16,217 attempts. In shadow, it refused
   7,234, the workflows' p99 was 1m42s, and the tasks made 22,094 attempts. The backlog
   cleared in both.
 - **The task scheduler rate follows each capacity cut, and with both enabled the cut
@@ -381,8 +385,8 @@ config is a static collection of the scenario's controller settings.
   binds, and capacity probes back up: every task completes. With both enabled
   (`cap-tsr`), the task scheduler rate keeps persistence's calls at its `Headroom`, 90% of
   capacity's rate, so the persistence limit doesn't bind once the store recovers. Capacity
-  holds its cut as `idle` for the rest of the load, the task rate stays at about 42/s
-  against 80 tasks arriving a second, and 6,648 tasks are still waiting when the load
+  holds its cut as `idle` for the rest of the load, the task rate stays at about 38/s
+  against 80 tasks arriving a second, and 7,224 tasks are still waiting when the load
   ends. A rate that isn't binding says nothing about the store, which is why `idle` holds;
   here the task rate is what keeps it from binding. In the appreciation, the task rate
   stayed far above the tasks' rate except in the short pool, so this didn't show there.
@@ -395,17 +399,29 @@ config is a static collection of the scenario's controller settings.
   `-coupled-binding-share 0.9`, capacity cuts to 80.5 a second at 1:08 as before, and the
   task rate follows each cut. While the store is slow, the refusals let capacity recover
   and probe, and the queued share cuts it back. Once the store recovers at 2:30, capacity
-  probes from 103 a second to 199 by 2:50. The queued share then cuts it to about 130 a
-  second five times by the load's end, as the rescheduler's retries release the waiting
-  tasks in batches, and twice in the drain. 880 tasks are waiting when the load ends,
-  against 6,648 with the share at 0, and every task completes; their p99 is 1m51s, against
-  3m4s. In `surge`'s `cap-tsr`, capacity probes to 155 a second, against 110 with the
-  share at 0, below its ceiling of 300, and the scheduler refuses 1,307 submissions,
-  against 2,234. Only the coupled limit's refusals below the static rate count, so the
+  probes from 100 a second to 197 by 3:04. The queued share then cuts it to about 130 a
+  second three times by the load's end, as the rescheduler's retries release the waiting
+  tasks in batches, and three times in the drain. 1,513 tasks are waiting when the load
+  ends, against 7,224 with the share at 0, and all but 9 of the 19,200 complete by the end
+  of the drain; their p99 is 2m10s, against 3m2s. With seeds 1 to 3, 975–1,513 tasks are
+  waiting when the load ends, where 880–1,660 were before the task rate's deadband. In
+  `surge`'s `cap-tsr`, capacity probes to 148 a second, against 110 with the share at 0,
+  below its ceiling of 300, and the scheduler refuses 1,279 submissions, against 2,219.
+  Only the coupled limit's refusals below the static rate count, so the
   scheduler's own limit doesn't take capacity to its ceiling. In `mixed-surge`, the task
   rate's 25% step limit lags the surge, so the scheduler refuses 809 submissions while the
   calls stay far below capacity's 1,000 a second. The calls offered don't reach the share,
   so capacity stays at 1,000; with the share at 0.01 it rises to 2,183.
+- **With `CoupledRetry` at 200ms too, the slow store's backlog clears.** The rescheduler
+  retries a task the coupled limit refused after 100–300 ms rather than 1–3 s, so the
+  buckets release the waiting tasks as they refill rather than in batches. In
+  `slow-store`'s `cap-tsr`, with `-coupled-binding-share 0.9 -coupled-retry 200ms`,
+  capacity probes from 100 a second at 2:31 to 240 by 3:03, and the queued share cuts it
+  to about 175 twice. 16 tasks are waiting when the load ends, against 1,513 with the share
+  alone, every task completes, and their p99 is 1m37s. `all` does the same. In `surge` and
+  `mixed-surge`, the outcomes stay as without it, and the scheduler counts more refusals,
+  3,597 against 2,718 in `surge`'s `tsr`, since each retry the coupled limit refuses
+  counts again.
 - **A busy queue's worker count grows, then shrinks.** In `busy-queue`, the transfer
   queue's count grows from 8 to 16 by 11 s, which serves the 60 tasks a second: the tasks'
   p99 was 1.8 s, against 55 s with the count in shadow. At 16 workers its tasks wait
@@ -444,12 +460,13 @@ config is a static collection of the scenario's controller settings.
   limit.** In `uneven-frontends`' `shadow`, each frontend takes half the second
   namespace's limit of 60 a second: the first, sent 72, admits 30.2 and throttles 41.8,
   and the second admits all of its 18. Together they admit 48.2 a second, as in the
-  appreciation. In `fair`, while the frontends' 30 s windows fill, each reads its own
-  demand fresher than the other's report of theirs, so for 35 s their shares add up to
-  more than the limit, as much as 79.7 a second at first. From 1m7s, once both windows
-  have filled and the frontends have exchanged them, the shares add up to 60: 44.4 and
-  15.6 a second, the law's split of the limit in proportion to the demand, above each
-  frontend's floor. Each namespace limiter takes its share a minute after its
+  appreciation. In `fair`, the frontends keep half the limit each while their 30 s windows
+  fill, with the reason `filling`: each would read its own demand fresher than the other's
+  report of theirs, and their shares would add up to as much as 79.7 a second. At 1m7s,
+  once both windows have filled and the frontends have exchanged them, the second
+  frontend's share falls to 15.6 a second, and the first's then rises to 44.4, the law's
+  split of the limit in proportion to the demand, above each frontend's floor. The shares
+  never add up to more than 60. Each namespace limiter takes its share a minute after its
   namespace's first request, at 1m30s, by when the shares had settled. From then on the
   first frontend admits 44.4 a second and the second 15.6, so the second throttles about
   2.4 a second that it admitted in shadow, and together they admit 60, the limit. Over the
@@ -496,8 +513,8 @@ config is a static collection of the scenario's controller settings.
 - **#110's slow store holds its cut with every controller enabled.** `slow-store`'s `all`
   enables the capacity controller, the task scheduler rate and the worker counts, every
   controller its host runs, and its tasks, workflows, capacity decisions and task rate
-  decisions are `cap-tsr`'s: capacity holds its cut of 80.5 a second as `idle` from 1m17s
-  to the load's end, the task rate stays at about 42 a second, and 6,648 tasks are still
+  decisions are `cap-tsr`'s: capacity holds its cut of 80.5 a second as `idle` from 1m18s
+  to the load's end, the task rate stays at about 38 a second, and 7,224 tasks are still
   waiting when the load ends. The worker counts back off after each cut and shrink to 361,
   which changes nothing else. With `-coupled-binding-share 0.9`, `all`'s tasks and
   capacity decisions are again `cap-tsr`'s. In the ramp's and the uneven frontends' `all`,

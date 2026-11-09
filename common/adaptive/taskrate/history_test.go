@@ -57,7 +57,7 @@ func TestControllerStepsOnThePersistenceSnapshot(t *testing.T) {
 	require.InDelta(t, 1620, rate, 1e-9, "9000 x 0.9 x 200/1000")
 	require.Equal(t, adaptive.Reason(ReasonCoupled), reason)
 	require.Equal(t, Detail{
-		Params:      Params{Min: 180, Max: 9000, Headroom: 0.9, MinSamples: 100},
+		Params:      Params{Min: 180, Max: 9000, Headroom: 0.9, MinSamples: 100, Deadband: 0.1},
 		Signals:     Signals{PersistenceRate: 9000, Attempts: 200, Calls: 1000},
 		MaxStepFrac: 0.25,
 	}, detail)
@@ -249,6 +249,53 @@ func TestSchedulerLimiterRecordsOnlyItsBucketsRefusalsBelowTheStaticRate(t *test
 			refuse(l)
 			require.False(t, l.Allow(now, taskRequest(tasks.PriorityLow)))
 			require.Empty(t, refusals.headrooms)
+		})
+	}
+}
+
+func TestSchedulerLimiterHintsARetryAfterItsBucketsRefuse(t *testing.T) {
+	settings := DefaultSettings
+	settings.CoupledRetry = 200 * time.Millisecond
+	l := newSchedulerLimiter(newCountingLimiter(), &fixedRate{rate: 10, on: true}, staticRate(100), func() Settings { return settings }, nil)
+	now := time.Now()
+
+	// Nothing refused yet.
+	_, ok := l.SubmitRetry(now)
+	require.False(t, ok)
+
+	require.True(t, l.Allow(now, taskRequest(tasks.PriorityLow)))
+	require.False(t, l.Allow(now, taskRequest(tasks.PriorityLow)))
+	retry, ok := l.SubmitRetry(now)
+	require.True(t, ok)
+	require.Equal(t, 200*time.Millisecond, retry)
+
+	// A refusal before the reschedule that asks isn't its own.
+	_, ok = l.SubmitRetry(now.Add(time.Millisecond))
+	require.False(t, ok)
+
+	// Off by default.
+	settings.CoupledRetry = 0
+	_, ok = l.SubmitRetry(now)
+	require.False(t, ok)
+}
+
+func TestSchedulerLimiterHintsNoRetryForOtherRefusals(t *testing.T) {
+	settings := DefaultSettings
+	settings.CoupledRetry = 200 * time.Millisecond
+	get := func() Settings { return settings }
+	now := time.Now()
+	for name, l := range map[string]*schedulerLimiter{
+		"at the static rate":        newSchedulerLimiter(newCountingLimiter(), &fixedRate{rate: 10, on: true}, staticRate(10), get, nil),
+		"the scheduler's own limit": newSchedulerLimiter(refusingLimiter{}, &fixedRate{rate: 1000, on: true}, staticRate(9000), get, nil),
+		"the controller off":        newSchedulerLimiter(refusingLimiter{}, &fixedRate{rate: 10}, staticRate(9000), get, nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			for range 20 {
+				l.Allow(now, taskRequest(tasks.PriorityLow))
+			}
+			require.False(t, l.Allow(now, taskRequest(tasks.PriorityLow)))
+			_, ok := l.SubmitRetry(now)
+			require.False(t, ok)
 		})
 	}
 }

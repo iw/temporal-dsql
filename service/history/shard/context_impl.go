@@ -49,6 +49,7 @@ import (
 	"go.temporal.io/server/common/quotas"
 	"go.temporal.io/server/common/rpc"
 	"go.temporal.io/server/common/searchattribute"
+	"go.temporal.io/server/common/signals"
 	"go.temporal.io/server/common/util"
 	"go.temporal.io/server/common/wideevents"
 	"go.temporal.io/server/service/history/configs"
@@ -125,6 +126,9 @@ type (
 		// It's ok to use semaphore by its own or lock rwLock within the semaphore.
 		// But DO NOT try to acquire ioSemaphore while holding rwLock, as it may cause deadlock.
 		ioSemaphore locks.PrioritySemaphore
+		// shardWaits, if set, receives how long each acquire of ioSemaphore waited, for the
+		// host's signal plane.
+		shardWaits signals.ShardWaitRecorder
 
 		// state is protected by stateLock
 		stateLock  sync.Mutex
@@ -1544,7 +1548,11 @@ func (s *ContextImpl) ioSemaphoreAcquire(
 	metrics.SemaphoreRequests.With(handler).Record(1)
 	startTime := time.Now().UTC()
 	defer func() {
-		metrics.SemaphoreLatency.With(handler).Record(time.Since(startTime))
+		wait := time.Since(startTime)
+		metrics.SemaphoreLatency.With(handler).Record(wait)
+		if s.shardWaits != nil {
+			s.shardWaits.RecordShardWait(wait)
+		}
 		if retErr != nil {
 			metrics.SemaphoreFailures.With(handler).Record(1)
 		}
