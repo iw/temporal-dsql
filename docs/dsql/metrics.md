@@ -46,6 +46,10 @@ The [gate](connection-pool.md#the-gate) in front of the pool records these as th
 
 Callers wait at the gate rather than in pgxpool, so `dsql_pool_wait_total` counts the acquires that waited while pgxpool opened or replaced a connection.
 
+## Cancel Request Metrics
+
+`dsql_cancel_requests_skipped_total` counts the cancel requests the plugin skips. pgx would send one on a new connection for each statement it cuts off at its deadline, and for each connection it closes after an error. DSQL answers them with `0A000`, so the plugin doesn't dial; see [connection pool](connection-pool.md#cancel-requests). The counter is recorded when a dial is refused, not sampled. Each skipped request also means a closed connection that pgxpool replaces, so a sustained rate shows in `dsql_pool_new_connections_total` too.
+
 ## Rate Limiter Metrics
 
 `dsql_rate_limiter_fallbacks_total` counts calls routed to the local limiter after a DynamoDB failure, including calls during the 30-second cooldown.
@@ -74,6 +78,9 @@ rate(dsql_pool_canceled_acquires_total[5m])
 dsql_pool_open - dsql_pool_constructing
 rate(dsql_pool_new_connections_total[5m])
 rate(dsql_pool_lifetime_destroys_total[5m])
+
+# Statements cut off mid-flight, and connections closed after errors.
+rate(dsql_cancel_requests_skipped_total[5m])
 
 # OCC conflicts, retries and exhaustion.
 rate(dsql_tx_conflict_total[5m])
