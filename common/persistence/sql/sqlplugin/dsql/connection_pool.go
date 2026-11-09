@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/iancoleman/strcase"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
@@ -39,11 +42,14 @@ const (
 	poolPingTimeout      = 30 * time.Second
 	poolMetricsInterval  = 15 * time.Second
 	acquireFactsInterval = time.Second
+
+	cancelRequestsSkippedMetric = "dsql_cancel_requests_skipped_total"
 )
 
 var (
-	errConnectThrottled    = errors.New("DSQL connection throttled")
-	connectionAttemptSlots = make(chan struct{}, connectionAttemptLimit)
+	errConnectThrottled     = errors.New("DSQL connection throttled")
+	errCancelRequestSkipped = errors.New("DSQL cancel request skipped")
+	connectionAttemptSlots  = make(chan struct{}, connectionAttemptLimit)
 )
 
 func (p *plugin) poolConfig(cfg *config.SQL, r resolver.ServiceResolver, tokenProvider driver.TokenProvider, logger log.Logger) (*pgxpool.Config, error) {
@@ -216,6 +222,10 @@ func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, 
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg = cfg.Copy()
 	beforeConnect := cfg.BeforeConnect
+	cancelsSkipped := metrics.NoopMetricsHandler.Counter(cancelRequestsSkippedMetric)
+	if metricsHandler != nil {
+		cancelsSkipped = metricsHandler.Counter(cancelRequestsSkippedMetric)
+	}
 	// Health-check refills use a background context in pgxpool. Cancel their
 	// limiter/token waits too when the owning database is closed.
 	cfg.BeforeConnect = func(connectCtx context.Context, connConfig *pgx.ConnConfig) error {
@@ -226,7 +236,11 @@ func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, 
 		if ctx.Err() != nil {
 			hookCancel()
 		}
-		return beforeConnect(hookCtx, connConfig)
+		if err := beforeConnect(hookCtx, connConfig); err != nil {
+			return err
+		}
+		skipCancelRequests(connConfig, cancelsSkipped)
+		return nil
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -248,4 +262,33 @@ func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, 
 	db.MapperFunc(strcase.ToSnake)
 	collector.StartPoolCollector(pool, poolMetricsInterval)
 	return db, connector, nil
+}
+
+// skipCancelRequests refuses the dials pgx makes once a connection is up. pgx makes them to
+// send a cancel request whenever it cuts a statement off or closes a connection after an
+// error. DSQL answers each with 0A000 and lets the statement run on, so the dial would only
+// add a TCP and TLS handshake.
+func skipCancelRequests(cfg *pgx.ConnConfig, skipped metrics.CounterIface) {
+	dial := cfg.DialFunc
+	if dial == nil {
+		return
+	}
+	afterConnect := cfg.AfterConnect
+	var connected atomic.Bool
+	cfg.DialFunc = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if connected.Load() {
+			skipped.Record(1)
+			return nil, errCancelRequestSkipped
+		}
+		return dial(ctx, network, address)
+	}
+	cfg.AfterConnect = func(ctx context.Context, conn *pgconn.PgConn) error {
+		if afterConnect != nil {
+			if err := afterConnect(ctx, conn); err != nil {
+				return err
+			}
+		}
+		connected.Store(true)
+		return nil
+	}
 }

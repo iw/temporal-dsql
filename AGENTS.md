@@ -91,12 +91,14 @@
 - Lifetime is capped at 50 minutes, with 4 minutes of jitter and 1-minute health checks. `maxIdleConns` is ignored. There are no acquire/release hooks. See the expiry and shutdown limitations in `docs/dsql/connection-pool.md`.
 - A process-wide semaphore of 8 bounds limiter/token calls before each handshake. Background fill uses the same rate limiter as on-demand connections.
 - A gate admits callers to each pool, one slot per connection, writes before reads. It refuses a caller it can't admit before the caller's deadline with `ResourceExhausted`, without reaching DSQL.
+- pgx's cancel requests are skipped: once connected, a connection's `DialFunc` refuses further dials, because DSQL answers cancel requests with 0A000.
 - **Token Bucket Rate Limiter** (opt-in) — DynamoDB-backed GCRA reservations, with burst capacity 1000 and 100/sec sustained. Reservations only move forward under clock skew. The token bucket falls back to local pacing for 30 seconds on DynamoDB errors; local pacing is the default mode.
 
 #### Observability
 - DSQL-specific transaction conflict, retry, backoff and exhaustion metrics
 - pgxpool gauges and counters (constructing, waits, new connections, lifetime destroys, canceled acquires)
 - Connection pool metrics (open, idle, in-use)
+- Skipped cancel requests (`dsql_cancel_requests_skipped_total`)
 
 #### Documentation
 - `docs/dsql/README.md` - Documentation index
@@ -126,6 +128,7 @@
 7. **Transaction Limits**: 3,000 modified rows and 10 MiB per transaction; range deletes run in batches that halve on SQLSTATE 54000
 8. **Column Size**: 1 MiB per non-indexed column value; the plugin reports SQLSTATE 54000 as `TransactionSizeLimitError`, and the DSQL dynamic config caps history batches and payloads below 1 MiB
 9. **Connection Duration**: 60 minutes maximum
+10. **Query Cancellation**: DSQL answers cancel requests with 0A000 and doesn't support `pg_cancel_backend`, so a statement cut off at its deadline runs to the end on DSQL. The plugin skips pgx's cancel requests
 
 ### Recommended Configuration
 
