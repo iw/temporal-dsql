@@ -570,3 +570,18 @@ func TestPoolSkipsCancelRequests(t *testing.T) {
 	require.Equal(t, int32(1), server.startups.Load())
 	require.Zero(t, server.cancels.Load())
 }
+
+func TestPoolMetricsHandlerLabelsStore(t *testing.T) {
+	require.Nil(t, poolMetricsHandler(nil, sqlplugin.DbKindMain))
+	handler := metricstest.NewCaptureHandler()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+	for _, kind := range []sqlplugin.DbKind{sqlplugin.DbKindMain, sqlplugin.DbKindVisibility} {
+		poolMetricsHandler(handler, kind).Gauge("dsql_pool_open").Record(1)
+	}
+	var kinds []string
+	for _, recording := range capture.Snapshot()["dsql_pool_open"] {
+		kinds = append(kinds, recording.Tags[metrics.PersistenceDBKindTagName])
+	}
+	require.Equal(t, []string{"main", "visibility"}, kinds)
+}
