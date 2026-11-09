@@ -421,9 +421,15 @@ func TestReplaysFairShare(t *testing.T) {
 	for i, own := range []float64{0, 40, 40, 60, 0} {
 		demand := fairshare.Demand{Own: own, Peers: 20, Members: 2, Known: 1}
 		share, reason := fairshare.Share(params, 100, demand)
-		recorded := adaptive.Reason(reason)
-		if i == 2 {
+		var recorded adaptive.Reason
+		applied := share
+		switch i {
+		case 1:
+			recorded, applied = adaptive.Reason(fairshare.ReasonFilling), 50
+		case 2:
 			recorded = adaptive.Reason(fairshare.ReasonHeld)
+		default:
+			recorded = adaptive.Reason(reason)
 		}
 		rec.decision(t, adaptive.Decision{
 			Controller: fairshare.Name,
@@ -432,7 +438,7 @@ func TestReplaysFairShare(t *testing.T) {
 			Reason:     recorded,
 			Static:     50,
 			Proposed:   share,
-			Applied:    share,
+			Applied:    applied,
 			Detail:     fairshare.Detail{Class: "namespace", Namespace: "ns", Limit: 100, Params: params, Demand: demand},
 		})
 	}
@@ -444,6 +450,7 @@ func TestReplaysFairShare(t *testing.T) {
 	require.Equal(t, "namespace/ns", r.Series[0].Key)
 	require.Equal(t, 5, r.Series[0].Matched())
 	require.Equal(t, 1, r.Series[0].Replayed().Reasons[adaptive.Reason(fairshare.ReasonHeld)])
+	require.Equal(t, 1, r.Series[0].Replayed().Reasons[adaptive.Reason(fairshare.ReasonFilling)])
 
 	r, err = Run(trace, []Override{{Controller: fairshare.Name, Field: "MinShare", Value: "0.5"}}, nil, nil)
 	require.NoError(t, err)

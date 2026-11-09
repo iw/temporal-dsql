@@ -204,8 +204,9 @@ func partitionsKey(d *Decision) (string, error) {
 }
 
 // fairShareLaw replays fair share's law, which keeps no state. The exchange reports a
-// namespace's share when it changes, and can hold or freeze the share the law gives, so a
-// held or frozen decision keeps the reason it recorded.
+// namespace's share when it changes, and can hold or freeze the share the law gives, or keep
+// an equal share while the frontends' windows fill, so a held, frozen or filling decision
+// keeps the reason it recorded.
 type fairShareLaw struct{}
 
 func (fairShareLaw) step(d *Decision, overrides []Override) (float64, adaptive.Reason, bool, error) {
@@ -214,7 +215,8 @@ func (fairShareLaw) step(d *Decision, overrides []Override) (float64, adaptive.R
 		return 0, "", false, err
 	}
 	share, reason := fairshare.Share(detail.Params, detail.Limit, detail.Demand)
-	if d.Reason == adaptive.ReasonFrozen || d.Reason == adaptive.Reason(fairshare.ReasonHeld) {
+	switch d.Reason {
+	case adaptive.ReasonFrozen, adaptive.Reason(fairshare.ReasonHeld), adaptive.Reason(fairshare.ReasonFilling):
 		return share, d.Reason, false, nil
 	}
 	return share, adaptive.Reason(reason), true, nil

@@ -153,6 +153,16 @@ func (c *testCluster) load(perHost map[string]int, namespace string) {
 	c.round()
 }
 
+// fill sends a namespace's requests, as load does, until the frontends' windows for it have
+// filled and their shares have left the equal split: a round more than the window for the
+// round before the first requests to leave it, one for the other frontends to report it, and
+// one for a share that rises to wait for those that fall.
+func (c *testCluster) fill(perHost map[string]int, namespace string) {
+	for range int(c.settings.Window/c.settings.Interval) + 3 {
+		c.load(perHost, namespace)
+	}
+}
+
 // share is a frontend's share of a namespace's limit, as its quota calculator gets it.
 func (c *testCluster) share(host, namespace string) (float64, bool) {
 	return c.exchanges[host].Shares(testLimit, nil).Share(namespace, float64(c.limits[namespace]))
@@ -162,26 +172,37 @@ func TestDemandIsTheRateOverTheWindow(t *testing.T) {
 	c := newTestCluster(t, adaptive.ModeNameShadow, "a")
 	c.round() // starts counting
 	e := c.exchanges["a"]
+	measure := func() (map[string]float64, map[string]bool) {
+		own, filling := e.measure(c.ts.Now(), c.settings.Window)
+		return own[testLimit], filling[testLimit]
+	}
 	c.load(map[string]int{"a": 50}, "ns") // 10 a second
-	// A namespace's first count started after the last round.
-	require.InDelta(t, 10.0, e.measure(c.ts.Now(), c.settings.Window)[testLimit]["ns"], 1e-9)
+	// A namespace's first count started after the last round, so its window fills until
+	// that round leaves it.
+	rates, filling := measure()
+	require.InDelta(t, 10.0, rates["ns"], 1e-9)
+	require.True(t, filling["ns"])
 	for range 5 {
 		c.load(map[string]int{"a": 50}, "ns")
 	}
-	require.InDelta(t, 10.0, e.measure(c.ts.Now(), c.settings.Window)[testLimit]["ns"], 1e-9)
+	rates, filling = measure()
+	require.InDelta(t, 10.0, rates["ns"], 1e-9)
+	require.True(t, filling["ns"])
 
 	// The window covers the last 30 seconds: 20 a second for the last 15 of them.
 	for range 3 {
 		c.load(map[string]int{"a": 100}, "ns")
 	}
-	rates := e.measure(c.ts.Now(), c.settings.Window)[testLimit]
+	rates, filling = measure()
 	require.InDelta(t, (3*50+3*100)/30.0, rates["ns"], 1e-9)
+	require.Empty(t, filling)
 
 	// A namespace with no requests in the window has no demand.
 	for range 7 {
 		c.load(nil, "ns")
 	}
-	require.NotContains(t, e.measure(c.ts.Now(), c.settings.Window)[testLimit], "ns")
+	rates, _ = measure()
+	require.NotContains(t, rates, "ns")
 }
 
 func TestSharesFollowEachFrontendsDemand(t *testing.T) {
@@ -189,9 +210,7 @@ func TestSharesFollowEachFrontendsDemand(t *testing.T) {
 	c.settings.Deadband = 0
 	c.limits["ns"] = 100
 	c.round()
-	for range 3 {
-		c.load(map[string]int{"a": 750, "b": 50}, "ns") // 150 and 10 a second
-	}
+	c.fill(map[string]int{"a": 750, "b": 50}, "ns") // 150 and 10 a second
 	a, ok := c.share("a", "ns")
 	require.True(t, ok)
 	b, ok := c.share("b", "ns")
@@ -324,7 +343,7 @@ func TestSharesRiseByDeadbandAndFallAtOnce(t *testing.T) {
 	require.InDelta(t, 50.0, a, 1e-6)
 }
 
-func TestSharesFitTheLimitOnceStaggeredWindowsFill(t *testing.T) {
+func TestSharesFitTheLimitWhileStaggeredWindowsFill(t *testing.T) {
 	// The system appreciation's uneven frontends: a limit of 60 a second, with 72 requests a
 	// second reaching a and 18 reaching b.
 	for _, first := range []string{"a", "b"} {
@@ -341,11 +360,11 @@ func TestSharesFitTheLimitOnceStaggeredWindowsFill(t *testing.T) {
 			band := c.settings.Deadband * 60 / 2 // Deadband of an equal share
 			c.round()
 
-			// The requests start 2 s before the first round, so the windows fill over the
-			// next 30 s. The frontend whose round comes first sets its share from its own
-			// window and the other's a round behind it, so while they fill, the shares add up
-			// to more than the limit.
-			var filling float64
+			// The requests start 2 s before the first round, so the windows count from the
+			// round before them until the seventh. The frontend whose round comes first would
+			// set its share from its own window and the other's a round behind it, so until
+			// the windows have filled, each keeps an equal share. Then b's share falls at once,
+			// and a's rises a round later, once b's has fallen.
 			for round := 1; round <= 20; round++ {
 				seconds := 5
 				if round == 1 {
@@ -358,38 +377,70 @@ func TestSharesFitTheLimitOnceStaggeredWindowsFill(t *testing.T) {
 					require.True(t, ok)
 					shares[host] = share
 				}
-				total := shares["a"] + shares["b"]
-				if time.Duration(round)*c.settings.Interval <= c.settings.Window+c.settings.Interval {
-					filling = max(filling, total)
-					continue
-				}
-				// Once both windows have filled, the shares fit the limit: each frontend holds
-				// a share no higher than the demand gives it, and less than Deadband below it.
-				require.LessOrEqual(t, total, 60+1e-9, "round %d", round)
-				for host, share := range shares {
-					require.LessOrEqual(t, share, want[host]+1e-9, "%s in round %d", host, round)
-					require.Greater(t, share, want[host]-band, "%s in round %d", host, round)
+				require.LessOrEqual(t, shares["a"]+shares["b"], 60+1e-9, "round %d", round)
+				switch {
+				case round < 7:
+					for host, share := range shares {
+						require.InDelta(t, 30.0, share, 1e-9, "%s in round %d", host, round)
+						d, _ := c.decisions.lastFrom(host, "ns")
+						require.Equal(t, adaptive.Reason(ReasonFilling), d.Reason)
+					}
+				case round >= 9:
+					// Each frontend holds a share no higher than the demand gives it, and less
+					// than Deadband below it.
+					for host, share := range shares {
+						require.LessOrEqual(t, share, want[host]+1e-9, "%s in round %d", host, round)
+						require.Greater(t, share, want[host]-band, "%s in round %d", host, round)
+					}
+				default:
+					// In rounds 7 and 8 the windows have filled, and the shares leave the equal
+					// split, b's first.
 				}
 			}
-			require.Greater(t, filling, 60.0)
 
 			// Each decision replays as tools/adaptivereplay reads it: its detail gives the
 			// share it proposed and, unless it held, its reason. None held a share above the
-			// one proposed.
+			// one proposed, or kept other than an equal share while the windows filled.
 			c.decisions.mu.Lock()
 			defer c.decisions.mu.Unlock()
 			for _, d := range c.decisions.decisions {
 				detail := d.Detail.(Detail)
 				share, reason := Share(detail.Params, detail.Limit, detail.Demand)
 				require.InDelta(t, share, d.Proposed, 1e-9)
-				if d.Reason == adaptive.Reason(ReasonHeld) {
+				switch d.Reason {
+				case adaptive.Reason(ReasonHeld):
 					require.LessOrEqual(t, d.Applied, d.Proposed)
-				} else {
+				case adaptive.Reason(ReasonFilling):
+					require.InDelta(t, d.Static, d.Applied, 1e-9)
+				default:
 					require.Equal(t, adaptive.Reason(reason), d.Reason)
 				}
 			}
 		})
 	}
+}
+
+func TestEstablishedSharesDoNotWaitForAnotherFrontendsWindow(t *testing.T) {
+	c := newTestCluster(t, adaptive.ModeNameEnabled, "a", "b")
+	c.limits["ns"] = 100
+	c.round()
+	c.fill(map[string]int{"a": 750}, "ns")
+	a, _ := c.share("a", "ns")
+	require.InDelta(t, 90.0, a, 1e-6, "a's demand passes the limit, and b has none")
+
+	// b's requests start, so its window fills. The frontends already apply shares that
+	// follow the demand, so they keep doing so rather than go back to equal shares.
+	for range 3 {
+		c.load(map[string]int{"a": 750, "b": 50}, "ns")
+		for _, host := range []string{"a", "b"} {
+			d, _ := c.decisions.lastFrom(host, "ns")
+			require.NotEqual(t, adaptive.Reason(ReasonFilling), d.Reason, host)
+		}
+	}
+	a, _ = c.share("a", "ns")
+	require.InDelta(t, 10+80*150/160.0, a, 1e-6)
+	_, filling := c.exchanges["b"].measure(c.ts.Now(), c.settings.Window)
+	require.True(t, filling[testLimit]["ns"])
 }
 
 func TestFrontendsWithoutFreshReportsKeepAnEqualShare(t *testing.T) {
@@ -401,9 +452,7 @@ func TestFrontendsWithoutFreshReportsKeepAnEqualShare(t *testing.T) {
 	// other 60 by their demand: floors of 6, and 48 above them.
 	delete(c.exchanges, "c")
 	c.round()
-	for range 3 {
-		c.load(map[string]int{"a": 750, "b": 50}, "ns")
-	}
+	c.fill(map[string]int{"a": 750, "b": 50}, "ns")
 	a, _ := c.share("a", "ns")
 	b, _ := c.share("b", "ns")
 	require.InDelta(t, 6+48*150/160.0, a, 1e-6)
@@ -495,9 +544,18 @@ func TestExchangeNeedsClusterAdminAccess(t *testing.T) {
 
 func TestReportsRoundTrip(t *testing.T) {
 	demand := map[string]map[string]float64{testLimit: {"ns": 12.5, "other": 3}, "visibility": {}}
-	host, running, age, got := readReport(newReport("a:7233", true, demand))
+	filling := map[string]map[string]bool{testLimit: {"other": true}, "visibility": {}}
+	host, running, age, got := readReport(newReport("a:7233", true, demand, filling))
 	require.Equal(t, "a:7233", host)
 	require.True(t, running)
 	require.Zero(t, age)
-	require.Equal(t, demand, got)
+	require.Equal(t, demand, got.demand)
+	require.Equal(t, filling, got.filling)
+
+	// A report from a frontend that doesn't send the namespaces whose window fills has none.
+	report := newReport("a:7233", true, demand, nil)
+	delete(report.Fields, "filling")
+	_, _, _, got = readReport(report)
+	require.Equal(t, demand, got.demand)
+	require.Empty(t, got.filling)
 }

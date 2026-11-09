@@ -54,7 +54,8 @@ namespace rate limits over the last Window, and takes a share of each limit: it 
 an equal share, and the rest follows its part of the demand, with Headroom to spare while the
 demand fits the limit. A frontend whose report is older than StaleAfter keeps an equal share. A
 share that rises applies once it moves Deadband of an equal share, and one that falls applies at
-once. Mode is disabled, shadow or enabled.`,
+once. A namespace whose requests have just started keeps equal shares until every frontend has
+counted them for a whole Window. Mode is disabled, shadow or enabled.`,
 )
 
 // Params are the law's parameters from the settings.

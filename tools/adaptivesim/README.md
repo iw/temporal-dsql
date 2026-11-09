@@ -460,12 +460,13 @@ config is a static collection of the scenario's controller settings.
   limit.** In `uneven-frontends`' `shadow`, each frontend takes half the second
   namespace's limit of 60 a second: the first, sent 72, admits 30.2 and throttles 41.8,
   and the second admits all of its 18. Together they admit 48.2 a second, as in the
-  appreciation. In `fair`, while the frontends' 30 s windows fill, each reads its own
-  demand fresher than the other's report of theirs, so for 35 s their shares add up to
-  more than the limit, as much as 79.7 a second at first. From 1m7s, once both windows
-  have filled and the frontends have exchanged them, the shares add up to 60: 44.4 and
-  15.6 a second, the law's split of the limit in proportion to the demand, above each
-  frontend's floor. Each namespace limiter takes its share a minute after its
+  appreciation. In `fair`, the frontends keep half the limit each while their 30 s windows
+  fill, with the reason `filling`: each would read its own demand fresher than the other's
+  report of theirs, and their shares would add up to as much as 79.7 a second. At 1m7s,
+  once both windows have filled and the frontends have exchanged them, the second
+  frontend's share falls to 15.6 a second, and the first's then rises to 44.4, the law's
+  split of the limit in proportion to the demand, above each frontend's floor. The shares
+  never add up to more than 60. Each namespace limiter takes its share a minute after its
   namespace's first request, at 1m30s, by when the shares had settled. From then on the
   first frontend admits 44.4 a second and the second 15.6, so the second throttles about
   2.4 a second that it admitted in shadow, and together they admit 60, the limit. Over the

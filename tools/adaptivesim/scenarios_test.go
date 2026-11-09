@@ -766,9 +766,10 @@ func admittedBetween(t *testing.T, r *Result, from, to time.Duration) float64 {
 // takes half the namespace's limit, so the busier throttles while the quieter leaves part of
 // its half unused. With it, the busier frontend's share rises and the quieter's falls, and
 // once the namespace's limiters take the shares, at their refresh, its admitted requests
-// rise to its limit. Once the frontends' demand windows have filled, their shares add up to
-// no more than the limit, as #106 has it: a share that falls applies at once, and one that
-// rises by less than the deadband holds below its proposal.
+// rise to its limit. The shares add up to no more than the limit throughout: the frontends
+// keep equal shares while their demand windows fill, and then a share that falls applies at
+// once, and one that rises waits a round, or by less than the deadband holds below its
+// proposal.
 func TestFairShareLiftsTheBusierFrontend(t *testing.T) {
 	t.Parallel()
 	fair := runScenario(t, "uneven-frontends", "fair", Options{})
@@ -803,15 +804,18 @@ func TestFairShareLiftsTheBusierFrontend(t *testing.T) {
 	slices.SortStableFunc(steps, func(a, b step) int { return a.d.Time.Compare(b.d.Time) })
 	shares := []float64{limit / 2, limit / 2}
 	filled := requests.At + settings.Window + 2*settings.Interval
-	checked := 0
+	filling := 0
 	for _, s := range steps {
 		shares[s.frontend] = s.d.Applied
-		if at := s.d.Time.Sub(epoch); at >= filled && at < end {
-			require.LessOrEqual(t, shares[0]+shares[1], limit+1e-9, "the shares at %s", at)
-			checked++
+		at := s.d.Time.Sub(epoch)
+		require.LessOrEqual(t, shares[0]+shares[1], limit+1e-9, "the shares at %s", at)
+		if s.d.Reason == adaptive.Reason(fairshare.ReasonFilling) {
+			require.Less(t, at, filled)
+			require.InDelta(t, limit/2, s.d.Applied, 1e-9)
+			filling++
 		}
 	}
-	require.Positive(t, checked)
+	require.Positive(t, filling)
 
 	// Once their windows have filled, each frontend applies the law's share of the demand:
 	// the busier more than half the limit, the quieter less.
