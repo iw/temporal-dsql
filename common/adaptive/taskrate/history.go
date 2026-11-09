@@ -31,6 +31,9 @@ type (
 		MaxStepFrac    float64
 		Headroom       float64
 		MinSamples     int
+		// Deadband keeps the mix of task attempts and calls that the rate was set from
+		// while the measured mix stays within this share of it.
+		Deadband float64
 		// DecisionHold is how recent the capacity controller's decision must be for its
 		// rate to count. Without one, the controller couples to the static rate.
 		DecisionHold time.Duration
@@ -87,6 +90,7 @@ var DefaultSettings = Settings{
 	MaxStepFrac:    0.25,
 	Headroom:       0.9,
 	MinSamples:     100,
+	Deadband:       0.1,
 	DecisionHold:   10 * time.Second,
 }
 
@@ -96,8 +100,9 @@ var Config = dynamicconfig.NewGlobalTypedSetting(
 	DefaultSettings,
 	`history.taskSchedulerRateController sets history's task scheduler rate from the persistence rate:
 the capacity controller's while it's enabled, otherwise the static limit, times Headroom, divided by
-the persistence calls each task attempt makes. The rate stays between MinMultiplier of the static
-persistence rate and the scheduler's fallback, that rate. It acts only while
+the persistence calls each task attempt makes. It keeps the mix it was set from while the measured
+mix stays within Deadband of it. The rate stays between MinMultiplier of the static persistence rate
+and the scheduler's fallback, that rate. It acts only while
 history.taskSchedulerEnableRateLimiter is set and its shadow mode is off. Mode is disabled, shadow or
 enabled.`,
 )
@@ -226,7 +231,7 @@ func (c *controller) Reset(rate float64) {
 
 func (c *controller) Step(snap *signals.Snapshot, env adaptive.Envelope[float64], static float64) (float64, adaptive.Reason, any) {
 	s := c.settings()
-	params := Params{Min: env.Min, Max: env.Max, Headroom: s.Headroom, MinSamples: s.MinSamples}
+	params := Params{Min: env.Min, Max: env.Max, Headroom: s.Headroom, MinSamples: s.MinSamples, Deadband: s.Deadband}
 	in := Signals{
 		PersistenceRate: persistenceRate(snap, static, s.DecisionHold),
 		Attempts:        snap.Persistence.ScheduleSamples,

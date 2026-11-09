@@ -8,6 +8,8 @@
 // function of state, parameters and signals.
 package taskrate
 
+import "math"
+
 type (
 	// Params are the control law's parameters.
 	Params struct {
@@ -17,6 +19,9 @@ type (
 		Headroom float64
 		// MinSamples is the fewest persistence calls a step needs to measure the mix.
 		MinSamples int
+		// Deadband holds the mix the rate was set from while the measured mix is within this
+		// share of it. The rate still follows the persistence rate.
+		Deadband float64
 	}
 
 	// Signals are what the controller steps on. Attempts and Calls cover the same span.
@@ -43,12 +48,16 @@ type (
 	// Controller holds the scheduler's rate. It isn't safe for concurrent use.
 	Controller struct {
 		rate float64
+		mix  float64 // the task attempts per call the rate was set from, 0 before the first
 	}
 )
 
 const (
 	// ReasonCoupled sets the rate from the persistence rate and the measured mix.
 	ReasonCoupled Reason = "coupled"
+	// ReasonHeld sets the rate from the persistence rate and the mix it was set from before,
+	// which the measured mix is within Deadband of.
+	ReasonHeld Reason = "held"
 	// ReasonNoData holds the rate: the step saw too few calls or no task attempts.
 	ReasonNoData Reason = "no-data"
 )
@@ -63,19 +72,27 @@ func (c *Controller) Rate() float64 {
 	return c.rate
 }
 
-// Reset sets the rate.
+// Reset sets the rate, and forgets the mix it was set from.
 func (c *Controller) Reset(rate float64) {
 	c.rate = rate
+	c.mix = 0
 }
 
 // Step proposes the scheduler's rate: the share of the persistence rate it plans to use,
 // divided by the calls each task attempt makes, which Attempts/Calls measures. Calls
-// that aren't the tasks' count against them, so API traffic keeps its share.
+// that aren't the tasks' count against them, so API traffic keeps its share. The deadband
+// holds only the mix, so the rate follows each change of the persistence rate, the
+// capacity controller's cuts and probes among them.
 func (c *Controller) Step(p Params, s Signals) (float64, Reason) {
 	reason := ReasonNoData
 	if s.Calls >= p.MinSamples && s.Attempts > 0 && s.PersistenceRate > 0 {
-		c.rate = s.PersistenceRate * p.Headroom * float64(s.Attempts) / float64(s.Calls)
 		reason = ReasonCoupled
+		if measured := float64(s.Attempts) / float64(s.Calls); c.mix > 0 && math.Abs(measured-c.mix) < p.Deadband*c.mix {
+			reason = ReasonHeld
+		} else {
+			c.mix = measured
+		}
+		c.rate = s.PersistenceRate * p.Headroom * c.mix
 	}
 	c.rate = min(max(c.rate, p.Min), p.Max)
 	return c.rate, reason
