@@ -379,7 +379,7 @@ func TestSettingsPoolConfigOwnership(t *testing.T) {
 	})
 	s, err := resolveSettings(cfg, logger)
 	require.NoError(t, err)
-	_, err = p.connectWithSettings(cfg, s, r, logger, nil)
+	_, err = p.connectWithSettings(cfg, s, r, logger, nil, nil)
 	require.ErrorContains(t, err, "invalid DSQL maxConns")
 	require.Equal(t, len(defaultDatabaseNames), attempts)
 	require.Equal(t, before, *cfg)
@@ -389,7 +389,7 @@ func TestSettingsPoolConfigOwnership(t *testing.T) {
 	later.ConnectAttributes = map[string]string{"connection_rate_limit": "5"}
 	s, err = resolveSettings(&later, logger)
 	require.NoError(t, err)
-	_, err = p.connectWithSettings(&later, s, r, log.NewZapLogger(zap.New(core)), nil)
+	_, err = p.connectWithSettings(&later, s, r, log.NewZapLogger(zap.New(core)), nil, nil)
 	require.ErrorContains(t, err, "invalid DSQL maxConns")
 	require.Equal(t, 1, logs.Len())
 	require.Contains(t, logs.All()[0].ContextMap()["settings_in_use"], "connection_rate_limit=3")
