@@ -18,6 +18,7 @@ import (
 	"go.temporal.io/server/common/persistence/serialization"
 	"go.temporal.io/server/common/resource"
 	"go.temporal.io/server/common/searchattribute"
+	"go.temporal.io/server/common/signals"
 	"go.temporal.io/server/service/history/configs"
 	"go.temporal.io/server/service/history/events"
 	"go.temporal.io/server/service/history/hsm"
@@ -66,6 +67,9 @@ type (
 		ChasmWorkflowRegistry  *chasmworkflow.Registry
 		EndpointRegistry       commonnexus.EndpointRegistry
 		HandoverTrackerFactory HandoverTrackerFactory
+		// SignalPlane receives how long each shard operation waited for its shard's I/O
+		// semaphore. It's optional, so tests build without it.
+		SignalPlane *signals.Plane `optional:"true"`
 	}
 
 	contextFactoryImpl struct {
@@ -115,6 +119,9 @@ func (c *contextFactoryImpl) CreateContext(
 	)
 	if err != nil {
 		return nil, err
+	}
+	if c.SignalPlane != nil {
+		shard.shardWaits = c.SignalPlane
 	}
 	shard.start()
 	return shard, nil

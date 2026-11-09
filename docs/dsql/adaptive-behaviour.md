@@ -156,6 +156,7 @@ The building blocks exist: `stats.NewWindowedTDigest` and `aggregate.MovingWindo
 On this branch, `common/signals` is the plane. Each service has one, off by default. While the `adaptive.signals` setting enables it, it takes a snapshot every `Interval`, 1s by default:
 
 - persistence health over the newest `Windows` latency windows, 3 by default, with the p90 of task queueing delay on history hosts;
+- on history hosts, the p90 of how long shard operations waited for their shard's I/O semaphore, which lets `history.shardIOConcurrency` of a shard's writes reach persistence at once. No controller reads it yet; traces record it, so a run can show whether history's per-shard writes, rather than the store, hold back its throughput;
 - history's RPC handler latency and error ratio over its health check aggregator's windows: the mean, and the p99 when `system.historyHealthSignalUsePercentiles` is set, which also makes history's deep health check use the p99;
 - the Go scheduler's p99 wait since the previous snapshot, goroutines, live heap and heap goal;
 - the memory limit and use of the process's cgroup, v1 or v2, and `GOMEMLIMIT`.

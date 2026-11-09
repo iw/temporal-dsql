@@ -25,10 +25,13 @@ type (
 		Persistence persistence.HealthSnapshot
 		// Queues is the queueing delay of each of history's task queues, by queue, over the
 		// newest Settings.Windows seconds.
-		Queues  map[string]Queue `json:",omitempty"`
-		RPC     RPC
-		Runtime Runtime
-		Memory  Memory
+		Queues map[string]Queue `json:",omitempty"`
+		// ShardWrites is how long history's shard operations waited for their shard's I/O
+		// semaphore over the newest Settings.Windows seconds. Only history records it.
+		ShardWrites ShardWrites
+		RPC         RPC
+		Runtime     Runtime
+		Memory      Memory
 		// Decisions holds each controller's latest decision, by controller. Traces record
 		// decisions as their own lines instead.
 		Decisions map[string]adaptive.Decision `json:"-"`
