@@ -255,6 +255,8 @@ history.persistenceDynamicRateLimitingParams:
 
 In `tools/adaptivesim`, at 0.9, the slow store's capacity probes from about 100 a second to about 200 within 35 s of the store recovering, 1,513 tasks are waiting when the load ends, and all but 9 of the 19,200 complete by the end of the drain. The task rate still follows each cut while the store is slow. After the recovery, the queued share cuts the rate three times during the load as the rescheduler's retries release the waiting tasks in batches. Through a surge, capacity probes to about half of its ceiling. Where the task rate's step limit lags a surge of tasks while the calls stay far below capacity's rate, the calls offered don't reach the share, and capacity stays at its static rate. [The simulator's README](../../tools/adaptivesim/README.md#what-the-runs-show) has the runs.
 
+On DSQL, the system appreciation's [follow-up runs](adaptive-appreciation.md#follow-up-runs-9-november) ran a slow store with 10 connections a host and a static rate of 300, so the cuts bound. Without either setting, capacity held 38–44 calls a second after the store recovered, and 991 workflows were still running after the drain. With the share and `CoupledRetry`, it probed back to 124–143 and every workflow completed. At those rates, though, most of the task rate's steps saw fewer than `MinSamples` calls, and its `no-data` hold kept its rate while capacity's rose. That paused the probes for 20–51 s, and with every controller enabled, held them for the rest of the run.
+
 **Retry the coupling's refusals sooner.** History's rescheduler waits 2 s ± 1 s after the scheduler refuses a task, which suits a busy scheduler. The coupled buckets hold 2 s of their rate, so after a coupled refusal that wait leaves them to fill and then release tasks in batches. On this branch, `CoupledRetry` sets how soon the rescheduler retries after the coupled buckets refuse a task below the static rate, jittered by half either way. The scheduler's other refusals, a full task channel or its own limit, keep the 2 s. Each retry the buckets refuse costs a `TrySubmit`, a throttle metric and a counted refusal, so it's off by default, at 0:
 
 ```yaml
@@ -264,7 +266,7 @@ history.taskSchedulerRateController:
       CoupledRetry: 200ms
 ```
 
-In `tools/adaptivesim`'s slow store, with `CoupledBindingShare` at 0.9, a `CoupledRetry` of 200ms leaves 16 tasks waiting when the load ends, against 1,513 with the share alone, and every task completes. In the other scenarios, the outcomes stay as without it.
+In `tools/adaptivesim`'s slow store, with `CoupledBindingShare` at 0.9, a `CoupledRetry` of 200ms leaves 16 tasks waiting when the load ends, against 1,513 with the share alone, and every task completes. In the other scenarios, the outcomes stay as without it. On DSQL, beside the share, the task scheduler's throttled submissions rose to about 320 a second across two hosts, from about 60 without either setting.
 
 **On DSQL, hear the plugin's facts.** The design for passing the DSQL plugin's throttling, contention and pool pressure to the controller, rather than inferring the store's health from latency, is in [Store facts for the capacity controller](adaptive-store-facts.md).
 
