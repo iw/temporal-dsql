@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/require"
@@ -429,4 +431,142 @@ func TestPoolTLSWarnings(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSkipCancelRequests(t *testing.T) {
+	dialled := errors.New("dialled")
+	for _, tc := range []struct {
+		name         string
+		afterConnect error
+	}{
+		{"connected", nil},
+		{"after_connect_failed", errors.New("after connect failure")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var dials, hooks int
+			cfg := &pgx.ConnConfig{}
+			cfg.DialFunc = func(context.Context, string, string) (net.Conn, error) {
+				dials++
+				return nil, dialled
+			}
+			cfg.AfterConnect = func(context.Context, *pgconn.PgConn) error {
+				hooks++
+				return tc.afterConnect
+			}
+			handler := metricstest.NewCaptureHandler()
+			capture := handler.StartCapture()
+			defer handler.StopCapture(capture)
+			skipCancelRequests(cfg, handler.Counter(cancelRequestsSkippedMetric))
+
+			// A connect may dial each of the endpoint's addresses.
+			for range 2 {
+				_, err := cfg.DialFunc(t.Context(), "tcp", "192.0.2.1:5432")
+				require.ErrorIs(t, err, dialled)
+			}
+			err := cfg.AfterConnect(t.Context(), nil)
+			require.Equal(t, 1, hooks)
+			_, dialErr := cfg.DialFunc(t.Context(), "tcp", "192.0.2.1:5432")
+			skipped := capture.Snapshot()[cancelRequestsSkippedMetric]
+			if tc.afterConnect != nil {
+				require.ErrorIs(t, err, tc.afterConnect)
+				require.ErrorIs(t, dialErr, dialled)
+				require.Equal(t, 3, dials)
+				require.Empty(t, skipped)
+				return
+			}
+			require.NoError(t, err)
+			require.ErrorIs(t, dialErr, errCancelRequestSkipped)
+			require.Equal(t, 2, dials)
+			require.Len(t, skipped, 1)
+			require.Equal(t, int64(1), skipped[0].Value)
+		})
+	}
+}
+
+func TestSkipCancelRequestsWithoutDialFunc(t *testing.T) {
+	cfg := &pgx.ConnConfig{}
+	skipCancelRequests(cfg, metrics.NoopMetricsHandler.Counter(cancelRequestsSkippedMetric))
+	require.Nil(t, cfg.DialFunc)
+	require.Nil(t, cfg.AfterConnect)
+}
+
+// cancelTestServer completes each startup and then never answers, so every statement runs
+// until its context ends. It counts the cancel requests that reach it.
+type cancelTestServer struct {
+	addr     string
+	startups atomic.Int32
+	cancels  atomic.Int32
+}
+
+func newCancelTestServer(t *testing.T) *cancelTestServer {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	s := &cancelTestServer{addr: listener.Addr().String()}
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		_ = listener.Close()
+		wg.Wait()
+	})
+	wg.Go(func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			wg.Go(func() {
+				defer func() { _ = conn.Close() }()
+				s.serve(conn)
+			})
+		}
+	})
+	return s
+}
+
+func (s *cancelTestServer) serve(conn net.Conn) {
+	backend := pgproto3.NewBackend(conn, conn)
+	msg, err := backend.ReceiveStartupMessage()
+	if err != nil {
+		return
+	}
+	switch msg.(type) {
+	case *pgproto3.CancelRequest:
+		s.cancels.Add(1)
+		return
+	case *pgproto3.StartupMessage:
+		s.startups.Add(1)
+	default:
+		return
+	}
+	backend.Send(&pgproto3.AuthenticationOk{})
+	backend.Send(&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 1}})
+	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	if backend.Flush() != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, conn)
+}
+
+func TestPoolSkipsCancelRequests(t *testing.T) {
+	server := newCancelTestServer(t)
+	p := &plugin{rateLimiter: poolTestLimiter(func(context.Context) error { return nil })}
+	c := testPoolConfig(t, p, &config.SQL{PoolSizeHint: "ephemeral", ConnectAttributes: map[string]string{"sslmode": "disable"}})
+	c.ConnConfig.DialFunc = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", server.addr)
+	}
+	handler := metricstest.NewCaptureHandler()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+	sqlDB, _, err := openPoolDB(c, handler)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sqlDB.Close()) }()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	_, err = sqlDB.ExecContext(ctx, "SELECT 1")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	await.RequireTrue(t, func() bool { return len(capture.Snapshot()[cancelRequestsSkippedMetric]) == 1 }, 5*time.Second, time.Millisecond)
+	require.Equal(t, int32(1), server.startups.Load())
+	require.Zero(t, server.cancels.Load())
 }
