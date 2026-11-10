@@ -81,6 +81,7 @@ seconds, with no AWS.
 | `partitions` | `partitions`, `pollers`, `shadow` | A workflow task queue whose add rate passes the 50 tasks/s the partition scaler's trials need, which the appreciation never reached: one host of 128 shards in the local rig starts 80 workflows/s for 360 s, each a single workflow task, through matching's 4 partitions. In `partitions`, each partition dispatches at most 15 tasks/s and 32 pollers wait; in `pollers`, the partitions have no limit and 14 pollers wait. The scaler is enabled, or in shadow in `shadow`, which is `partitions`' host |
 | `uneven-frontends` | `fair`, `shadow`, `all` | The appreciation's uneven frontends, on its rig: two history hosts of 16 shards, matching with 32 workflow and 32 activity pollers, and two frontends that take 80% and 20% of 5 workflows/s, each one activity and a 1 s timer. From 30 s to 270 s, a second namespace whose limit across the cluster is 60/s gets 72 requests/s through the first frontend and 18 through the second. `fair` enables fair share with the other controllers in shadow; `shadow` runs every controller in shadow, and `all` enables every one |
 | `ramp` | `off`, `shadow`, `cap`, `tsr`, `wrk`, `mem`, `par`, `fair`, `all` | The appreciation's ramp, on the same rig: 5, 10, 20 and 30 workflows/s, 75 s each, then 180 s to drain. `off` disables every controller and turns the signal plane off, as today's defaults have it; `shadow` runs every controller in shadow; `cap`, `tsr`, `wrk`, `mem`, `par` and `fair` each enable one, with the others in shadow; `all` enables every one |
+| `coupled-slow-store` | `cap-tsr`, `shadow`, `cap`, `all` | The appreciation's [follow-up runs'](../../docs/dsql/adaptive-appreciation.md#follow-up-runs-9-november) coupled slow store, on the same rig with 10 connections a history host and a static persistence rate of 300/s: 5 workflows/s for 390 s, then 180 s to drain, and the store's replies come 40 ms later from 90 s to 240 s. `cap-tsr` enables the capacity controller and the task scheduler rate, with the others in shadow; `shadow` runs every controller in shadow; `cap` enables the capacity controller alone, and `all` enables every one. The follow-up runs' coupled settings come from `-coupled-binding-share` and `-coupled-retry` |
 | `memory-pressure` | `mem`, `shadow` | The appreciation's 512 MiB `GOMEMLIMIT`, with history's cache at its 1000 MiB default and each shard's queues limited to 10,000 pending tasks, on one host in the cluster's region: 5 workflows/s and 20 tasks/s for 600 s, and from 120 s, 224 MiB more heap for 120 s while 60,000 tasks reload, with the memory budget enabled or in shadow |
 
 The short pool's variants are the rig's: `base` is the plugin's path before the gate, with
@@ -402,8 +403,8 @@ config is a static collection of the scenario's controller settings.
   probes from 100 a second to 197 by 3:04. The queued share then cuts it to about 130 a
   second three times by the load's end, as the rescheduler's retries release the waiting
   tasks in batches, and three times in the drain. 1,513 tasks are waiting when the load
-  ends, against 7,224 with the share at 0, and all but 9 of the 19,200 complete by the end
-  of the drain; their p99 is 2m10s, against 3m2s. With seeds 1 to 3, 975–1,513 tasks are
+  ends, against 7,224 with the share at 0, and all but 20 of the 19,200 complete by the end
+  of the drain; their p99 is 2m14s, against 3m0s. With seeds 1 to 3, 975–1,513 tasks are
   waiting when the load ends, where 880–1,660 were before the task rate's deadband. In
   `surge`'s `cap-tsr`, capacity probes to 148 a second, against 110 with the share at 0,
   below its ceiling of 300, and the scheduler refuses 1,279 submissions, against 2,219.
@@ -422,6 +423,24 @@ config is a static collection of the scenario's controller settings.
   `mixed-surge`, the outcomes stay as without it, and the scheduler counts more refusals,
   3,597 against 2,718 in `surge`'s `tsr`, since each retry the coupled limit refuses
   counts again.
+- **At low rates, the task scheduler rate moves on few calls.** `coupled-slow-store` models
+  the coupled slow store of the appreciation's follow-up runs. Its history makes about a
+  third of the calls a workflow made on DSQL, so before the store slows, each step of a
+  host's task rate sees about 50 calls, under its `MinSamples` of 100. It measures its first
+  mix only at 3:14 and 3:28, while the store is slow. With
+  `-coupled-binding-share 0.9 -coupled-retry 200ms`, both task rates then follow capacity's
+  cut to their floor of 6 tasks a second. After the store recovers at 4:00, 145 and 146 of
+  the hosts' 150 steps each to the load's end see fewer than 100 calls. Each moves the mix
+  by its calls' share of `MinSamples`, with the reason `partial`, or holds it within the
+  deadband, so the task rates follow capacity's probes, up to 26–27 tasks a second as
+  capacity reaches 55–56 calls a second. Every workflow completes, with a p99 of 3m26s and
+  3m28s on the two hosts, and the last task attempt is 22 s into the drain. When those
+  steps held the rate, both task rates stayed at their floor and capacity no higher than
+  32–36 calls a second until the load ended, and 1,329 of the 1,950 workflows completed.
+  `all` runs as `cap-tsr` does. Without either setting, every workflow completes too, with
+  a p99 of 5m16s and 4m37s, where 1,394 completed before. In shadow the p99 is 2m28s: as on
+  DSQL, no enabled config clears the backlog as quickly. Capacity's own steps here often see
+  fewer than its `MinSamples`, 50, calls, and hold as `no-data`.
 - **A busy queue's worker count grows, then shrinks.** In `busy-queue`, the transfer
   queue's count grows from 8 to 16 by 11 s, which serves the 60 tasks a second: the tasks'
   p99 was 1.8 s, against 55 s with the count in shadow. At 16 workers its tasks wait

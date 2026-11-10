@@ -17,7 +17,7 @@ type (
 		// Headroom is the share of the persistence rate the scheduler plans to use, so the
 		// persistence limit doesn't bind at the margin.
 		Headroom float64
-		// MinSamples is the fewest persistence calls a step needs to measure the mix.
+		// MinSamples is the persistence calls a step needs to measure the mix in full.
 		MinSamples int
 		// Deadband holds the mix the rate was set from while the measured mix is within this
 		// share of it. The rate still follows the persistence rate.
@@ -55,10 +55,17 @@ type (
 const (
 	// ReasonCoupled sets the rate from the persistence rate and the measured mix.
 	ReasonCoupled Reason = "coupled"
+	// ReasonPartial sets the rate from the persistence rate and a mix moved part of the way
+	// to the measured one: the step saw fewer than MinSamples calls.
+	ReasonPartial Reason = "partial"
 	// ReasonHeld sets the rate from the persistence rate and the mix it was set from before,
-	// which the measured mix is within Deadband of.
+	// which the step's measurement is within Deadband of.
 	ReasonHeld Reason = "held"
-	// ReasonNoData holds the rate: the step saw too few calls or no task attempts.
+	// ReasonLastMix sets the rate from the persistence rate and the mix it was set from
+	// before: the step saw calls, but no task attempts to measure the mix.
+	ReasonLastMix Reason = "last-mix"
+	// ReasonNoData holds the rate: there's no persistence rate, the step saw no calls, or no
+	// step with MinSamples calls has measured a mix since the controller started or was reset.
 	ReasonNoData Reason = "no-data"
 )
 
@@ -85,15 +92,49 @@ func (c *Controller) Reset(rate float64) {
 // capacity controller's cuts and probes among them.
 func (c *Controller) Step(p Params, s Signals) (float64, Reason) {
 	reason := ReasonNoData
-	if s.Calls >= p.MinSamples && s.Attempts > 0 && s.PersistenceRate > 0 {
-		reason = ReasonCoupled
-		if measured := float64(s.Attempts) / float64(s.Calls); c.mix > 0 && math.Abs(measured-c.mix) < p.Deadband*c.mix {
-			reason = ReasonHeld
-		} else {
-			c.mix = measured
-		}
+	if s.PersistenceRate > 0 {
+		reason = c.measure(p, s)
+	}
+	if reason != ReasonNoData {
 		c.rate = s.PersistenceRate * p.Headroom * c.mix
 	}
 	c.rate = min(max(c.rate, p.Min), p.Max)
 	return c.rate, reason
+}
+
+// measure updates the mix from a step's attempts and calls. While the scheduler's limit
+// binds, each measurement moves the rate toward the calls that make up Headroom of the
+// persistence rate, where the capacity controller sees its limit bind. At a low rate few
+// calls reach persistence, so a step with fewer than MinSamples calls moves the mix by its
+// calls' share of MinSamples: far enough that the rate keeps moving, and little enough
+// that few calls' noise mostly stays within the deadband. The first mix needs MinSamples.
+//
+// A step without calls holds the rate. The capacity controller steps on calls, so without
+// them its decision ages past DecisionHold and the persistence rate falls back to the
+// static rate, which an idle host's scheduler would otherwise climb toward.
+func (c *Controller) measure(p Params, s Signals) Reason {
+	if s.Calls <= 0 || c.mix == 0 && (s.Attempts <= 0 || s.Calls < p.MinSamples) {
+		return ReasonNoData
+	}
+	if s.Attempts <= 0 {
+		return ReasonLastMix
+	}
+	measured, weight := float64(s.Attempts)/float64(s.Calls), 1.0
+	if s.Calls < p.MinSamples {
+		weight = float64(s.Calls) / float64(p.MinSamples)
+	}
+	next := measured
+	if c.mix > 0 {
+		if weight < 1 {
+			next = c.mix + weight*(measured-c.mix)
+		}
+		if math.Abs(next-c.mix) < p.Deadband*c.mix {
+			return ReasonHeld
+		}
+	}
+	c.mix = next
+	if weight < 1 {
+		return ReasonPartial
+	}
+	return ReasonCoupled
 }
