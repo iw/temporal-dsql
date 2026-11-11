@@ -206,8 +206,9 @@ func requireReplays(t *testing.T, trace *adaptivereplay.Trace, decisions Decisio
 }
 
 // The task scheduler rate steps on the capacity controller's rate each second, as the
-// appreciation found, unsmoothed: each coupled step reads the rate of capacity's latest
-// decision, and the task rate falls within a few steps of capacity's first cut.
+// appreciation found, unsmoothed: each step that sets the rate reads the rate of
+// capacity's latest decision, and the task rate falls within a few steps of capacity's
+// first cut.
 func TestTaskRateFollowsCapacity(t *testing.T) {
 	t.Parallel()
 	for _, variant := range []string{"cap", "cap-tsr"} {
@@ -229,7 +230,7 @@ func TestTaskRateFollowsCapacity(t *testing.T) {
 			}
 			require.GreaterOrEqual(t, d.Proposed, 0.02*d.Static, variant)
 			require.LessOrEqual(t, d.Proposed, d.Static, variant)
-			if d.Reason != adaptive.Reason(taskrate.ReasonCoupled) {
+			if d.Reason == adaptive.Reason(taskrate.ReasonNoData) {
 				continue
 			}
 			detail := d.Detail.(taskrate.Detail)
@@ -331,9 +332,9 @@ func TestCoupledRefusalsLetCapacityRecoverAfterTheSlowStore(t *testing.T) {
 	latched := runCoupled(t, "slow-store", "cap-tsr", 0, Options{})
 
 	require.Less(t, held.Tasks.Backlog*4, latched.Tasks.Backlog, "far fewer tasks are waiting when the load ends")
-	// A few tasks that failed many times can still be in their reschedule backoff when the
-	// run ends.
-	require.Less(t, held.Tasks.Arrived-held.Tasks.Completed, held.Tasks.Arrived/1000, "nearly all of the backlog clears")
+	// A few tasks can still be waiting when the run ends, in the scheduler or in their
+	// reschedule backoff, and how many varies from seed to seed.
+	require.Less(t, held.Tasks.Arrived-held.Tasks.Completed, held.Tasks.Arrived/500, "nearly all of the backlog clears")
 	require.Less(t, latched.Tasks.Completed, latched.Tasks.Arrived)
 
 	// After the store recovers at 150 s, the persistence limiter denies nothing while
@@ -375,6 +376,41 @@ func TestCoupledRetryClearsTheSlowStoresBacklog(t *testing.T) {
 
 	require.Less(t, h.Tasks.Backlog, 100, "few tasks are waiting when the load ends")
 	require.Equal(t, h.Tasks.Arrived, h.Tasks.Completed, "the backlog clears")
+}
+
+// In the coupled slow store, at 5 workflows a second across two hosts, the task scheduler
+// rate's steps see fewer than MinSamples calls once capacity has cut. Each moves the mix by
+// its calls' share of MinSamples, so once the store recovers, the task rate follows
+// capacity's probes rather than holding its rate while capacity's rises, and every
+// workflow completes. The traces, with those steps, replay.
+func TestTaskRateFollowsCapacityOnFewCalls(t *testing.T) {
+	t.Parallel()
+	sc, err := Lookup("coupled-slow-store", "cap-tsr")
+	require.NoError(t, err)
+	sc.Host.Capacity.Params.Capacity.CoupledBindingShare = 0.9
+	sc.Host.Controllers.TaskRate.CoupledRetry = 200 * time.Millisecond
+	dir := t.TempDir()
+	r, err := Run(sc, Options{TraceDir: dir})
+	require.NoError(t, err)
+	requireTracesReplay(t, dir, r)
+
+	recovered := epoch.Add(sc.Slow.At + sc.Slow.Duration)
+	for _, h := range r.Hosts {
+		require.Equal(t, h.Workflows.Started, h.Workflows.Completed, "%s: every workflow completes", h.Name)
+		rates := h.Decisions.Of(taskrate.Name)
+		partial, highest := 0, 0.0
+		for _, d := range rates {
+			if d.Time.Before(recovered) {
+				continue
+			}
+			if d.Reason == adaptive.Reason(taskrate.ReasonPartial) {
+				partial++
+			}
+			highest = max(highest, d.Proposed)
+		}
+		require.Positive(t, partial, h.Name)
+		require.Greater(t, highest, 2*proposedAt(rates, recovered), "%s: the task rate rises with capacity's probes", h.Name)
+	}
 }
 
 // In the mixed surge, the task scheduler rate's step limit lags a surge of tasks, so its

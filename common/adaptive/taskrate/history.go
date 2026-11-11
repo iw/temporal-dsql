@@ -30,7 +30,9 @@ type (
 		MinMultiplier  float64
 		MaxStepFrac    float64
 		Headroom       float64
-		MinSamples     int
+		// MinSamples is the calls a step needs to measure the mix in full. A step with fewer
+		// moves the mix by its calls' share of MinSamples, once a step has measured one.
+		MinSamples int
 		// Deadband keeps the mix of task attempts and calls that the rate was set from
 		// while the measured mix stays within this share of it.
 		Deadband float64
@@ -106,7 +108,8 @@ var Config = dynamicconfig.NewGlobalTypedSetting(
 	`history.taskSchedulerRateController sets history's task scheduler rate from the persistence rate:
 the capacity controller's while it's enabled, otherwise the static limit, times Headroom, divided by
 the persistence calls each task attempt makes. It keeps the mix it was set from while the measured
-mix stays within Deadband of it. The rate stays between MinMultiplier of the static persistence rate
+mix stays within Deadband of it, and a step with fewer than MinSamples calls moves the mix by their
+share of MinSamples. The rate stays between MinMultiplier of the static persistence rate
 and the scheduler's fallback, that rate. It acts only while
 history.taskSchedulerEnableRateLimiter is set and its shadow mode is off. Mode is disabled, shadow or
 enabled. CoupledRetry, when set, is how soon history's rescheduler retries after the controller's

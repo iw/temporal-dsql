@@ -163,6 +163,19 @@ var scenarios = []scenarioDef{
 		build:    ramp,
 	},
 	{
+		name: "coupled-slow-store",
+		about: "the appreciation's rig with 10 connections a history host and a static persistence rate of 300: " +
+			"5 workflows/s for 390 s, the store's replies 40 ms later from 90 s to 240 s, as the follow-up runs had it",
+		variants: []variant{
+			{name: "cap-tsr", about: "the capacity controller and the task scheduler rate enabled, the others in shadow",
+				capacity: adaptive.ModeNameEnabled, taskRate: adaptive.ModeNameEnabled},
+			{name: "shadow", about: "every controller in shadow"},
+			{name: "cap", about: "the capacity controller enabled, the others in shadow", capacity: adaptive.ModeNameEnabled},
+			appreciationConfigs[len(appreciationConfigs)-1],
+		},
+		build: coupledSlowStore,
+	},
+	{
 		name:     "fleet-start",
 		about:    "4 hosts of 500 connections start within 2 s on shared pacing, for 3 h: poolsim's pgxpool-fleet-start",
 		variants: []variant{{name: "default"}},
@@ -773,5 +786,18 @@ func ramp(v variant) Scenario {
 	}
 	sc := appreciationRig("ramp", v, Load{Workflows: phases})
 	sc.Drain = 180 * time.Second
+	return sc
+}
+
+// coupledSlowStore is the follow-up runs' coupled slow store on the appreciation's rig.
+// With 10 connections a history host and a static persistence rate of 300, capacity's cuts
+// bind, and at 5 workflows a second the task scheduler rate's steps see few calls.
+func coupledSlowStore(v variant) Scenario {
+	sc := appreciationRig("coupled-slow-store", v, Load{Workflows: []Phase{{Duration: 390 * time.Second, Rate: 2.5}}})
+	sc.Duration = 390 * time.Second
+	sc.Drain = 180 * time.Second
+	sc.Host.Pool = servicePool(10)
+	sc.Host.Capacity.Static = 300
+	sc.Slow = Slow{At: 90 * time.Second, Duration: 150 * time.Second, Delay: 40 * time.Millisecond}
 	return sc
 }
