@@ -200,7 +200,7 @@ func newTemporal(t *testing.T, params *temporalParams) *temporalImpl {
 	impl.replicationStreamRecorder.SetOutputFile(outputFile)
 
 	// Global defaults: applied without cleanup so they persist across cluster reuse.
-	for k, v := range defaultDynamicConfigOverrides {
+	for k, v := range clusterDynamicConfigOverrides(params.Config.Persistence) {
 		impl.overrideDynamicConfigForClusterLifetime(k, v)
 	}
 

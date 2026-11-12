@@ -41,6 +41,8 @@ func GetTestClusterOption(storeType, driver string) *TestBaseOptions {
 			return GetPostgreSQLTestClusterOption(driver, nil)
 		case sqlite.PluginName:
 			return GetSQLiteMemoryTestClusterOption()
+		case dsqlPluginName:
+			return GetDSQLTestClusterOption()
 		default:
 			panic(fmt.Sprintf("unknown sql driver: %v", driver))
 		}
