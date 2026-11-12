@@ -21,6 +21,7 @@
 //! AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus
 //! ```
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -116,7 +117,9 @@ async fn main() -> ExitCode {
     }
     match live(corpus).await {
         Ok(()) => {
-            println!("--- passed in {}s", started.elapsed().as_secs());
+            // The functional tests' failures are in their summary, and don't fail the run.
+            let ended = if corpus { "finished" } else { "passed" };
+            println!("--- {ended} in {}s", started.elapsed().as_secs());
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -555,12 +558,17 @@ struct Tally {
     failed: usize,
     skipped: usize,
     failures: Vec<String>,
+    /// Top-level tests that started and have no result: the test binary stopped before
+    /// they ended, or their result line ran into a server's log output, which test2json
+    /// then reads as output.
+    unfinished: BTreeSet<String>,
     /// Set when the test binary itself failed, such as on its timeout.
     binary_failed: bool,
 }
 
 impl Tally {
-    /// Counts an event that ends a top-level test, and returns a line about it.
+    /// Counts an event that starts or ends a top-level test, and returns a line about
+    /// each one that ends.
     fn add(&mut self, event: &str) -> Option<String> {
         let action = json_field(event, "Action")?;
         let Some(test) = json_field(event, "Test") else {
@@ -571,6 +579,10 @@ impl Tally {
             return None;
         }
         match action {
+            "run" => {
+                self.unfinished.insert(test.to_owned());
+                return None;
+            }
             "pass" => self.passed += 1,
             "fail" => {
                 self.failed += 1;
@@ -579,13 +591,18 @@ impl Tally {
             "skip" => self.skipped += 1,
             _ => return None,
         }
+        self.unfinished.remove(test);
         let elapsed = json_field(event, "Elapsed").unwrap_or("?");
         Some(format!("{action} {test} ({elapsed}s)"))
     }
 
     fn summary(&self, status: ExitStatus) -> String {
+        let unfinished = match self.unfinished.len() {
+            0 => String::new(),
+            n => format!(", {n} without a result"),
+        };
         let mut summary = format!(
-            "--- functional tests: {} passed, {} failed, {} skipped; the test binary exited with {status}",
+            "--- functional tests: {} passed, {} failed, {} skipped{unfinished}; the test binary exited with {status}",
             self.passed, self.failed, self.skipped
         );
         if self.binary_failed {
@@ -593,6 +610,10 @@ impl Tally {
         }
         for test in &self.failures {
             summary.push_str("\nfailed: ");
+            summary.push_str(test);
+        }
+        for test in &self.unfinished {
+            summary.push_str("\nno result: ");
             summary.push_str(test);
         }
         summary.push('\n');
@@ -833,6 +854,7 @@ mod tests {
         let event = |action: &str, test: &str| {
             format!(r#"{{"Action":"{action}","Package":"p","Test":"{test}","Elapsed":2}}"#)
         };
+        assert_eq!(tally.add(&event("run", "TestA")), None);
         assert_eq!(
             tally.add(&event("pass", "TestA")),
             Some("pass TestA (2s)".to_owned())
@@ -856,9 +878,11 @@ mod tests {
         assert!(tally.binary_failed);
 
         let summary = tally.summary(ExitStatus::from_raw(256));
-        assert!(summary.starts_with("--- functional tests: 1 passed, 1 failed, 1 skipped"));
+        assert!(summary.starts_with(
+            "--- functional tests: 1 passed, 1 failed, 1 skipped, 1 without a result;"
+        ));
         assert!(summary.contains("reporting a failure of its own"));
-        assert!(summary.ends_with("\nfailed: TestB\n"));
+        assert!(summary.ends_with("\nfailed: TestB\nno result: TestD\n"));
     }
 
     #[test]

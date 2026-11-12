@@ -188,7 +188,9 @@ The test clusters lease `public` and the eight schemas, with one shared and thre
 | `results.jsonl` | The tests' events from `go tool test2json` |
 | `clusters.jsonl` | A line for each test cluster created |
 | `stderr.log` | The test process's standard error |
-| `summary.txt` | The top-level tallies, and the tests that failed |
+| `summary.txt` | The top-level tallies, the tests that failed, and the tests without a result |
+
+A run from a developer's machine takes about two and a half hours: half an hour to set up the schemas, then two hours of tests, which end with the versioning suites. A test that waits on a channel without a deadline can hold the run until the 8-hour timeout. To end the run sooner, send SIGQUIT to the `functional.test` process. It exits with a goroutine dump in `stderr.log`, and the run still writes its summary and deletes the cluster. A test that's stopped this way has no result. Neither does a test whose result line ran into a server's log output, which test2json reads as output. The summary lists both kinds.
 
 The run covers `./tests`. The clusters in `tests/xdc` replicate namespaces between them, so their visibility rows would meet in the one visibility schema, and `tests/ndc` hasn't been run on DSQL yet.
 
