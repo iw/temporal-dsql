@@ -52,10 +52,11 @@ const (
 	dsqlVisibilityStoreName = "test-visibility"
 
 	// A test cluster has about ten pools, and each opens all its connections at start.
-	dsqlTestMaxConns = 5
-	// Test clusters start often. Three test processes at this rate stay under DSQL's
-	// 100 connections a second.
-	dsqlTestConnectionRate = "30"
+	// A pool's start-up ping waits behind the connections queued before it, so nine
+	// clusters starting together must connect within the ping's 30 seconds.
+	dsqlTestMaxConns = 10
+	// Two test processes at this rate stay under DSQL's 100 connections a second.
+	dsqlTestConnectionRate = "50"
 	// A history batch is one column value, which DSQL caps at 1 MiB.
 	dsqlTransactionSizeLimit = 1 << 20
 

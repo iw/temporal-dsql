@@ -477,10 +477,11 @@ async fn functional_tests(run: &Run, masker: &Masker) -> Result<()> {
         .env("DSQL_TEST_ENDPOINT", endpoint(run))
         .env("DSQL_TEST_SCHEMAS", schemas.join(","))
         .env("AWS_REGION", &run.region)
-        // A pooled test cluster keeps its schema until the tests end, so the pools stay
-        // small enough to leave schemas for the clusters that tests create and remove.
-        .env("TEMPORAL_TEST_SHARED_CLUSTERS", "1")
-        .env("TEMPORAL_TEST_DEDICATED_CLUSTERS", "3")
+        // A pooled test cluster keeps its schema until the tests end. Three shared and two
+        // dedicated clusters, with a fresh cluster in each dedicated slot, hold at most
+        // seven of the nine schemas, leaving two for the suites that share one cluster.
+        .env("TEMPORAL_TEST_SHARED_CLUSTERS", "3")
+        .env("TEMPORAL_TEST_DEDICATED_CLUSTERS", "2")
         .env("TEMPORAL_TEST_LOG_LEVEL", "warn")
         .env(
             "TEMPORAL_TEST_CLUSTER_EVENTS_FILE",

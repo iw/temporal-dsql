@@ -158,9 +158,9 @@ The other drivers give each test cluster a database of its own. DSQL has one dat
 | `DSQL_TEST_USER` | The database role; `admin` by default |
 | `DSQL_TEST_REGION` | The cluster's region, when the endpoint doesn't name it |
 
-Test clusters in the shared and dedicated pools keep their schemas until the test process ends. A test that needs a fresh cluster leases another schema while it holds a dedicated slot, and so does each suite that shares one cluster between its tests. A test waits for a free schema as long as it takes, and logs a warning each minute. So have more schemas than `TEMPORAL_TEST_SHARED_CLUSTERS` plus twice `TEMPORAL_TEST_DEDICATED_CLUSTERS`, the most that the pooled and fresh clusters can hold. With nine schemas, 1 and 3 leave two for the suites. Run one test package at a time, as `make functional-test` does.
+Test clusters in the shared and dedicated pools keep their schemas until the test process ends. A test that needs a fresh cluster leases another schema while it holds a dedicated slot, and so does each suite that shares one cluster between its tests. A test waits for a free schema as long as it takes, and logs a warning each minute. So have more schemas than `TEMPORAL_TEST_SHARED_CLUSTERS` plus twice `TEMPORAL_TEST_DEDICATED_CLUSTERS`, the most that the pooled and fresh clusters can hold. With nine schemas, 3 and 2 leave two for the suites. Run one test package at a time, as `make functional-test` does.
 
-The test clusters' servers get the limits `config/dynamicconfig/development-dsql.yaml` sets for DSQL: a `system.transactionSizeLimit` of 1 MiB and a `limit.blobSize.error` of 1,000,000 bytes. Their pools hold five connections each, and open at most 30 a second.
+The test clusters' servers get the limits `config/dynamicconfig/development-dsql.yaml` sets for DSQL: a `system.transactionSizeLimit` of 1 MiB and a `limit.blobSize.error` of 1,000,000 bytes. Their pools hold ten connections each, and the test process opens at most 50 connections a second.
 
 To set up the schemas by hand, set them up one at a time, since DSQL can fail a statement with OC001 while another session builds an index:
 
@@ -181,7 +181,7 @@ go run ./cmd/tools/dsql --endpoint "$DSQL_TEST_ENDPOINT" \
 AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus
 ```
 
-The test clusters lease `public` and the eight schemas, with one shared and three dedicated pooled clusters, and their servers log at warning level and above. The run prints each top-level test's result as it ends, and writes these files, masked, to `.dagger/live/target/corpus/<run>`:
+The test clusters lease `public` and the eight schemas, with three shared and two dedicated pooled clusters, and their servers log at warning level and above. The run prints each top-level test's result as it ends, and writes these files, masked, to `.dagger/live/target/corpus/<run>`:
 
 | File | Contents |
 |---|---|
