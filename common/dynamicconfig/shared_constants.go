@@ -151,8 +151,8 @@ type CapacityControllerParams struct {
 	// binding while the calls offered reach this share of the calls the scheduler lets
 	// through: its Headroom times the controller's rate. Once the scheduler's limit binds,
 	// this one denies nothing, so without them the controller holds a cut as idle while
-	// tasks wait. At 0.9 they count while the calls come within 10% of what the scheduler
-	// lets through. 0 turns it off, as by default.
+	// tasks wait. At 0.9, its default, they count while the calls come within 10% of what
+	// the scheduler lets through. 0 turns it off.
 	CoupledBindingShare float64
 }
 
@@ -166,27 +166,28 @@ var DefaultDynamicRateLimitingParams = DynamicRateLimitingParams{
 	RateMultiMin:         0.8,
 	RateMultiMax:         1.0,
 	Capacity: CapacityControllerParams{
-		Mode:            "disabled",
-		RolloutPercent:  100,
-		MinMultiplier:   0.05,
-		MaxMultiplier:   3.0,
-		Tolerance:       2.0,
-		LatencyCeiling:  750 * time.Millisecond,
-		LatencyFloor:    2 * time.Millisecond,
-		MaxErrorRatio:   0.01,
-		MaxQueuedRatio:  0.25,
-		QueuedGrace:     30 * time.Second,
-		MaxDecrease:     0.5,
-		DeliveryBackoff: 0.9,
-		Cooldown:        6 * time.Second,
-		DeliveryWindow:  30 * time.Second,
-		IncreaseFrac:    0.05,
-		ProbeRamp:       30 * time.Second,
-		BaselineWindow:  10 * time.Minute,
-		BaselineAlert:   2,
-		StepInterval:    time.Second,
-		SignalWindows:   3,
-		MinSamples:      50,
+		Mode:                "disabled",
+		RolloutPercent:      100,
+		MinMultiplier:       0.05,
+		MaxMultiplier:       3.0,
+		Tolerance:           2.0,
+		LatencyCeiling:      750 * time.Millisecond,
+		LatencyFloor:        2 * time.Millisecond,
+		MaxErrorRatio:       0.01,
+		MaxQueuedRatio:      0.25,
+		QueuedGrace:         30 * time.Second,
+		MaxDecrease:         0.5,
+		DeliveryBackoff:     0.9,
+		Cooldown:            6 * time.Second,
+		DeliveryWindow:      30 * time.Second,
+		IncreaseFrac:        0.05,
+		ProbeRamp:           30 * time.Second,
+		BaselineWindow:      10 * time.Minute,
+		BaselineAlert:       2,
+		StepInterval:        time.Second,
+		SignalWindows:       3,
+		MinSamples:          50,
+		CoupledBindingShare: 0.9,
 	},
 }
 

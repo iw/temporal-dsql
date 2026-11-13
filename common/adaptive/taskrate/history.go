@@ -41,7 +41,8 @@ type (
 		DecisionHold time.Duration
 		// CoupledRetry, when set, is how soon history's rescheduler retries after the
 		// controller's buckets refuse a task below the static rate, jittered by half either
-		// way, in place of its 2s wait after any refusal. At 0, its default, it waits 2s.
+		// way, in place of its 2s wait after any refusal. It's 200ms by default; at 0 it
+		// waits 2s.
 		CoupledRetry time.Duration
 	}
 
@@ -99,6 +100,7 @@ var DefaultSettings = Settings{
 	MinSamples:     100,
 	Deadband:       0.1,
 	DecisionHold:   10 * time.Second,
+	CoupledRetry:   200 * time.Millisecond,
 }
 
 // Config is the controller's dynamic config setting.
@@ -112,8 +114,9 @@ mix stays within Deadband of it, and a step with fewer than MinSamples calls mov
 share of MinSamples. The rate stays between MinMultiplier of the static persistence rate
 and the scheduler's fallback, that rate. It acts only while
 history.taskSchedulerEnableRateLimiter is set and its shadow mode is off. Mode is disabled, shadow or
-enabled. CoupledRetry, when set, is how soon history's rescheduler retries after the controller's
-limit refuses a task below the static rate, in place of its 2s wait after any refusal.`,
+enabled. CoupledRetry, 200ms by default, is how soon history's rescheduler retries after the
+controller's limit refuses a task below the static rate, in place of its 2s wait after any
+refusal; 0 keeps the 2s wait.`,
 )
 
 // NewSchedulerLimiter couples limiter, history's task scheduler rate limiter, to
