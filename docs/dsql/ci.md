@@ -336,7 +336,7 @@ AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus --instanc
 
 The type must be a Graviton2, 3 or 4 type, and the user's policy allows the c8g and c7g families. Before the run creates anything, it builds `functional.test` and `test2json` for linux/arm64 with `CGO_ENABLED=0`, `-trimpath` and `-ldflags=-s -w`. It sets `GOARM64` to the processor's architecture: `v9.0` for Graviton4's 8g families, `v8.4` for Graviton3's 7g families and `v8.2` for Graviton2's 6g families.
 
-**Shards.** Upstream's CI runs the functional tests in five shards, each on a machine of its own with four CPUs. A run on an instance runs four side by side, and `--shards <count>` sets another number, up to eight. Each shard is a test process that runs only the tests whose names hash to it, as upstream's `TEST_TOTAL_SHARDS` and `TEST_SHARD_INDEX` select them. Its `GOMAXPROCS` is its share of the instance's vCPUs, which is also how many tests it runs at once unless `--parallel` says otherwise. It has two shared and two dedicated pooled test clusters. Of the nine schemas, they leave four for suites that share one cluster, and one that a dedicated slot's fresh cluster can always lease.
+**Shards.** Upstream's CI runs the functional tests in five shards, each on a machine of its own with four CPUs. A run on an instance runs four side by side, and `--shards <count>` sets another number, up to eight. Each shard is a test process that runs only the tests whose names hash to it, as upstream's `TEST_TOTAL_SHARDS` and `TEST_SHARD_INDEX` select them. A test inside one that runs in a shard, such as a case that creates a test env of its own within a suite method that created one, runs in that shard too. Its `GOMAXPROCS` is its share of the instance's vCPUs, which is also how many tests it runs at once unless `--parallel` says otherwise. It has two shared and two dedicated pooled test clusters. Of the nine schemas, they leave four for suites that share one cluster, and one that a dedicated slot's fresh cluster can always lease.
 
 Each shard has a DSQL cluster of its own: the run creates one for each shard, sets them up side by side and runs the live tests on the first. So each test process is its cluster's only client, as the test clusters' connection rates assume. And a test process that stops, such as while it dumps every goroutine's stack, holds up only its own shard's tests.
 
@@ -360,6 +360,8 @@ With `--sqlite`, the run creates no cluster or table and runs no live tests, and
 ```bash
 AWS_PROFILE=temporal-dsql-ci cargo run --locked -- --corpus --instance c8g.4xlarge --sqlite
 ```
+
+On a c8g.4xlarge, a run on DSQL took about 34 minutes: about 22 to create the four clusters and set up their schemas, and about 10 for the shards' tests. A run with `--sqlite` took about 10 minutes in all.
 
 The instance has no SSH key and no inbound rules, and gets its credentials from its role. Each test process has a 90-minute timeout. The instance shuts down after six hours, whatever happens, and each run with `--instance` ends CI instances that are more than twelve hours old.
 
