@@ -21,11 +21,16 @@ var dsqlDynamicConfigOverrides = map[dynamicconfig.Key]any{
 // clusterDynamicConfigOverrides returns the global overrides for a cluster on the given
 // persistence: the defaults, plus DSQL's limits when the cluster runs on DSQL.
 func clusterDynamicConfigOverrides(cfg config.Persistence) map[dynamicconfig.Key]any {
-	store, ok := cfg.DataStores[cfg.DefaultStore]
-	if !ok || store.SQL == nil || store.SQL.PluginName != dsqlPluginName {
+	if !runsOnDSQL(cfg) {
 		return defaultDynamicConfigOverrides
 	}
 	overrides := maps.Clone(defaultDynamicConfigOverrides)
 	maps.Copy(overrides, dsqlDynamicConfigOverrides)
 	return overrides
+}
+
+// runsOnDSQL reports whether a cluster's persistence is DSQL.
+func runsOnDSQL(cfg config.Persistence) bool {
+	store, ok := cfg.DataStores[cfg.DefaultStore]
+	return ok && store.SQL != nil && store.SQL.PluginName == dsqlPluginName
 }

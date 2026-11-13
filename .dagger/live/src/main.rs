@@ -549,7 +549,8 @@ async fn go_steps(
 
 /// Runs Temporal's functional tests on this machine against the run's cluster. Their
 /// output, masked, goes to target/corpus/<run>: results.jsonl from test2json,
-/// clusters.jsonl with each test cluster created, and summary.txt.
+/// clusters.jsonl with each test cluster created, pools.jsonl with the test clusters'
+/// connection pool metrics, and summary.txt.
 async fn functional_tests(run: &Run, masker: &Masker) -> Result<()> {
     let repo = std::fs::canonicalize(REPO)?;
     let out = corpus_dir(&run.id);
@@ -580,11 +581,10 @@ async fn functional_tests(run: &Run, masker: &Masker) -> Result<()> {
             command.env_remove(name);
         }
     }
-    let clusters = out.join("clusters.jsonl");
     let mut tests = command
         .args(&run.test_flags)
         .current_dir(repo.join("tests"))
-        .envs(test_env(run, &clusters.to_string_lossy()))
+        .envs(test_env(run, &out.to_string_lossy()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -632,9 +632,9 @@ async fn functional_tests(run: &Run, masker: &Masker) -> Result<()> {
     summarize(&out, &tally, status)
 }
 
-/// The functional tests' environment, wherever they run, with the file in which they list
-/// each test cluster they create.
-fn test_env(run: &Run, clusters: &str) -> Vec<(&'static str, String)> {
+/// The functional tests' environment, wherever they run, with the files in out to which
+/// they write each test cluster they create and their pools' metrics.
+fn test_env(run: &Run, out: &str) -> Vec<(&'static str, String)> {
     let schemas: Vec<String> = std::iter::once("public".to_owned())
         .chain(corpus_schemas())
         .collect();
@@ -648,7 +648,11 @@ fn test_env(run: &Run, clusters: &str) -> Vec<(&'static str, String)> {
         ("TEMPORAL_TEST_SHARED_CLUSTERS", "3".to_owned()),
         ("TEMPORAL_TEST_DEDICATED_CLUSTERS", "2".to_owned()),
         ("TEMPORAL_TEST_LOG_LEVEL", "warn".to_owned()),
-        ("TEMPORAL_TEST_CLUSTER_EVENTS_FILE", clusters.to_owned()),
+        (
+            "TEMPORAL_TEST_CLUSTER_EVENTS_FILE",
+            format!("{out}/clusters.jsonl"),
+        ),
+        ("DSQL_TEST_POOL_METRICS_FILE", format!("{out}/pools.jsonl")),
     ]
 }
 

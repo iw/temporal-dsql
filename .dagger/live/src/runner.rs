@@ -45,6 +45,7 @@ const BINARIES: &[&str] = &["functional.test", "test2json"];
 const OUTPUT: &[(&str, bool)] = &[
     ("results.jsonl", true),
     ("clusters.jsonl", true),
+    ("pools.jsonl", true),
     ("stderr.log", true),
     ("cpu.pprof", false),
 ];
@@ -327,7 +328,7 @@ fn launch_tags(kind: ResourceType, run: &Run) -> TagSpecification {
 
 /// A runner instance's boot script for a run.
 fn script(run: &Run) -> String {
-    let exports: String = test_env(run, "/var/tmp/ci/out/clusters.jsonl")
+    let exports: String = test_env(run, "/var/tmp/ci/out")
         .into_iter()
         .map(|(name, value)| format!("export {name}='{value}'\n"))
         .collect();
@@ -588,6 +589,9 @@ mod tests {
         assert!(script.contains(
             "\nexport TEMPORAL_TEST_CLUSTER_EVENTS_FILE='/var/tmp/ci/out/clusters.jsonl'\n"
         ));
+        assert!(
+            script.contains("\nexport DSQL_TEST_POOL_METRICS_FILE='/var/tmp/ci/out/pools.jsonl'\n")
+        );
         assert!(script.contains(
             "\n./functional.test -test.v=test2json -test.count=1 -test.timeout=8h -persistenceType=sql -persistenceDriver=dsql -test.parallel=10 -test.cpuprofile=out/cpu.pprof "
         ));

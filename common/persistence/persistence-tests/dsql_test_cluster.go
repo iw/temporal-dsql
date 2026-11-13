@@ -51,12 +51,15 @@ const (
 	dsqlPort                = 5432
 	dsqlVisibilityStoreName = "test-visibility"
 
-	// A test cluster has about ten pools, and each opens all its connections at start.
-	// A pool's start-up ping waits behind the connections queued before it, so nine
-	// clusters starting together must connect within the ping's 30 seconds.
+	// Pools outside the services, such as the persistence tests', hold ten connections.
 	dsqlTestMaxConns = 10
-	// Two test processes at this rate stay under DSQL's 100 connections a second.
-	dsqlTestConnectionRate = "50"
+	// The tests are the only client of the DSQL cluster they run against, so they open
+	// connections as fast as DSQL allows: a burst of 1,000, then 100 a second.
+	dsqlTestConnectionRate  = "100"
+	dsqlTestConnectionBurst = "1000"
+	// Each pool fills before its service starts. pgxpool's fill stops at a failed
+	// connection and resumes at its next health check, a minute later.
+	dsqlTestPoolWarmup = "90s"
 	// A history batch is one column value, which DSQL caps at 1 MiB.
 	dsqlTransactionSizeLimit = 1 << 20
 
@@ -64,6 +67,14 @@ const (
 	dsqlResetAttempts = 3
 	// DSQL modifies at most 3,000 rows in a transaction.
 	dsqlDeleteBatch = 1000
+)
+
+// Each service's pools are sized for its load. A test cluster's pools hold 130
+// connections, so seven clusters fill within DSQL's burst, and the nine that can run at
+// once hold 1,170.
+var (
+	dsqlTestMainConnsByService       = map[string]int{"history": 40, "matching": 30, "frontend": 20, "worker": 10}
+	dsqlTestVisibilityConnsByService = map[string]int{"history": 10, "frontend": 10, "matching": 5, "worker": 5}
 )
 
 // dsqlSchemaName accepts one unquoted lowercase schema name, which search_path and
@@ -145,7 +156,11 @@ func newDSQLTestCluster(options *TestBaseOptions, logger log.Logger) (*dsqlTestC
 		return nil, fmt.Errorf("%s includes the visibility schema %s, whose rows would be deleted", dsqlSchemasEnv, visibilitySchema)
 	}
 
-	attributes := map[string]string{"connection_rate_limit": dsqlTestConnectionRate}
+	attributes := map[string]string{
+		"connection_rate_limit":  dsqlTestConnectionRate,
+		"connection_burst_limit": dsqlTestConnectionBurst,
+		"pool_warmup_timeout":    dsqlTestPoolWarmup,
+	}
 	if region := os.Getenv(dsqlRegionEnv); region != "" {
 		attributes["region"] = region
 	}
@@ -168,6 +183,8 @@ func newDSQLTestCluster(options *TestBaseOptions, logger log.Logger) (*dsqlTestC
 		faultInjection: options.FaultInjection,
 		logger:         logger,
 	}
+	c.main.MaxConnsByService = maps.Clone(dsqlTestMainConnsByService)
+	c.visibility.MaxConnsByService = maps.Clone(dsqlTestVisibilityConnsByService)
 	c.visibility.ConnectAttributes = withDSQLSearchPath(attributes, visibilitySchema)
 	return c, nil
 }
@@ -221,6 +238,7 @@ func (c *dsqlTestCluster) Config() config.Persistence {
 	mainStore := c.mainConfig(c.lease.schema)
 	visibilityStore := c.visibility
 	visibilityStore.ConnectAttributes = maps.Clone(c.visibility.ConnectAttributes)
+	visibilityStore.MaxConnsByService = maps.Clone(c.visibility.MaxConnsByService)
 	return config.Persistence{
 		DefaultStore:    "test",
 		VisibilityStore: dsqlVisibilityStoreName,
@@ -244,6 +262,7 @@ func (c *dsqlTestCluster) TearDownTestDatabase() {
 func (c *dsqlTestCluster) mainConfig(schema string) config.SQL {
 	cfg := c.main
 	cfg.ConnectAttributes = withDSQLSearchPath(c.main.ConnectAttributes, schema)
+	cfg.MaxConnsByService = maps.Clone(c.main.MaxConnsByService)
 	return cfg
 }
 
