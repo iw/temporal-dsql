@@ -32,9 +32,9 @@ func run(args []string, stdout io.Writer) error {
 	var o overrides
 	fs.StringVar(&o.capacity, "capacity", "", "run the capacity controller in this `mode`: disabled, shadow or enabled")
 	fs.DurationVar(&o.grace, "queued-grace", -1, "set the capacity controller's QueuedGrace to this `duration`")
-	fs.Float64Var(&o.coupledShare, "coupled-binding-share", -1, "set the capacity controller's CoupledBindingShare to this `share`; 0.9 counts the task scheduler's coupled refusals")
+	fs.Float64Var(&o.coupledShare, "coupled-binding-share", -1, "set the capacity controller's CoupledBindingShare to this `share`; 0 stops it counting the task scheduler's coupled refusals")
 	fs.StringVar(&o.taskRate, "task-rate", "", "run the task scheduler rate controller in this `mode`")
-	fs.DurationVar(&o.coupledRetry, "coupled-retry", -1, "set the task scheduler rate's CoupledRetry to this `duration`; 200ms retries the scheduler's coupled refusals sooner")
+	fs.DurationVar(&o.coupledRetry, "coupled-retry", -1, "set the task scheduler rate's CoupledRetry to this `duration`; 0 retries the scheduler's coupled refusals after 1–3 s")
 	fs.StringVar(&o.workers, "workers", "", "run the worker count controllers in this `mode`")
 	fs.StringVar(&o.memory, "memory", "", "run the memory budget controllers in this `mode`")
 	fs.StringVar(&o.partitions, "partitions", "", "run the partition scaler in this `mode`, where the workflows run through matching")

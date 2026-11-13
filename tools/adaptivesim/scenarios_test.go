@@ -295,12 +295,13 @@ func TestTaskRateHoldsTasksInTheScheduler(t *testing.T) {
 }
 
 // runCoupled runs a scenario's variant with the capacity controller's CoupledBindingShare
-// at share.
+// at share and the task scheduler rate's CoupledRetry at 0, so the share acts alone.
 func runCoupled(t *testing.T, name, variant string, share float64, opts Options) HostResult {
 	t.Helper()
 	sc, err := Lookup(name, variant)
 	require.NoError(t, err)
 	sc.Host.Capacity.Params.Capacity.CoupledBindingShare = share
+	sc.Host.Controllers.TaskRate.CoupledRetry = 0
 	r, err := Run(sc, opts)
 	require.NoError(t, err)
 	require.Len(t, r.Hosts, 1)
@@ -358,16 +359,16 @@ func TestCoupledRefusalsLetCapacityRecoverAfterTheSlowStore(t *testing.T) {
 	require.Less(t, proposedAt(rates, cut.Time.Add(3*time.Second)), proposedAt(rates, cut.Time), "the task rate follows the cut")
 }
 
-// With CoupledRetry at 200ms as well, the rescheduler retries a task the coupled limit
-// refused while its buckets refill, instead of 1–3 s later, so the waiting tasks reach the
-// scheduler as the rate allows rather than in batches. Few tasks are waiting when the load
-// ends, every task completes, and the trace replays.
+// With CoupledRetry at 200ms as well, as both are by default, the rescheduler retries a
+// task the coupled limit refused while its buckets refill, instead of 1–3 s later, so the
+// waiting tasks reach the scheduler as the rate allows rather than in batches. Few tasks
+// are waiting when the load ends, every task completes, and the trace replays.
 func TestCoupledRetryClearsTheSlowStoresBacklog(t *testing.T) {
 	t.Parallel()
 	sc, err := Lookup("slow-store", "cap-tsr")
 	require.NoError(t, err)
-	sc.Host.Capacity.Params.Capacity.CoupledBindingShare = 0.9
-	sc.Host.Controllers.TaskRate.CoupledRetry = 200 * time.Millisecond
+	require.InDelta(t, 0.9, sc.Host.Capacity.Params.Capacity.CoupledBindingShare, 0, "the default")
+	require.Equal(t, 200*time.Millisecond, sc.Host.Controllers.TaskRate.CoupledRetry, "the default")
 	dir := t.TempDir()
 	r, err := Run(sc, Options{TraceDir: dir})
 	require.NoError(t, err)
@@ -385,10 +386,8 @@ func TestCoupledRetryClearsTheSlowStoresBacklog(t *testing.T) {
 // workflow completes. The traces, with those steps, replay.
 func TestTaskRateFollowsCapacityOnFewCalls(t *testing.T) {
 	t.Parallel()
-	sc, err := Lookup("coupled-slow-store", "cap-tsr")
+	sc, err := Lookup("coupled-slow-store", "cap-tsr") // both coupled settings, by default
 	require.NoError(t, err)
-	sc.Host.Capacity.Params.Capacity.CoupledBindingShare = 0.9
-	sc.Host.Controllers.TaskRate.CoupledRetry = 200 * time.Millisecond
 	dir := t.TempDir()
 	r, err := Run(sc, Options{TraceDir: dir})
 	require.NoError(t, err)
@@ -640,13 +639,16 @@ func TestTool(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, files, 1)
 
-	// -coupled-binding-share sets the capacity controller's share; left out, the scenario's stays.
+	// -coupled-binding-share and -coupled-retry set the coupled settings; left out, the
+	// scenario's stay.
 	sc, err := Lookup("slow-store", "cap-tsr")
 	require.NoError(t, err)
-	require.NoError(t, overrides{grace: -1, coupledShare: 0.9}.apply(&sc))
-	require.InDelta(t, 0.9, sc.Host.Capacity.Params.Capacity.CoupledBindingShare, 0)
-	require.NoError(t, overrides{grace: -1, coupledShare: -1}.apply(&sc))
-	require.InDelta(t, 0.9, sc.Host.Capacity.Params.Capacity.CoupledBindingShare, 0)
+	require.NoError(t, overrides{grace: -1, coupledShare: 0, coupledRetry: -1}.apply(&sc))
+	require.Zero(t, sc.Host.Capacity.Params.Capacity.CoupledBindingShare)
+	require.Equal(t, 200*time.Millisecond, sc.Host.Controllers.TaskRate.CoupledRetry)
+	require.NoError(t, overrides{grace: -1, coupledShare: -1, coupledRetry: 0}.apply(&sc))
+	require.Zero(t, sc.Host.Capacity.Params.Capacity.CoupledBindingShare)
+	require.Zero(t, sc.Host.Controllers.TaskRate.CoupledRetry)
 
 	require.ErrorContains(t, run([]string{"-scenario", "nonesuch"}, &out), "no scenario")
 	require.ErrorContains(t, run([]string{"-scenario", "startup", "-variant", "nonesuch"}, &out), "no variant")
@@ -978,19 +980,18 @@ func TestRampIsBoundByShardsAndPollers(t *testing.T) {
 	}
 }
 
-// #110's slow store, with every controller its host runs enabled: the capacity controller
-// and the task scheduler rate hold the cut as they do in cap-tsr. Once the store has
-// recovered, the task rate keeps persistence's calls under capacity's cut, so capacity
-// holds it as idle, and the task rate stays under the tasks' rate, so tasks are still
-// waiting when the load ends. The worker counts back off after each cut, and change
-// nothing else.
-func TestSlowStoreHoldsItsCutWithEveryController(t *testing.T) {
+// #110's slow store, with every controller its host runs enabled and both coupled settings
+// off: the capacity controller and the task scheduler rate hold the cut as they do in
+// cap-tsr. Once the store has recovered, the task rate keeps persistence's calls under
+// capacity's cut, so capacity holds it as idle, and the task rate stays under the tasks'
+// rate, so tasks are still waiting when the load ends. The worker counts back off after
+// each cut, and change nothing else.
+func TestSlowStoreHoldsItsCutWithoutTheCoupledSettings(t *testing.T) {
 	t.Parallel()
-	pair := runScenario(t, "slow-store", "cap-tsr", Options{})
-	all := runScenario(t, "slow-store", "all", Options{})
+	p := runCoupled(t, "slow-store", "cap-tsr", 0, Options{})
+	a := runCoupled(t, "slow-store", "all", 0, Options{})
 	sc, err := Lookup("slow-store", "all")
 	require.NoError(t, err)
-	p, a := pair.Hosts[0], all.Hosts[0]
 	require.Equal(t, p.Tasks, a.Tasks)
 	require.Equal(t, p.Workflows, a.Workflows)
 	require.Equal(t, p.Decisions.Of(capacity.Name), a.Decisions.Of(capacity.Name))

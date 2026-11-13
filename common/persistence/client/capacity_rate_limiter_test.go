@@ -578,7 +578,7 @@ func TestCapacityLimiterReportsItsDecisions(t *testing.T) {
 	require.Equal(t, 30*time.Second, step.Envelope.DeliveryWindow)
 	require.Equal(t, 30*time.Second, step.Envelope.QueuedGrace)
 	require.InDelta(t, 2, step.Envelope.BaselineAlert, 0.001)
-	require.Zero(t, step.Envelope.CoupledBindingShare, "off by default")
+	require.InDelta(t, 0.9, step.Envelope.CoupledBindingShare, 0, "on by default")
 	require.Equal(t, 200*time.Millisecond, step.Signals.P99)
 	require.InDelta(t, 600, step.Signals.Throughput, 0.001)
 	require.Equal(t, 3*time.Second, step.Signals.Span)

@@ -255,7 +255,6 @@ func TestSchedulerLimiterRecordsOnlyItsBucketsRefusalsBelowTheStaticRate(t *test
 
 func TestSchedulerLimiterHintsARetryAfterItsBucketsRefuse(t *testing.T) {
 	settings := DefaultSettings
-	settings.CoupledRetry = 200 * time.Millisecond
 	l := newSchedulerLimiter(newCountingLimiter(), &fixedRate{rate: 10, on: true}, staticRate(100), func() Settings { return settings }, nil)
 	now := time.Now()
 
@@ -273,16 +272,14 @@ func TestSchedulerLimiterHintsARetryAfterItsBucketsRefuse(t *testing.T) {
 	_, ok = l.SubmitRetry(now.Add(time.Millisecond))
 	require.False(t, ok)
 
-	// Off by default.
+	// 0 turns it off.
 	settings.CoupledRetry = 0
 	_, ok = l.SubmitRetry(now)
 	require.False(t, ok)
 }
 
 func TestSchedulerLimiterHintsNoRetryForOtherRefusals(t *testing.T) {
-	settings := DefaultSettings
-	settings.CoupledRetry = 200 * time.Millisecond
-	get := func() Settings { return settings }
+	get := func() Settings { return DefaultSettings }
 	now := time.Now()
 	for name, l := range map[string]*schedulerLimiter{
 		"at the static rate":        newSchedulerLimiter(newCountingLimiter(), &fixedRate{rate: 10, on: true}, staticRate(10), get, nil),
