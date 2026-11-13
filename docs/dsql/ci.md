@@ -158,9 +158,9 @@ The other drivers give each test cluster a database of its own. DSQL has one dat
 | `DSQL_TEST_USER` | The database role; `admin` by default |
 | `DSQL_TEST_REGION` | The cluster's region, when the endpoint doesn't name it |
 
-Test clusters in the shared and dedicated pools keep their schemas until the test process ends. A test that needs a fresh cluster leases another schema while it holds a dedicated slot, and so does each suite that shares one cluster between its tests. A test waits for a free schema as long as it takes, and logs a warning each minute. So have more schemas than `TEMPORAL_TEST_SHARED_CLUSTERS` plus twice `TEMPORAL_TEST_DEDICATED_CLUSTERS`, the most that the pooled and fresh clusters can hold. With nine schemas, 1 and 3 leave two for the suites. Run one test package at a time, as `make functional-test` does.
+Test clusters in the shared and dedicated pools keep their schemas until the test process ends. A test that needs a fresh cluster leases another schema while it holds a dedicated slot, and so does each suite that shares one cluster between its tests. A test waits for a free schema as long as it takes, and logs a warning each minute. So have more schemas than `TEMPORAL_TEST_SHARED_CLUSTERS` plus twice `TEMPORAL_TEST_DEDICATED_CLUSTERS`, the most that the pooled and fresh clusters can hold. With nine schemas, 3 and 2 leave two for the suites. Run one test package at a time, as `make functional-test` does.
 
-The test clusters' servers get the limits `config/dynamicconfig/development-dsql.yaml` sets for DSQL: a `system.transactionSizeLimit` of 1 MiB and a `limit.blobSize.error` of 1,000,000 bytes. Their pools hold five connections each, and open at most 30 a second.
+The test clusters' servers get the limits `config/dynamicconfig/development-dsql.yaml` sets for DSQL: a `system.transactionSizeLimit` of 1 MiB and a `limit.blobSize.error` of 1,000,000 bytes. Their pools hold ten connections each, and the test process opens at most 50 connections a second.
 
 To set up the schemas by hand, set them up one at a time, since DSQL can fail a statement with OC001 while another session builds an index:
 
@@ -181,7 +181,7 @@ go run ./cmd/tools/dsql --endpoint "$DSQL_TEST_ENDPOINT" \
 AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus
 ```
 
-The test clusters lease `public` and the eight schemas, with one shared and three dedicated pooled clusters, and their servers log at warning level and above. The run prints each top-level test's result as it ends, and writes these files, masked, to `.dagger/live/target/corpus/<run>`:
+The test clusters lease `public` and the eight schemas, with three shared and two dedicated pooled clusters, and their servers log at warning level and above. The run prints each top-level test's result as it ends, and writes these files, masked, to `.dagger/live/target/corpus/<run>`:
 
 | File | Contents |
 |---|---|
@@ -190,7 +190,7 @@ The test clusters lease `public` and the eight schemas, with one shared and thre
 | `stderr.log` | The test process's standard error |
 | `summary.txt` | The top-level tallies, the tests that failed, and the tests without a result |
 
-A run from a developer's machine takes about two and a half hours: half an hour to set up the schemas, then two hours of tests, which end with the versioning suites. A test that waits on a channel without a deadline can hold the run until the 8-hour timeout. To end the run sooner, send SIGQUIT to the `functional.test` process. It exits with a goroutine dump in `stderr.log`, and the run still writes its summary and deletes the cluster. A test that's stopped this way has no result. Neither does a test whose result line ran into a server's log output, which test2json reads as output. The summary lists both kinds.
+A run from a developer's machine takes about two hours: 20 to 30 minutes to set up the schemas, then an hour and a half of tests. `TestVersioning3FunctionalSuite` shares one cluster between its tests, and runs alone for the last half hour. A test that waits on a channel without a deadline can hold the run until the 8-hour timeout. To end the run sooner, send SIGQUIT to the `functional.test` process. It exits with a goroutine dump in `stderr.log`, and the run still writes its summary and deletes the cluster. A test that's stopped this way has no result. Neither does a test whose result line ran into a server's log output, which test2json reads as output. The summary lists both kinds.
 
 The run covers `./tests`. The clusters in `tests/xdc` replicate namespaces between them, so their visibility rows would meet in the one visibility schema, and `tests/ndc` hasn't been run on DSQL yet.
 
