@@ -1,7 +1,12 @@
 //! Runs the functional tests on a Graviton instance in the cluster's region, for
 //! `--corpus --instance <type>`.
+//!
+//! The tests run in shards side by side, as upstream's CI runs them on separate machines:
+//! each shard is a test process that runs the tests whose names hash to it, against a
+//! DSQL cluster of its own. A test process whose tests stop it, such as by dumping every
+//! goroutine's stack, then stops only its own shard's tests.
 
-use std::io::BufRead as _;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -14,9 +19,10 @@ use aws_sdk_ec2::types::{
 use aws_sdk_s3::primitives::ByteStream;
 use tokio::process::Command;
 
+use crate::results::{Attempt, Pauses, Rerun, Results, plural};
 use crate::{
-    Aws, GO_TEST_TAGS, Masker, REPO, Result, Run, TAG, Tally, corpus_dir, describe, failed,
-    summarize, test_env, write_masked,
+    AWAIT_ATTEMPT_TIMEOUT, Aws, GO_TEST_TAGS, Masker, REPO, Result, Run, TAG, cluster_env,
+    corpus_dir, describe, failed, summarize, write_masked,
 };
 
 /// The runner instances' image: the latest Amazon Linux 2023 for arm64, which comes with
@@ -27,11 +33,34 @@ const IMAGE: &str =
 /// connects to CI clusters and reads and writes run files, and the group allows no inbound
 /// traffic.
 const NAME: &str = "temporal-dsql-ci-runner";
-/// How long a runner instance lives at most: the tests' timeout, and an hour to fetch them
-/// and upload their output. It then shuts down, which terminates it.
-const LIFETIME_MINUTES: u64 = 9 * 60;
+/// How many shards a run has unless `--shards` says otherwise. Upstream's CI runs the
+/// functional tests in five shards on machines with four CPUs.
+pub(crate) const DEFAULT_SHARDS: u16 = 4;
+/// The most shards a run may have, each with a cluster of its own.
+pub(crate) const MAX_SHARDS: u16 = 8;
+/// How long each of a runner instance's test processes may take.
+pub(crate) const TIMEOUT: &str = "90m";
+/// How long a runner instance lives at most: three test processes' timeouts one after the
+/// other, as the first shard's lane runs them, the wait for this machine to say which
+/// tests run again, and an hour to fetch the tests and upload their output. It then shuts
+/// down, which terminates it.
+const LIFETIME_MINUTES: u64 = 6 * 60;
 /// How often a runner instance reports, and this machine checks on it.
 const POLL: Duration = Duration::from_secs(60);
+/// How many polls a shard's lane waits for this machine to say which of its tests run
+/// again, before it ends without running them.
+const PLAN_POLLS: u32 = 15;
+/// Tests that run in a test process of their own, after the first shard's. Their
+/// workflows block under a short deadlock detection timeout, on purpose, and the Go SDK
+/// dumps every goroutine's stack at each detection, which stops the whole process while
+/// it runs. Go splits the pattern at its slash, so it names the suite and its two tests.
+const ALONE: &str =
+    "^TestVersioningFunctionalSuite$/^TestWorkflowTaskRedirectInRetry(First|NonFirst)Task$";
+/// A shard's shared and dedicated test clusters. With nine persistence schemas, they leave
+/// four places for suites that share one cluster, and one schema that a dedicated slot's
+/// fresh cluster can always lease.
+const SHARED_CLUSTERS: u16 = 2;
+const DEDICATED_CLUSTERS: u16 = 2;
 /// How long a runner instance has to make its first report.
 const FIRST_REPORT: Duration = Duration::from_secs(15 * 60);
 /// How many checks on a runner instance can fail in a row, such as while this machine is
@@ -41,7 +70,8 @@ const CHECK_FAILURES: u32 = 15;
 const FETCH_FAILED: i32 = 125;
 /// What this machine builds for a runner instance.
 const BINARIES: &[&str] = &["functional.test", "test2json"];
-/// What a runner instance writes, and whether each file is text for the masker.
+/// What a runner instance writes for each test process, and whether each file is text for
+/// the masker.
 const OUTPUT: &[(&str, bool)] = &[
     ("results.jsonl", true),
     ("clusters.jsonl", true),
@@ -49,18 +79,22 @@ const OUTPUT: &[(&str, bool)] = &[
     ("stderr.log", true),
     ("cpu.pprof", false),
 ];
-/// A runner instance's boot script, which runs as root. It fetches the tests, runs them
-/// with their output in out/, and reports the top-level tests' results each poll. If the
-/// run's `stop` file appears, it sends the tests SIGQUIT, which ends them with their
-/// goroutines' stacks. When the tests end, it uploads out/ and their exit code, and shuts
-/// down.
+/// A runner instance's boot script, which runs as root. It fetches the tests, then starts
+/// a lane for each shard. A lane runs the shard's test process with its output in
+/// out/shard-<n>; the first lane then runs the tests in ALONE in a process of their own,
+/// in out/alone. Each lane then waits for this machine to name the shard's failed tests in
+/// plan/<n>, and runs them again in a process of their own, in out/shard-<n>-rerun. A test
+/// process uploads its output once it ends, then its exit code as out/<dir>.code. Each
+/// poll, the instance uploads each shard's top-level results so far, and if the run's
+/// `stop` file has appeared, it sends the test processes SIGQUIT, which ends them with
+/// their goroutines' stacks. Once every lane has ended, it uploads its own exit code, and
+/// shuts down.
 const SCRIPT: &str = r#"#!/bin/bash
 shutdown -h +{minutes}
 export HOME=/root AWS_REGION={region} AWS_DEFAULT_REGION={region}
 run=s3://{bucket}/runs/{id}
 mkdir -p /var/tmp/ci/out && cd /var/tmp/ci || exit 1
 finish() {
-  for file in out/*; do aws s3 cp --quiet "$file" "$run/$file"; done
   echo "$1" > exit-code && aws s3 cp --quiet exit-code "$run/exit-code"
   shutdown -h now
   exit
@@ -68,15 +102,95 @@ finish() {
 aws s3 cp --quiet "$run/bin/functional.test" . && aws s3 cp --quiet "$run/bin/test2json" . &&
   chmod +x functional.test test2json || finish {fetch_failed}
 {exports}export TEMPORAL_ROOT=/var/tmp/ci
-while sleep {poll}; do
-  grep -E '"Action":"(pass|fail|skip)","Package":"[^"]*","Test":"[^"/]*",' out/results.jsonl > progress.jsonl
-  aws s3 cp --quiet progress.jsonl "$run/progress.jsonl"
+attempt() {
+  local dir=out/$1
+  shift
+  mkdir -p "$dir"
+  TEMPORAL_TEST_CLUSTER_EVENTS_FILE="$PWD/$dir/clusters.jsonl" DSQL_TEST_POOL_METRICS_FILE="$PWD/$dir/pools.jsonl" \
+    ./functional.test {flags} "$@" -test.cpuprofile="$dir/cpu.pprof" 2> "$dir/stderr.log" |
+    ./test2json -t -p go.temporal.io/server/tests > "$dir/results.jsonl"
+  local code=${PIPESTATUS[0]}
+  grep -E '"Action":"fail","Package":"[^"]*","Test":"' "$dir/results.jsonl" > "$dir/failed.jsonl"
+  aws s3 cp --quiet --recursive "$dir" "$run/$dir"
+  echo "$code" > "$dir.code" && aws s3 cp --quiet "$dir.code" "$run/$dir.code"
+}
+rerun() {
+  for _ in $(seq {plan_polls}); do
+    if aws s3 cp --quiet "$run/plan/$1" "plan-$1" 2> /dev/null; then
+      if [ -s "plan-$1" ]; then attempt "shard-$1-rerun" "-test.run=$(cat "plan-$1")"; fi
+      return
+    fi
+    sleep {poll}
+  done
+}
+lanes=
+{lanes}while sleep {poll}; do
+  for shard in {shards}; do
+    grep -E '"Action":"(pass|fail|skip)","Package":"[^"]*","Test":"[^"/]*",' "out/shard-$shard/results.jsonl" > "progress-$shard.jsonl" 2> /dev/null
+    aws s3 cp --quiet "progress-$shard.jsonl" "$run/progress/$shard.jsonl"
+  done
   aws s3api head-object --bucket {bucket} --key runs/{id}/stop > /dev/null 2>&1 && pkill -QUIT -x functional.test
 done &
-./functional.test {flags} -test.cpuprofile=out/cpu.pprof 2> out/stderr.log |
-  ./test2json -t -p go.temporal.io/server/tests > out/results.jsonl
-finish "${PIPESTATUS[0]}"
+wait $lanes
+finish 0
 "#;
+
+/// How the functional tests run on an instance.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Runner {
+    /// The instance type.
+    pub(crate) kind: String,
+    /// How many test processes run side by side.
+    pub(crate) shards: u16,
+    /// Whether the tests run on SQLite, for a baseline, rather than on DSQL.
+    pub(crate) sqlite: bool,
+}
+
+impl Runner {
+    pub(crate) fn new(
+        kind: String,
+        shards: u16,
+        sqlite: bool,
+    ) -> std::result::Result<Self, String> {
+        goarm64(&kind)?;
+        if !(1..=MAX_SHARDS).contains(&shards) {
+            return Err(format!("a run has from 1 to {MAX_SHARDS} shards"));
+        }
+        let cpus = vcpus(&kind)?;
+        if shards > cpus {
+            return Err(format!(
+                "a {kind} has {}, too few for {}",
+                plural(usize::from(cpus), "vCPU"),
+                plural(usize::from(shards), "shard")
+            ));
+        }
+        Ok(Self {
+            kind,
+            shards,
+            sqlite,
+        })
+    }
+
+    /// The tests' persistence driver.
+    pub(crate) fn driver(&self) -> &'static str {
+        if self.sqlite { "sqlite" } else { "dsql" }
+    }
+
+    /// How many clusters the run needs: one for each shard, or none on SQLite.
+    pub(crate) fn clusters(&self) -> usize {
+        if self.sqlite {
+            0
+        } else {
+            usize::from(self.shards)
+        }
+    }
+
+    /// Each test process's share of the instance's CPUs, for GOMAXPROCS, which also sets
+    /// how many tests it runs at once unless the run sets -test.parallel.
+    fn procs(&self) -> u16 {
+        vcpus(&self.kind).map_or(1, |cpus| (cpus / self.shards).max(1))
+    }
+}
 
 /// Builds the functional tests and test2json for a runner instance: static linux/arm64
 /// binaries for its processor, without the symbol tables and debug information that the
@@ -125,6 +239,23 @@ pub(crate) async fn build(out: &Path, kind: &str) -> Result<()> {
     Ok(())
 }
 
+/// How many vCPUs a Graviton instance type has, from its size. Each is a whole core.
+pub(crate) fn vcpus(kind: &str) -> std::result::Result<u16, String> {
+    let size = kind.split_once('.').map_or("", |(_, size)| size);
+    let cpus = match size {
+        "medium" => Some(1),
+        "large" => Some(2),
+        "xlarge" => Some(4),
+        _ => size
+            .strip_suffix("xlarge")
+            .and_then(|count| count.parse::<u16>().ok())
+            .and_then(|count| count.checked_mul(4)),
+    };
+    cpus.filter(|&cpus| cpus > 0).ok_or_else(|| {
+        format!("can't tell how many vCPUs a {kind} has; use a size such as 4xlarge")
+    })
+}
+
 /// The Arm architecture version of a Graviton instance type's processor, for GOARM64. The
 /// 8g families' Graviton4 implements Armv9.0, the 7g families' Graviton3 Armv8.4, and the
 /// 6g families' Graviton2 Armv8.2.
@@ -147,13 +278,14 @@ pub(crate) fn goarm64(kind: &str) -> std::result::Result<&'static str, String> {
 }
 
 /// Runs Temporal's functional tests on a runner instance in the cluster's region. It then
-/// writes their output, masked, to target/corpus/<run>, as `crate::functional_tests`
-/// does, with their CPU profile as cpu.pprof.
+/// writes each test process's output, masked, to its own directory in
+/// target/corpus/<run>, as `crate::functional_tests` does, with its CPU profile as
+/// cpu.pprof, and summarizes them all.
 pub(crate) async fn functional_tests(
     aws: &Aws,
     run: &Run,
     masker: &Masker,
-    kind: &str,
+    runner: &Runner,
 ) -> Result<()> {
     let out = corpus_dir(&run.id);
     let prefix = format!("runs/{}", run.id);
@@ -170,9 +302,14 @@ pub(crate) async fn functional_tests(
             .map_err(failed("upload the tests"))?;
         std::fs::remove_file(path)?;
     }
-    let (instance, zone) = launch(aws, run, kind).await?;
-    println!("--- running the functional tests on a {kind} in {zone}");
-    let code = wait(aws, run, masker, &instance).await?;
+    let (instance, zone) = launch(aws, run, runner).await?;
+    println!(
+        "--- running the functional tests in {}{} on a {} in {zone}",
+        plural(usize::from(runner.shards), "shard"),
+        if runner.sqlite { ", on SQLite," } else { "" },
+        runner.kind,
+    );
+    let (code, plans) = wait(aws, run, masker, &instance, runner.shards).await?;
     if code == FETCH_FAILED {
         return Err("the runner instance couldn't fetch the tests".into());
     }
@@ -181,12 +318,45 @@ pub(crate) async fn functional_tests(
         "--- fetching the functional tests' output, to {}",
         out.display()
     );
-    for &(name, text) in OUTPUT {
+    let mut attempts = Vec::new();
+    for (shard, plan) in (1..=runner.shards).zip(plans) {
+        let mut attempt = fetch(
+            aws,
+            run,
+            masker,
+            &format!("shard-{shard}"),
+            format!("shard {shard}"),
+        )
+        .await?;
+        attempt.reruns = true;
+        if matches!(plan, Some(Rerun::Tests(_))) {
+            let again = fetch(
+                aws,
+                run,
+                masker,
+                &format!("shard-{shard}-rerun"),
+                format!("shard {shard}, run again"),
+            )
+            .await?;
+            attempt.again = Some(Box::new(again));
+        }
+        attempts.push(attempt);
+    }
+    attempts.push(fetch(aws, run, masker, "alone", "alone".to_owned()).await?);
+    summarize(&out, &attempts)
+}
+
+/// Fetches what one of the runner instance's test processes wrote to out/<dir>, masked,
+/// into the same directory in target/corpus/<run>, and reads its results.
+async fn fetch(aws: &Aws, run: &Run, masker: &Masker, dir: &str, name: String) -> Result<Attempt> {
+    let local = corpus_dir(&run.id).join(dir);
+    std::fs::create_dir_all(&local)?;
+    for &(file, text) in OUTPUT {
         let fetched = aws
             .s3
             .get_object()
             .bucket(&run.bucket)
-            .key(format!("{prefix}/out/{name}"))
+            .key(format!("runs/{}/out/{dir}/{file}", run.id))
             .send()
             .await;
         let object = match fetched {
@@ -196,30 +366,42 @@ pub(crate) async fn functional_tests(
                     .as_service_error()
                     .is_some_and(|err| err.is_no_such_key()) =>
             {
-                println!("the runner instance wrote no {name}");
+                println!("the runner instance wrote no {dir}/{file}");
                 continue;
             }
             Err(err) => return Err(describe("fetch the tests' output", &err).into()),
         };
         if text {
             let body = Box::pin(object.body.into_async_read());
-            write_masked(body, out.join(name), masker.clone()).await?;
+            write_masked(body, local.join(file), masker.clone()).await?;
         } else {
-            std::fs::write(out.join(name), object.body.collect().await?.into_bytes())?;
+            std::fs::write(local.join(file), object.body.collect().await?.into_bytes())?;
         }
     }
-    let mut tally = Tally::default();
-    if let Ok(results) = std::fs::File::open(out.join("results.jsonl")) {
-        for line in std::io::BufReader::new(results).lines() {
-            tally.add(&line?);
-        }
-    }
-    summarize(&out, &tally, format!("exit status: {code}"))
+    let code = read_object(
+        &aws.s3,
+        &run.bucket,
+        &format!("runs/{}/out/{dir}.code", run.id),
+    )
+    .await?;
+    let read = |file: &str| std::fs::read_to_string(local.join(file)).unwrap_or_default();
+    Ok(Attempt {
+        name,
+        results: Results::read(&read("results.jsonl")),
+        pauses: Pauses::read(&read("pools.jsonl")),
+        exit: code.map_or_else(
+            || "a status it didn't report".to_owned(),
+            |code| format!("exit status: {}", code.trim()),
+        ),
+        reruns: false,
+        again: None,
+    })
 }
 
 /// Starts a runner instance in the first CI subnet whose zone has capacity for it, and
 /// returns its ID and zone.
-async fn launch(aws: &Aws, run: &Run, kind: &str) -> Result<(String, String)> {
+async fn launch(aws: &Aws, run: &Run, runner: &Runner) -> Result<(String, String)> {
+    let kind = runner.kind.as_str();
     let tagged = || Filter::builder().name("tag:purpose").values(TAG).build();
     let found = aws
         .ec2
@@ -251,7 +433,7 @@ async fn launch(aws: &Aws, run: &Run, kind: &str) -> Result<(String, String)> {
         return Err("no CI subnets; docs/dsql/ci.md describes the CI network".into());
     }
 
-    let script = aws_smithy_types::base64::encode(script(run));
+    let script = aws_smithy_types::base64::encode(script(run, runner));
     let mut full = Vec::new();
     for (zone, subnet) in subnets {
         let launched = aws
@@ -327,16 +509,57 @@ fn launch_tags(kind: ResourceType, run: &Run) -> TagSpecification {
 }
 
 /// A runner instance's boot script for a run.
-fn script(run: &Run) -> String {
-    let exports: String = test_env(run, "/var/tmp/ci/out")
-        .into_iter()
-        .map(|(name, value)| format!("export {name}='{value}'\n"))
-        .collect();
+fn script(run: &Run, runner: &Runner) -> String {
+    // Every test process gets these, and each lane adds its shard's cluster and index.
+    let exports: String = [
+        ("GOMAXPROCS", runner.procs().to_string()),
+        ("TEMPORAL_TEST_SHARED_CLUSTERS", SHARED_CLUSTERS.to_string()),
+        (
+            "TEMPORAL_TEST_DEDICATED_CLUSTERS",
+            DEDICATED_CLUSTERS.to_string(),
+        ),
+        ("TEMPORAL_TEST_LOG_LEVEL", "warn".to_owned()),
+        (
+            "TEMPORAL_AWAIT_ATTEMPT_TIMEOUT",
+            AWAIT_ATTEMPT_TIMEOUT.to_owned(),
+        ),
+        ("TEST_TOTAL_SHARDS", runner.shards.to_string()),
+    ]
+    .into_iter()
+    .map(|(name, value)| format!("export {name}='{value}'\n"))
+    .collect();
+    let mut lanes = String::new();
+    for shard in 1..=runner.shards {
+        let index = usize::from(shard - 1);
+        let mut env = run
+            .clusters
+            .get(index)
+            .map(|cluster| cluster_env(&run.region, cluster))
+            .unwrap_or_default();
+        env.push(("TEST_SHARD_INDEX", index.to_string()));
+        lanes.push_str("(\n");
+        for (name, value) in env {
+            let _ = writeln!(lanes, "  export {name}='{value}'");
+        }
+        let _ = writeln!(lanes, "  attempt shard-{shard} '-test.skip={ALONE}'");
+        if shard == 1 {
+            // Without the shard variables, the process runs every test that -test.run names.
+            let _ = writeln!(
+                lanes,
+                "  (unset TEST_TOTAL_SHARDS TEST_SHARD_INDEX && attempt alone '-test.run={ALONE}')"
+            );
+        }
+        let _ = writeln!(lanes, "  rerun {shard}\n) &\nlanes=\"$lanes $!\"");
+    }
+    let shards: Vec<String> = (1..=runner.shards).map(|shard| shard.to_string()).collect();
     SCRIPT
         .replace("{exports}", &exports)
+        .replace("{lanes}", &lanes)
+        .replace("{shards}", &shards.join(" "))
         .replace("{flags}", &run.test_flags.join(" "))
         .replace("{minutes}", &LIFETIME_MINUTES.to_string())
         .replace("{poll}", &POLL.as_secs().to_string())
+        .replace("{plan_polls}", &PLAN_POLLS.to_string())
         .replace("{fetch_failed}", &FETCH_FAILED.to_string())
         .replace("{bucket}", &run.bucket)
         .replace("{region}", &run.region)
@@ -350,27 +573,43 @@ enum Check {
     Stopped,
 }
 
-/// Waits for the runner instance to report the tests' exit code, and returns it. It
-/// prints each top-level test's result as the instance reports it.
-async fn wait(aws: &Aws, run: &Run, masker: &Masker, instance: &str) -> Result<i32> {
+/// Waits for the runner instance to report its exit code, and returns it, with what each
+/// shard ran again, once known. It prints each top-level test's result as the instance
+/// reports it, and tells the instance what each shard runs again once its first test
+/// process has ended.
+async fn wait(
+    aws: &Aws,
+    run: &Run,
+    masker: &Masker,
+    instance: &str,
+    shards: u16,
+) -> Result<(i32, Vec<Option<Rerun>>)> {
     let started = Instant::now();
     let limit = Duration::from_secs(LIFETIME_MINUTES * 60) + FIRST_REPORT;
-    let progress = format!("runs/{}/progress.jsonl", run.id);
     let exit = format!("runs/{}/exit-code", run.id);
-    let mut tally = Tally::default();
-    // The report's lines printed so far, once there is a report.
-    let mut reported: Option<usize> = None;
+    let shards = usize::from(shards);
+    let mut progress: Vec<Results> = (0..shards).map(|_| Results::default()).collect();
+    // Each shard's report's lines printed so far, once it has a report.
+    let mut reported: Vec<Option<usize>> = vec![None; shards];
+    let mut plans: Vec<Option<Rerun>> = (0..shards).map(|_| None).collect();
     let mut failures = 0;
     loop {
         tokio::time::sleep(POLL).await;
         let checked: Result<Check> = async {
-            if let Some(report) = read_object(&aws.s3, &run.bucket, &progress).await? {
-                for line in report.lines().skip(reported.unwrap_or(0)) {
-                    if let Some(result) = tally.add(&masker.mask(line)) {
-                        println!("{result}");
+            for shard in 1..=shards {
+                let key = format!("runs/{}/progress/{shard}.jsonl", run.id);
+                if let Some(report) = read_object(&aws.s3, &run.bucket, &key).await? {
+                    let at = reported[shard - 1].unwrap_or(0);
+                    for line in report.lines().skip(at) {
+                        if let Some(result) = progress[shard - 1].add(&masker.mask(line)) {
+                            println!("shard {shard}: {result}");
+                        }
                     }
+                    reported[shard - 1] = Some(report.lines().count());
                 }
-                reported = Some(report.lines().count());
+                if plans[shard - 1].is_none() {
+                    plans[shard - 1] = plan(aws, run, shard).await?;
+                }
             }
             if let Some(code) = read_object(&aws.s3, &run.bucket, &exit).await? {
                 return Ok(Check::Exited(exit_code(&code)?));
@@ -386,7 +625,7 @@ async fn wait(aws: &Aws, run: &Run, masker: &Masker, instance: &str) -> Result<i
         }
         .await;
         match checked {
-            Ok(Check::Exited(code)) => return Ok(code),
+            Ok(Check::Exited(code)) => return Ok((code, plans)),
             Ok(Check::Stopped) => {
                 return Err(
                     "the runner instance stopped without reporting the tests' exit code".into(),
@@ -406,13 +645,41 @@ async fn wait(aws: &Aws, run: &Run, masker: &Masker, instance: &str) -> Result<i
                 }
             }
         }
-        if reported.is_none() && started.elapsed() > FIRST_REPORT {
+        if reported.iter().all(Option::is_none) && started.elapsed() > FIRST_REPORT {
             return Err("the runner instance didn't report in its first 15 minutes".into());
         }
         if started.elapsed() > limit {
             return Err("the runner instance outlived the tests' timeout".into());
         }
     }
+}
+
+/// Once a shard's first test process has ended, decides which of its failed tests run
+/// again, and tells the runner instance in plan/<shard>, which is empty when none do. It
+/// returns None while the process runs.
+async fn plan(aws: &Aws, run: &Run, shard: usize) -> Result<Option<Rerun>> {
+    let ended = format!("runs/{}/out/shard-{shard}.code", run.id);
+    let Some(code) = read_object(&aws.s3, &run.bucket, &ended).await? else {
+        return Ok(None);
+    };
+    let fails = format!("runs/{}/out/shard-{shard}/failed.jsonl", run.id);
+    let fails = read_object(&aws.s3, &run.bucket, &fails)
+        .await?
+        .unwrap_or_default();
+    let rerun = Rerun::plan(&fails);
+    aws.s3
+        .put_object()
+        .bucket(&run.bucket)
+        .key(format!("runs/{}/plan/{shard}", run.id))
+        .body(ByteStream::from(rerun.pattern().into_bytes()))
+        .send()
+        .await
+        .map_err(failed("tell the runner instance what to run again"))?;
+    println!(
+        "--- shard {shard}'s test process exited with exit status {}; {rerun}",
+        code.trim()
+    );
+    Ok(Some(rerun))
 }
 
 fn exit_code(text: &str) -> Result<i32> {
@@ -570,35 +837,56 @@ mod tests {
     }
 
     #[test]
-    fn writes_the_runner_script() {
-        let run = Run {
+    fn counts_vcpus() {
+        assert_eq!(vcpus("c8g.medium"), Ok(1));
+        assert_eq!(vcpus("c8g.large"), Ok(2));
+        assert_eq!(vcpus("m8g.xlarge"), Ok(4));
+        assert_eq!(vcpus("m8g.4xlarge"), Ok(16));
+        assert_eq!(vcpus("c7g.16xlarge"), Ok(64));
+        assert!(vcpus("c8g.metal-24xl").is_err());
+        assert!(vcpus("c8g.0xlarge").is_err());
+        assert!(vcpus("c8g").is_err());
+    }
+
+    #[test]
+    fn sizes_the_shards() {
+        let runner = Runner::new("m8g.4xlarge".to_owned(), 4, false).unwrap();
+        assert_eq!(runner.procs(), 4);
+        assert_eq!(runner.clusters(), 4);
+        assert_eq!(runner.driver(), "dsql");
+        let runner = Runner::new("c8g.4xlarge".to_owned(), 3, true).unwrap();
+        assert_eq!(runner.procs(), 5);
+        assert_eq!(runner.clusters(), 0);
+        assert_eq!(runner.driver(), "sqlite");
+        assert!(Runner::new("c8g.xlarge".to_owned(), 5, false).is_err());
+        assert!(Runner::new("c8g.4xlarge".to_owned(), 0, false).is_err());
+        assert!(Runner::new("c7i.4xlarge".to_owned(), 1, false).is_err());
+    }
+
+    #[test]
+    fn lives_long_enough() {
+        let timeout: u64 = TIMEOUT
+            .strip_suffix('m')
+            .and_then(|m| m.parse().ok())
+            .unwrap_or(0);
+        let plan_wait = u64::from(PLAN_POLLS) * POLL.as_secs() / 60;
+        assert!(LIFETIME_MINUTES >= 3 * timeout + plan_wait + 60);
+    }
+
+    fn run(clusters: &[&str]) -> Run {
+        Run {
             id: "1700000000000".to_owned(),
             region: "eu-west-1".to_owned(),
-            cluster: "abcdefghijklmnopqrstuvwxyz".to_owned(),
+            clusters: clusters.iter().map(|&cluster| cluster.to_owned()).collect(),
             table: "temporal-dsql-ci-1700000000000".to_owned(),
             bucket: "temporal-dsql-ci-bucket".to_owned(),
-            test_flags: crate::test_flags(std::num::NonZeroU16::new(10)),
-        };
-        let script = script(&run);
-        assert!(script.starts_with("#!/bin/bash\nshutdown -h +540\n"));
-        assert!(script.contains("\nrun=s3://temporal-dsql-ci-bucket/runs/1700000000000\n"));
-        assert!(script.contains(
-            "\nexport DSQL_TEST_ENDPOINT='abcdefghijklmnopqrstuvwxyz.dsql.eu-west-1.on.aws'\n"
-        ));
-        assert!(script.contains("\nexport TEMPORAL_TEST_SHARED_CLUSTERS='3'\n"));
-        assert!(script.contains(
-            "\nexport TEMPORAL_TEST_CLUSTER_EVENTS_FILE='/var/tmp/ci/out/clusters.jsonl'\n"
-        ));
-        assert!(
-            script.contains("\nexport DSQL_TEST_POOL_METRICS_FILE='/var/tmp/ci/out/pools.jsonl'\n")
-        );
-        assert!(script.contains(
-            "\n./functional.test -test.v=test2json -test.count=1 -test.timeout=8h -persistenceType=sql -persistenceDriver=dsql -test.parallel=10 -test.cpuprofile=out/cpu.pprof "
-        ));
-        assert!(script.contains("|| finish 125\n"));
-        assert!(script.contains("\nwhile sleep 60; do\n"));
-        assert!(script.contains("--key runs/1700000000000/stop "));
-        // Every placeholder is filled in. The script's own expansions start with $.
+            test_flags: crate::test_flags(TIMEOUT, "dsql", std::num::NonZeroU16::new(10)),
+        }
+    }
+
+    /// Fails if a placeholder is left in the script. The script's own expansions start
+    /// with $.
+    fn assert_filled_in(script: &str) {
         for (at, _) in script.match_indices('{') {
             let word = script[at + 1..].split('}').next().unwrap_or_default();
             let placeholder =
@@ -608,5 +896,53 @@ mod tests {
                 "{{{word}}} is left in the script"
             );
         }
+    }
+
+    #[test]
+    fn writes_the_runner_script() {
+        let runner = Runner::new("m8g.4xlarge".to_owned(), 2, false).unwrap();
+        let script = script(
+            &run(&["abcdefghijklmnopqrstuvwxyz", "zyxwvutsrqponmlkjihgfedcba"]),
+            &runner,
+        );
+        assert!(script.starts_with("#!/bin/bash\nshutdown -h +360\n"));
+        assert!(script.contains("\nrun=s3://temporal-dsql-ci-bucket/runs/1700000000000\n"));
+        assert!(script.contains("\nexport GOMAXPROCS='8'\n"));
+        assert!(script.contains("\nexport TEMPORAL_TEST_SHARED_CLUSTERS='2'\n"));
+        assert!(script.contains("\nexport TEMPORAL_TEST_DEDICATED_CLUSTERS='2'\n"));
+        assert!(script.contains("\nexport TEMPORAL_AWAIT_ATTEMPT_TIMEOUT='15s'\n"));
+        assert!(script.contains("\nexport TEST_TOTAL_SHARDS='2'\n"));
+        assert!(script.contains(
+            "TEMPORAL_TEST_CLUSTER_EVENTS_FILE=\"$PWD/$dir/clusters.jsonl\" DSQL_TEST_POOL_METRICS_FILE=\"$PWD/$dir/pools.jsonl\" \\\n"
+        ));
+        assert!(script.contains(
+            "\n    ./functional.test -test.v=test2json -test.count=1 -test.timeout=90m -persistenceType=sql -persistenceDriver=dsql -test.parallel=10 \"$@\" -test.cpuprofile=\"$dir/cpu.pprof\" "
+        ));
+        let lane = |shard: u16, cluster: &str| {
+            format!(
+                "\n(\n  export DSQL_TEST_ENDPOINT='{cluster}.dsql.eu-west-1.on.aws'\n  export DSQL_TEST_SCHEMAS='public,corpus_1,corpus_2,corpus_3,corpus_4,corpus_5,corpus_6,corpus_7,corpus_8'\n  export AWS_REGION='eu-west-1'\n  export TEST_SHARD_INDEX='{}'\n  attempt shard-{shard} '-test.skip={ALONE}'\n",
+                shard - 1
+            )
+        };
+        assert!(script.contains(&lane(1, "abcdefghijklmnopqrstuvwxyz")));
+        assert!(script.contains(&lane(2, "zyxwvutsrqponmlkjihgfedcba")));
+        assert_eq!(script.matches("attempt alone").count(), 1);
+        assert!(script.contains(&format!(
+            "\n  (unset TEST_TOTAL_SHARDS TEST_SHARD_INDEX && attempt alone '-test.run={ALONE}')\n  rerun 1\n) &\nlanes=\"$lanes $!\"\n"
+        )));
+        assert!(script.contains("\n  rerun 2\n) &\nlanes=\"$lanes $!\"\nwhile sleep 60; do\n"));
+        assert!(script.contains("\n  for shard in 1 2; do\n"));
+        assert!(script.contains("  for _ in $(seq 15); do\n"));
+        assert!(script.contains("|| finish 125\n"));
+        assert!(script.contains("--key runs/1700000000000/stop "));
+        assert!(script.ends_with("\nwait $lanes\nfinish 0\n"));
+        assert_filled_in(&script);
+
+        let runner = Runner::new("m8g.4xlarge".to_owned(), 4, true).unwrap();
+        let script = super::script(&run(&[]), &runner);
+        assert!(!script.contains("DSQL_TEST_ENDPOINT"));
+        assert!(script.contains("\n(\n  export TEST_SHARD_INDEX='3'\n  attempt shard-4 "));
+        assert!(script.contains("\n  for shard in 1 2 3 4; do\n"));
+        assert_filled_in(&script);
     }
 }
