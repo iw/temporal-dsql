@@ -310,7 +310,7 @@ go run ./cmd/tools/dsql --endpoint "$DSQL_TEST_ENDPOINT" \
 AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus
 ```
 
-The test clusters lease `public` and the eight schemas, with three shared and two dedicated pooled clusters, and their servers log at warning level and above. The run prints each top-level test's result as it ends, and writes these files, masked, to `.dagger/live/target/corpus/<run>`:
+The test clusters lease `public` and the eight schemas, with three shared and two dedicated pooled clusters, and their servers log at warning level and above. As upstream's CI does, the tests give each attempt of an await helper's condition 15 seconds, with `TEMPORAL_AWAIT_ATTEMPT_TIMEOUT`. The run prints each top-level test's result as it ends, and writes these files, masked, to `.dagger/live/target/corpus/<run>`:
 
 | File | Contents |
 |---|---|
@@ -318,7 +318,7 @@ The test clusters lease `public` and the eight schemas, with three shared and tw
 | `clusters.jsonl` | A line for each test cluster created |
 | `pools.jsonl` | The test clusters' pool metrics: each pool's gauges and counters every 15 seconds, and each connection's handshake time or failure. A line names the cluster's schema, the test that created the cluster, the service and `db_kind`. The test process adds its own samples every 5 seconds, which name no cluster or test: `process_` metrics for how late the sample ran, the Go scheduler's latencies, stop-the-world pauses, CPU, memory, goroutines and lock waits, and, on Linux, `host_` metrics for the host's pressure stall times and the TCP segments it sent and retransmitted. Counters and histograms are their change since the process's previous sample |
 | `stderr.log` | The test process's standard error |
-| `summary.txt` | The top-level tallies, the tests that failed, and the tests without a result |
+| `summary.txt` | The top-level tallies and the test binary's exit status, each failed test none of whose subtests failed, and the top-level tests without a result. A failed test's line says how long the test process stopped while the test ran, in stop-the-world pauses other than the garbage collector's, when that came to a second or more: the test may have failed for want of time rather than for what it tests |
 
 The tests run as many tests at once as the machine has CPUs. To compare runs on machines of different sizes, `--parallel <count>` sets that number instead, as `-test.parallel`.
 
@@ -328,31 +328,50 @@ The run covers `./tests`. The clusters in `tests/xdc` replicate namespaces betwe
 
 ### On a Graviton instance
 
-With `--instance` as well, the tests run on an EC2 instance in the cluster's region rather than on your machine. It needs the one-time setup in [Runner instances](#runner-instances):
+With `--instance` as well, the tests run on an EC2 instance in the cluster's region rather than on your machine, in shards side by side, each against a cluster of its own. It needs the one-time setup in [Runner instances](#runner-instances):
 
 ```bash
 AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus --instance c8g.4xlarge
 ```
 
-The type must be a Graviton2, 3 or 4 type, and the user's policy allows the c8g and c7g families. Before the run creates anything, it builds `functional.test` and `test2json` for linux/arm64 with `CGO_ENABLED=0`, `-trimpath` and `-ldflags=-s -w`. It sets `GOARM64` to the processor's architecture: `v9.0` for Graviton4's 8g families, `v8.4` for Graviton3's 7g families and `v8.2` for Graviton2's 6g families. After it sets up the schemas, the run:
+The type must be a Graviton2, 3 or 4 type, and the user's policy allows the c8g and c7g families. Before the run creates anything, it builds `functional.test` and `test2json` for linux/arm64 with `CGO_ENABLED=0`, `-trimpath` and `-ldflags=-s -w`. It sets `GOARM64` to the processor's architecture: `v9.0` for Graviton4's 8g families, `v8.4` for Graviton3's 7g families and `v8.2` for Graviton2's 6g families.
 
-1. Uploads both binaries to `runs/<run>/bin/` in the CI bucket.
+**Shards.** Upstream's CI runs the functional tests in five shards, each on a machine of its own with four CPUs. A run on an instance runs four side by side, and `--shards <count>` sets another number, up to eight. Each shard is a test process that runs only the tests whose names hash to it, as upstream's `TEST_TOTAL_SHARDS` and `TEST_SHARD_INDEX` select them. A test inside one that runs in a shard, such as a case that creates a test env of its own within a suite method that created one, runs in that shard too. A shard's `GOMAXPROCS` is its share of the instance's vCPUs, which is also how many tests it runs at once unless `--parallel` says otherwise. It has two shared and two dedicated pooled test clusters. Of the nine schemas, they leave four for suites that share one cluster, and one that a dedicated slot's fresh cluster can always lease.
+
+Each shard has a DSQL cluster of its own: the run creates one for each shard, sets them up side by side and runs the live tests on the first. So each test process is its cluster's only client, as the test clusters' connection rates assume. And a test process that stops, such as while it dumps every goroutine's stack, holds up only its own shard's tests.
+
+**Tests that run alone.** `TestVersioningFunctionalSuite`'s `TestWorkflowTaskRedirectInRetryFirstTask` and `TestWorkflowTaskRedirectInRetryNonFirstTask` block their workflows under a short deadlock detection timeout, on purpose. At each detection, the Go SDK dumps every goroutine's stack, which stops the whole test process while it walks them. So the shards skip both tests, which run in a test process of their own, against the first shard's cluster, once the first shard's process has ended.
+
+**Failed tests run again.** Once a shard's test process ends, the run takes its failed tests none of whose subtests failed. If there are at most 20, the instance runs them again in a test process of their own against the shard's cluster, with a `-test.run` pattern that names each one, as upstream's test runner writes it. The summary reports both attempts. A test that passes only when it runs again still counts as failed: the second attempt tells a test that fails on its own from one that failed beside the others.
+
+After it sets up the clusters, the run:
+
+1. Uploads both binaries to `runs/<run>/bin/` in the CI bucket, and SQLite's schema files, which the tests read when they run on SQLite, to `runs/<run>/repo/`.
 2. Starts the instance in the first CI subnet whose zone has capacity for the type. The instance runs the latest Amazon Linux 2023 image for arm64 with the `temporal-dsql-ci-runner` instance profile, requires IMDSv2, and is tagged `purpose=temporal-dsql-ci` and `run=<run>`.
-3. Prints each top-level test's result as the instance reports it. The instance's boot script fetches the binaries, and runs the tests with the same flags and variables as a run on your machine, writing a CPU profile as well. Each minute, it uploads the top-level results so far.
-4. Fetches the tests' output once the instance has uploaded it, with their exit code. It masks the output into `.dagger/live/target/corpus/<run>`, with `cpu.pprof` beside the files above. The instance shuts down after its upload, which terminates it.
-5. Ends the instance, if it's still running, and deletes `runs/<run>/` in the bucket, however the run ends.
+3. Prints each top-level test's result as the instance reports it, with its shard. The instance's boot script fetches the binaries and the schema files, and starts a lane for each shard, which runs the shard's test process, then, in the first lane, the tests that run alone, then the shard's failed tests again. Each minute, the instance uploads each shard's top-level results so far.
+4. When a shard's first test process has ended, reads its failed tests, and writes the ones to run again to `runs/<run>/plan/<shard>`, for which the shard's lane waits up to 15 minutes.
+5. Fetches the tests' output once the instance has uploaded it all. It masks each test process's output into its own directory in `.dagger/live/target/corpus/<run>`, `shard-<n>`, `shard-<n>-rerun` or `alone`, with the files above and the process's CPU profile, `cpu.pprof`. The instance shuts down after its upload, which terminates it.
+6. Ends the instance, if it's still running, and deletes `runs/<run>/` in the bucket, however the run ends.
 
-On a c8g.4xlarge, a run takes about 52 minutes: 20 to build the binaries, create the cluster and set up its schemas, and 31 on the instance.
+`summary.txt` in the run's directory has each test process's top-level tallies and exit status, then the top-level tests' tallies across the processes, where a test failed if it failed in any of them, then each failed test none of whose subtests failed, with its process and how it fared when it ran again.
 
-The instance has no SSH key and no inbound rules, and gets its credentials from its role. It shuts down after nine hours, whatever happens, and each run with `--instance` ends CI instances that are more than twelve hours old.
+With `--sqlite`, the run creates no cluster or table and runs no live tests, and its shards run on SQLite with the same settings, as a baseline for a run on DSQL. It needs no engine, and its test processes still write their samples of themselves to `pools.jsonl`:
 
-To stop a test that hangs, create the run's `stop` file. Within a minute, the instance sends the tests SIGQUIT, and they exit with a goroutine dump in `stderr.log`:
+```bash
+AWS_PROFILE=temporal-dsql-ci cargo run --locked -- --corpus --instance c8g.4xlarge --sqlite
+```
+
+On a c8g.4xlarge, a run on DSQL took about 34 minutes: about 22 to create the four clusters and set up their schemas, and about 10 for the shards' tests. A run with `--sqlite` took about 10 minutes in all.
+
+The instance has no SSH key and no inbound rules, and gets its credentials from its role. Each test process has a 90-minute timeout. The instance shuts down after six hours, whatever happens, and each run with `--instance` ends CI instances that are more than twelve hours old.
+
+To stop a test that hangs, create the run's `stop` file. Within a minute, the instance sends every test process SIGQUIT, and each exits with a goroutine dump in its `stderr.log`. The instance does the same each minute after, so the lanes' later test processes end too:
 
 ```bash
 AWS_PROFILE=temporal-dsql-ci aws s3api put-object --bucket temporal-dsql-ci-<account-id> --key runs/<run>/stop
 ```
 
-The CPU profile covers the whole test process, with its servers, clients and tests. On a c8g.4xlarge, the process used about 0.4 of a core on average: the tests mostly wait on DSQL, so the build's flags, or a build with `-pgo=cpu.pprof`, make little difference to how long a run takes.
+The CPU profiles cover each whole test process, with its servers, clients and tests. With the tests in one process on a c8g.4xlarge, the process used about 0.4 of a core on average: the tests mostly wait on DSQL, so the build's flags, or a build with `-pgo=cpu.pprof`, make little difference to how long a run takes.
 
 ## Buildkite on Namespace
 
