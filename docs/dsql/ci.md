@@ -68,10 +68,10 @@ Edit `.dagger/modules/ci/src/lib.rs` or `Cargo.toml`, run `dagger generate`, and
 
 1. It creates an Aurora DSQL cluster and a DynamoDB table in the profile's region. Both are tagged `purpose=temporal-dsql-ci`, and the table is named `temporal-dsql-ci-<run>`.
 2. In the Dagger engine, it sets up the persistence schema at version 1.3 and the visibility schema at version 1.0 with `temporal-dsql-tool setup-schema`, which waits for the index builds.
-3. Also in the engine, it runs `go test -tags integration ./common/persistence/sql/sqlplugin/dsql/...` against them.
+3. Also in the engine, it runs `go test -tags integration ./common/persistence/sql/sqlplugin/dsql/...` against them, and then the check of the functional tests' schema reset, which clears `public`.
 4. It deletes the cluster and the table, whether the tests passed or not, and also when you stop it with Ctrl-C.
 
-Each run first deletes CI-tagged clusters and `temporal-dsql-ci-` tables that are more than three hours old, which runs that were killed outright left behind. A run takes about ten minutes, most of it waiting for the schemas' index builds. Run it before merging a change to the plugin, the schema or `temporal-dsql-tool`:
+Each run first deletes CI-tagged clusters and `temporal-dsql-ci-` tables that are more than twelve hours old, which runs that were killed outright left behind. A run takes about ten minutes, most of it waiting for the schemas' index builds. Run it before merging a change to the plugin, the schema or `temporal-dsql-tool`:
 
 ```bash
 eval "$(.dagger/engine.sh)"
@@ -138,6 +138,61 @@ The profile belongs to an IAM user, `temporal-dsql-ci`, that can do only what a 
 2. Create an access key for the user, and save it as the `temporal-dsql-ci` profile with region `eu-west-1`, for example with `aws configure --profile temporal-dsql-ci`.
 
 The user can create clusters only with the CI tag, use and delete only clusters that carry it, and touch only tables named `temporal-dsql-ci-*`. Getting a session token from STS needs no permission. The account needs DSQL's service-linked role, which AWS creates with the account's first cluster.
+
+## Functional tests on DSQL
+
+Temporal's functional tests in `tests/` start whole servers in the test process. With `-persistenceDriver=dsql` they run against an Aurora DSQL cluster, with the plugin as the persistence store and the DSQL visibility store:
+
+```bash
+go test -tags disable_grpc_modules,test_dep -timeout 8h ./tests \
+  -persistenceType=sql -persistenceDriver=dsql
+```
+
+The other drivers give each test cluster a database of its own. DSQL has one database, which holds up to ten schemas, and a persistence schema takes over a minute to set up. So each test cluster leases one of the persistence schemas that `DSQL_TEST_SCHEMAS` names, set up beforehand, and deletes the rows its previous cluster left before it starts. Every test cluster shares one visibility schema, since visibility rows are keyed by namespace ID, which is new for every cluster. A lock file for each schema, in the system's temporary directory, keeps the test processes on one machine apart.
+
+| Variable | Meaning |
+|---|---|
+| `DSQL_TEST_ENDPOINT` | The cluster's endpoint. Credentials come from the default AWS chain |
+| `DSQL_TEST_SCHEMAS` | The persistence schemas, comma-separated, each set up with `dsql/temporal`. The tests delete their rows |
+| `DSQL_TEST_VISIBILITY_SCHEMA` | The visibility schema, set up with `dsql/visibility`; `temporal_visibility` by default |
+| `DSQL_TEST_USER` | The database role; `admin` by default |
+| `DSQL_TEST_REGION` | The cluster's region, when the endpoint doesn't name it |
+
+Test clusters in the shared and dedicated pools keep their schemas until the test process ends. A test that needs a fresh cluster leases another schema while it holds a dedicated slot, and so does each suite that shares one cluster between its tests. A test waits for a free schema as long as it takes, and logs a warning each minute. So have more schemas than `TEMPORAL_TEST_SHARED_CLUSTERS` plus twice `TEMPORAL_TEST_DEDICATED_CLUSTERS`, the most that the pooled and fresh clusters can hold. With nine schemas, 1 and 3 leave two for the suites. Run one test package at a time, as `make functional-test` does.
+
+The test clusters' servers get the limits `config/dynamicconfig/development-dsql.yaml` sets for DSQL: a `system.transactionSizeLimit` of 1 MiB and a `limit.blobSize.error` of 1,000,000 bytes. Their pools hold five connections each, and open at most 30 a second.
+
+To set up the schemas by hand, set them up one at a time, since DSQL can fail a statement with OC001 while another session builds an index:
+
+```bash
+for schema in corpus_1 corpus_2 corpus_3 corpus_4 corpus_5 corpus_6 corpus_7 corpus_8; do
+  go run ./cmd/tools/dsql --endpoint "$DSQL_TEST_ENDPOINT" --search-path "$schema" \
+    setup-schema --schema-name dsql/temporal --version 1.3
+done
+go run ./cmd/tools/dsql --endpoint "$DSQL_TEST_ENDPOINT" \
+  setup-schema --schema-name dsql/visibility --version 1.0
+```
+
+### With the live tests
+
+`--corpus` makes a live run set up eight more persistence schemas, `corpus_1` to `corpus_8`, after the live tests. Then it runs `./tests` on this machine rather than in the engine, since the engine's environment doesn't suit in-process servers, with the profile's credentials from the default chain:
+
+```bash
+AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus
+```
+
+The test clusters lease `public` and the eight schemas, with one shared and three dedicated pooled clusters, and their servers log at warning level and above. The run prints each top-level test's result as it ends, and writes these files, masked, to `.dagger/live/target/corpus/<run>`:
+
+| File | Contents |
+|---|---|
+| `results.jsonl` | The tests' events from `go tool test2json` |
+| `clusters.jsonl` | A line for each test cluster created |
+| `stderr.log` | The test process's standard error |
+| `summary.txt` | The top-level tallies, the tests that failed, and the tests without a result |
+
+A run from a developer's machine takes about two and a half hours: half an hour to set up the schemas, then two hours of tests, which end with the versioning suites. A test that waits on a channel without a deadline can hold the run until the 8-hour timeout. To end the run sooner, send SIGQUIT to the `functional.test` process. It exits with a goroutine dump in `stderr.log`, and the run still writes its summary and deletes the cluster. A test that's stopped this way has no result. Neither does a test whose result line ran into a server's log output, which test2json reads as output. The summary lists both kinds.
+
+The run covers `./tests`. The clusters in `tests/xdc` replicate namespaces between them, so their visibility rows would meet in the one visibility schema, and `tests/ndc` hasn't been run on DSQL yet.
 
 ## Buildkite on Namespace
 
