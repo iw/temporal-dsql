@@ -12,6 +12,7 @@ import (
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/persistence"
+	"go.temporal.io/server/common/primitives"
 	"go.temporal.io/server/service/history/tasks"
 	"go.temporal.io/server/tests/testutils"
 	"go.uber.org/mock/gomock"
@@ -433,4 +434,29 @@ func TestTaskCategoryRegistryProvider(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPersistenceConfigForService(t *testing.T) {
+	sized := &config.SQL{MaxConns: 10, MaxConnsByService: map[string]int{"history": 40, "matching": 30}}
+	unsized := &config.SQL{MaxConns: 10}
+	cfg := config.Persistence{
+		DefaultStore:    "default",
+		VisibilityStore: "visibility",
+		DataStores: map[string]config.DataStore{
+			"default":    {SQL: sized},
+			"visibility": {SQL: unsized},
+			"other":      {Cassandra: &config.Cassandra{}},
+		},
+	}
+
+	history := persistenceConfigForService(cfg, primitives.HistoryService)
+	require.Equal(t, 40, history.DataStores["default"].SQL.MaxConns)
+	require.Same(t, unsized, history.DataStores["visibility"].SQL)
+	require.NotNil(t, history.DataStores["other"].Cassandra)
+	require.Equal(t, 30, persistenceConfigForService(cfg, primitives.MatchingService).DataStores["default"].SQL.MaxConns)
+	require.Equal(t, 10, persistenceConfigForService(cfg, primitives.FrontendService).DataStores["default"].SQL.MaxConns)
+
+	// The shared config keeps its sizes.
+	require.Equal(t, 10, sized.MaxConns)
+	require.Same(t, sized, cfg.DataStores["default"].SQL)
 }

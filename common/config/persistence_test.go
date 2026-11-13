@@ -46,6 +46,17 @@ func TestSQLValidate_PasswordCommandEmptyCommand(t *testing.T) {
 	require.ErrorContains(t, err, "passwordCommand.command must not be empty")
 }
 
+func TestSQLValidate_MaxConnsByService(t *testing.T) {
+	cfg := &SQL{MaxConnsByService: map[string]int{"history": 40, "matching": 30, "frontend": 20, "internal-frontend": 20, "worker": 10}}
+	require.NoError(t, cfg.validate())
+
+	cfg = &SQL{MaxConnsByService: map[string]int{"histroy": 40}}
+	require.ErrorContains(t, cfg.validate(), `maxConnsByService names "histroy"`)
+
+	cfg = &SQL{MaxConnsByService: map[string]int{"history": 0}}
+	require.ErrorContains(t, cfg.validate(), "maxConnsByService.history must be positive")
+}
+
 func TestSQLResolvePassword_Static(t *testing.T) {
 	cfg := &SQL{Password: "static-pass"}
 	pw, err := cfg.ResolvePassword()

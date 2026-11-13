@@ -431,7 +431,7 @@ func (params ServiceProviderParamsCommon) GetCommonServiceOptions(serviceName pr
 	return fx.Options(
 		fx.Supply(
 			serviceName,
-			params.PersistenceConfig,
+			persistenceConfigForService(params.PersistenceConfig, serviceName),
 			params.ClusterMetadata,
 			params.Cfg,
 			params.SpanExporters,
@@ -659,6 +659,25 @@ func withEphemeralPoolHint(cfg *config.Persistence) *config.Persistence {
 	}
 
 	return &ephemeralCfg
+}
+
+// persistenceConfigForService copies the persistence config with each SQL datastore's
+// MaxConns set to the service's entry in MaxConnsByService, where it has one. Services in
+// one process share one config, though their pools need different sizes.
+func persistenceConfigForService(cfg config.Persistence, serviceName primitives.ServiceName) config.Persistence {
+	dataStores := make(map[string]config.DataStore, len(cfg.DataStores))
+	for name, ds := range cfg.DataStores {
+		if ds.SQL != nil {
+			if maxConns, ok := ds.SQL.MaxConnsByService[string(serviceName)]; ok {
+				sqlCopy := *ds.SQL
+				sqlCopy.MaxConns = maxConns
+				ds.SQL = &sqlCopy
+			}
+		}
+		dataStores[name] = ds
+	}
+	cfg.DataStores = dataStores
+	return cfg
 }
 
 // ApplyClusterMetadataConfigProvider performs a config check against the configured persistence store for cluster metadata.

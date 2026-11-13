@@ -12,6 +12,7 @@ import (
 
 	"github.com/gocql/gocql"
 	"go.temporal.io/server/common/persistence/visibility/store/elasticsearch/client"
+	"go.temporal.io/server/common/primitives"
 )
 
 const (
@@ -287,6 +288,17 @@ func (c *SQL) validate() error {
 	}
 	if c.PasswordCommand != nil && c.PasswordCommand.Command == "" {
 		return errors.New("passwordCommand.command must not be empty")
+	}
+	for service, maxConns := range c.MaxConnsByService {
+		switch primitives.ServiceName(service) {
+		case primitives.FrontendService, primitives.InternalFrontendService, primitives.HistoryService,
+			primitives.MatchingService, primitives.WorkerService:
+		default:
+			return fmt.Errorf("maxConnsByService names %q, which is not a service", service)
+		}
+		if maxConns <= 0 {
+			return fmt.Errorf("maxConnsByService.%s must be positive, got %d", service, maxConns)
+		}
 	}
 	return nil
 }
