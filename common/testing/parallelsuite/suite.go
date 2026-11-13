@@ -139,6 +139,11 @@ func (s *Suite[T]) Context() context.Context {
 func (s *Suite[T]) Run(name string, fn func(T)) bool {
 	pt := s.guardT.T // grab T before sealing
 	s.guardT.markHasSubtests()
+	if s.runParallel {
+		// pt's deadline keeps running while the subtest waits for pt to return and for a
+		// free slot, which isn't pt's own time.
+		testcontext.HandOffToSubtests(pt)
+	}
 	return pt.Run(name, func(t *testing.T) {
 		fn(s.copySuite(t, s.runParallel, nil, nil).(T))
 	})

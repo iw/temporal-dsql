@@ -2,6 +2,7 @@ package testcontext
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -89,12 +90,31 @@ func AttachDecorator[K comparable](tb testing.TB, key K, decorator func(context.
 	})
 }
 
+// HandOffToSubtests records that tb has started parallel subtests. Go starts them once
+// tb's function returns and a parallel slot is free, and runs tb's cleanup only after
+// they finish, so tb's deadline keeps running while they wait for a slot and run. That
+// time isn't tb's own, and the subtests have contexts of their own, so tb fails for its
+// timeout only if the deadline had passed by the time it handed off. Without a context
+// for tb, it does nothing.
+func HandOffToSubtests(tb testing.TB) {
+	testContexts.Lock()
+	st, ok := testContexts.byTest[tb]
+	testContexts.Unlock()
+	if ok {
+		st.handOff()
+	}
+}
+
 type contextState struct {
 	mu         sync.Mutex
 	ctx        context.Context
 	cancel     context.CancelFunc
 	timeout    time.Duration
 	decorators map[any]struct{}
+	// handedOff records that the test started parallel subtests, and lateHandOff that
+	// its deadline had passed by then.
+	handedOff   bool
+	lateHandOff bool
 }
 
 func getContextState(tb testing.TB, timeout time.Duration) *contextState {
@@ -121,12 +141,12 @@ func getContextState(tb testing.TB, timeout time.Duration) *contextState {
 	testContexts.byTest[tb] = st
 
 	tb.Cleanup(func() {
-		err := st.err()
+		timedOut := st.timedOut()
 		st.cancel()
 		testContexts.Lock()
 		delete(testContexts.byTest, tb)
 		testContexts.Unlock()
-		if err == context.DeadlineExceeded {
+		if timedOut {
 			tb.Errorf("test exceeded timeout of %v", st.timeout)
 		}
 		st.release()
@@ -173,10 +193,27 @@ func (s *contextState) context() context.Context {
 	return s.ctx
 }
 
-func (s *contextState) err() error {
+// timedOut reports whether the test's deadline passed while the test was running
+// itself: at all, or by the time it handed off to parallel subtests.
+func (s *contextState) timedOut() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.ctx.Err()
+	if !errors.Is(s.ctx.Err(), context.DeadlineExceeded) {
+		return false
+	}
+	return !s.handedOff || s.lateHandOff
+}
+
+func (s *contextState) handOff() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ctx == nil {
+		return // the test has ended
+	}
+	if errors.Is(s.ctx.Err(), context.DeadlineExceeded) {
+		s.lateHandOff = true
+	}
+	s.handedOff = true
 }
 
 func (s *contextState) release() {

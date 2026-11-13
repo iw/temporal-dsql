@@ -64,17 +64,25 @@ func TestDSQLTestClusterConfig(t *testing.T) {
 		require.Equal(t, "tester", store.SQL.User)
 		require.Equal(t, dsqlTestMaxConns, store.SQL.MaxConns)
 		require.Equal(t, dsqlTestConnectionRate, store.SQL.ConnectAttributes["connection_rate_limit"])
+		require.Equal(t, dsqlTestConnectionBurst, store.SQL.ConnectAttributes["connection_burst_limit"])
+		require.Equal(t, dsqlTestPoolWarmup, store.SQL.ConnectAttributes["pool_warmup_timeout"])
 		require.NotContains(t, store.SQL.ConnectAttributes, "region")
 	}
 	require.Equal(t, "corpus_1", mainStore.SQL.ConnectAttributes["search_path"])
 	require.Equal(t, "temporal_visibility", visibilityStore.SQL.ConnectAttributes["search_path"])
+	require.Equal(t, map[string]int{"history": 40, "matching": 30, "frontend": 20, "worker": 10}, mainStore.SQL.MaxConnsByService)
+	require.Equal(t, map[string]int{"history": 10, "frontend": 10, "matching": 5, "worker": 5}, visibilityStore.SQL.MaxConnsByService)
 
 	// Each call returns copies.
 	mainStore.SQL.ConnectAttributes["search_path"] = "public"
 	visibilityStore.SQL.ConnectAttributes["search_path"] = "public"
+	mainStore.SQL.MaxConnsByService["history"] = 1
+	visibilityStore.SQL.MaxConnsByService["history"] = 1
 	cfg = c.Config()
 	require.Equal(t, "corpus_1", cfg.DataStores[cfg.DefaultStore].SQL.ConnectAttributes["search_path"])
 	require.Equal(t, "temporal_visibility", cfg.DataStores[cfg.VisibilityStore].SQL.ConnectAttributes["search_path"])
+	require.Equal(t, 40, cfg.DataStores[cfg.DefaultStore].SQL.MaxConnsByService["history"])
+	require.Equal(t, 10, cfg.DataStores[cfg.VisibilityStore].SQL.MaxConnsByService["history"])
 
 	c.TearDownTestDatabase()
 	require.Panics(t, func() { c.Config() })

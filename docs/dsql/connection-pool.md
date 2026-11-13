@@ -1,10 +1,12 @@
 # DSQL connection pool
 
-The persistence plugin uses pgx v5.7.2's `pgxpool` behind `database/sql` and sqlx. A single pool owns the physical connections and the acquisition queue. A DSQL visibility datastore has a pool of its own, built the same way.
+The persistence plugin uses pgx v5's `pgxpool` behind `database/sql` and sqlx. A single pool owns the physical connections and the acquisition queue. A DSQL visibility datastore has a pool of its own, built the same way.
 
 ## Size and startup
 
-Service pools set both `MinConns` and `MaxConns` to `maxConns`, or 100 when unset. pgxpool fills them in the background and maintains that size. Startup pings once with a 30-second timeout; it does not wait for the entire pool to fill or add a startup delay. Short-lived schema and startup pools use `PoolSizeHint: ephemeral`: at most five connections, with no minimum.
+Service pools set both `MinConns` and `MaxConns` to `maxConns`, or 100 when unset. Where one config serves several services, `maxConnsByService` sets `maxConns` for each service it names, so that history's pools can be larger than worker's. pgxpool fills each pool in the background and maintains its size. Short-lived schema and startup pools use `PoolSizeHint: ephemeral`: at most five connections, with no minimum.
+
+Startup pings once with a 30-second timeout. By default it doesn't wait for the rest of the pool. With `connectAttributes.pool_warmup_timeout` set, it then waits up to that long for a service pool to fill, so the service starts with its connections open, and logs a warning if the pool isn't full in time. pgxpool cancels the rest of its fill when a connection fails, and fills the pool at its next health check, a minute later. So a warm-up timeout over a minute, such as `90s`, lets a pool get over one failed connection.
 
 Each service pool opens its full `maxConns` allocation even at low traffic. Count **every pool in every Temporal process**, including multiple stores in one process, across all replicas. Their sum must fit the cluster's connection limit (10,000 by default), with headroom for ephemeral pools, rolling deployments and administration. A tenfold increase in traffic queues at the same pool limit; it does not create an extra buffer of connections. A tenfold increase in replicas needs a new capacity budget.
 
@@ -14,7 +16,7 @@ Each service pool opens its full `maxConns` allocation even at low traffic. Coun
 
 DSQL closes physical connections at 60 minutes. The plugin uses a 50-minute lifetime, up to four minutes of positive jitter, and a one-minute health-check interval. A shorter positive `maxConnLifetime` is honored; a longer value is capped at 50 minutes with one warning per plugin instance. IAM token lifetime is independent of established connection lifetime.
 
-pgxpool checks expiry on release and during health checks. No `BeforeAcquire` or `AfterRelease` hooks are installed. The intended margin is about five minutes for a transaction. This is not a hard maximum checkout age: in v5.7.2 health checks refill the minimum before retiring idle connections, and can defer expiry during slow or failed refills. They also retire expired idle connections incrementally at the minimum size. Acquired connections remain in use until released. Monitor connection failures and keep transactions shorter than five minutes.
+pgxpool checks expiry on release and during health checks. No `BeforeAcquire` or `AfterRelease` hooks are installed. The intended margin is about five minutes for a transaction. This is not a hard maximum checkout age: pgxpool's health checks refill the minimum before retiring idle connections, and can defer expiry during slow or failed refills. They also retire expired idle connections incrementally at the minimum size. Acquired connections remain in use until released. Monitor connection failures and keep transactions shorter than five minutes.
 
 ## Authentication and connection pacing
 
@@ -67,7 +69,8 @@ Budget every pool, including overlapping replicas during deployment. Set
 `dsql_connect_gcra#<endpoint>` item in the configured table with a string `pk` key
 and TTL on `ttl_epoch`.
 
-Watch `dsql_pool_open`, `dsql_pool_constructing`, `dsql_pool_wait_total`, canceled
-acquires and connection errors. A successful startup ping does not mean the
-background fill is complete. Check `open - constructing` against the expected
-size before starting more replicas. See [metrics](metrics.md).
+Watch `dsql_pool_open`, `dsql_pool_constructing`, the share of acquires that
+wait, canceled acquires and failed connections. Without `pool_warmup_timeout`,
+a successful startup ping does not mean the background fill is complete. Check
+`open - constructing` against the expected size before starting more replicas.
+See [metrics](metrics.md).
