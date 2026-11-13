@@ -20,12 +20,26 @@
 //! ```text
 //! AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus
 //! ```
+//!
+//! With `--instance` as well, they run on a Graviton instance of the given type in the
+//! cluster's region instead, built for its processor. The instance fetches them from the
+//! CI bucket, runs them with its own role's credentials and uploads their output, which
+//! this machine then masks into `target/corpus/<run>`, with the tests' CPU profile:
+//!
+//! ```text
+//! AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus --instance c8g.4xlarge
+//! ```
+//!
+//! `--parallel <count>` sets how many functional tests run at once, which is otherwise
+//! the CPU count of the machine they run on.
 
 use std::collections::BTreeSet;
 use std::error::Error;
+use std::fmt::Display;
 use std::io::Write as _;
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
-use std::process::{ExitCode, ExitStatus, Stdio};
+use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aws_config::meta::region::RegionProviderChain;
@@ -43,6 +57,8 @@ use dagger_sdk::{Container, HostDirectoryOpts, Query, QueryError};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, BufReader};
 use tokio::process::Command;
 
+mod runner;
+
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 /// Tags every resource a run creates, and starts every table's name.
@@ -53,8 +69,15 @@ const LEFTOVER_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 /// The persistence schemas the functional tests' clusters lease besides public. With
 /// public and the visibility schema, they make the ten schemas DSQL allows a database.
 const CORPUS_SCHEMAS: usize = 8;
-/// Bounds the functional tests, which take hours against DSQL.
-const CORPUS_TIMEOUT: &str = "8h";
+/// The functional tests' flags. The timeout bounds them, since they take hours against
+/// DSQL.
+const TEST_FLAGS: &[&str] = &[
+    "-test.v=test2json",
+    "-test.count=1",
+    "-test.timeout=8h",
+    "-persistenceType=sql",
+    "-persistenceDriver=dsql",
+];
 const GO_TEST_TAGS: &str = "disable_grpc_modules,test_dep";
 /// Outlasts a run, so the Go code's credentials don't expire part way.
 const SESSION_SECONDS: i32 = 60 * 60;
@@ -86,15 +109,95 @@ const EXCLUDES: &[&str] = &[
 struct Aws {
     dsql: aws_sdk_dsql::Client,
     dynamodb: aws_sdk_dynamodb::Client,
+    ec2: aws_sdk_ec2::Client,
+    s3: aws_sdk_s3::Client,
     sts: aws_sdk_sts::Client,
 }
 
-/// One run's names.
+/// One run's names and settings.
 struct Run {
     id: String,
     region: String,
     cluster: String,
     table: String,
+    /// The CI bucket, which holds a runner instance's files under runs/<id>.
+    bucket: String,
+    /// The functional tests' flags.
+    test_flags: Vec<String>,
+}
+
+/// What a run does after the live tests.
+#[derive(Debug, PartialEq)]
+enum Corpus {
+    /// Nothing more.
+    Skip,
+    /// Runs the functional tests on this machine.
+    Here,
+    /// Runs the functional tests on an instance of this type in the cluster's region.
+    Instance(String),
+}
+
+/// The run's arguments.
+#[derive(Debug, PartialEq)]
+struct Args {
+    corpus: Corpus,
+    /// The functional tests' -test.parallel, which otherwise defaults to the CPU count.
+    parallel: Option<NonZeroU16>,
+}
+
+impl Args {
+    fn parse(args: impl IntoIterator<Item = String>) -> std::result::Result<Self, String> {
+        let mut corpus = false;
+        let mut instance = None;
+        let mut parallel = None;
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--corpus" => corpus = true,
+                "--instance" => {
+                    let kind = args
+                        .next()
+                        .ok_or("--instance takes an instance type, such as c8g.4xlarge")?;
+                    runner::goarm64(&kind)?;
+                    instance = Some(kind);
+                }
+                "--parallel" => {
+                    let count = args.next().and_then(|count| count.parse().ok()).ok_or(
+                        "--parallel takes how many tests run at once, a whole number such as 10",
+                    )?;
+                    parallel = Some(count);
+                }
+                _ => {
+                    return Err(format!(
+                        "unknown argument {arg}; the run takes --corpus, --instance <type> and --parallel <count>"
+                    ));
+                }
+            }
+        }
+        let corpus = match (corpus, instance) {
+            (false, None) => Corpus::Skip,
+            (true, None) => Corpus::Here,
+            (true, Some(kind)) => Corpus::Instance(kind),
+            (false, Some(_)) => {
+                return Err("--instance runs the functional tests, so it needs --corpus".to_owned());
+            }
+        };
+        if corpus == Corpus::Skip && parallel.is_some() {
+            return Err(
+                "--parallel applies to the functional tests, so it needs --corpus".to_owned(),
+            );
+        }
+        Ok(Self { corpus, parallel })
+    }
+}
+
+/// The functional tests' flags, with -test.parallel when the run sets it.
+fn test_flags(parallel: Option<NonZeroU16>) -> Vec<String> {
+    TEST_FLAGS
+        .iter()
+        .map(|&flag| flag.to_owned())
+        .chain(parallel.map(|count| format!("-test.parallel={count}")))
+        .collect()
 }
 
 struct SessionCredentials {
@@ -106,19 +209,21 @@ struct SessionCredentials {
 #[tokio::main]
 async fn main() -> ExitCode {
     let started = Instant::now();
-    let mut corpus = false;
-    for arg in std::env::args().skip(1) {
-        if arg == "--corpus" {
-            corpus = true;
-        } else {
-            eprintln!("unknown argument {arg}; the run takes only --corpus");
+    let args = match Args::parse(std::env::args().skip(1)) {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("{err}");
             return ExitCode::FAILURE;
         }
-    }
-    match live(corpus).await {
+    };
+    // The functional tests' failures are in their summary, and don't fail the run.
+    let ended = if args.corpus == Corpus::Skip {
+        "passed"
+    } else {
+        "finished"
+    };
+    match live(args).await {
         Ok(()) => {
-            // The functional tests' failures are in their summary, and don't fail the run.
-            let ended = if corpus { "finished" } else { "passed" };
             println!("--- {ended} in {}s", started.elapsed().as_secs());
             ExitCode::SUCCESS
         }
@@ -129,7 +234,8 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn live(corpus: bool) -> Result<()> {
+async fn live(args: Args) -> Result<()> {
+    let Args { corpus, parallel } = args;
     let region = RegionProviderChain::default_provider().or_else(Region::new(DEFAULT_REGION));
     let config = aws_config::defaults(BehaviorVersion::latest())
         .region(region)
@@ -138,8 +244,11 @@ async fn live(corpus: bool) -> Result<()> {
     let aws = Aws {
         dsql: aws_sdk_dsql::Client::new(&config),
         dynamodb: aws_sdk_dynamodb::Client::new(&config),
+        ec2: aws_sdk_ec2::Client::new(&config),
+        s3: aws_sdk_s3::Client::new(&config),
         sts: aws_sdk_sts::Client::new(&config),
     };
+    let remote = matches!(corpus, Corpus::Instance(_));
     let identity = aws
         .sts
         .get_caller_identity()
@@ -151,7 +260,7 @@ async fn live(corpus: bool) -> Result<()> {
         cluster: String::new(),
     };
 
-    if let Err(err) = sweep(&aws).await {
+    if let Err(err) = sweep(&aws, remote).await {
         println!(
             "couldn't check for resources earlier runs left behind: {}",
             masker.mask(&err.to_string())
@@ -162,6 +271,10 @@ async fn live(corpus: bool) -> Result<()> {
         .duration_since(UNIX_EPOCH)?
         .as_millis()
         .to_string();
+    // A build failure stops the run before it creates anything.
+    if let Corpus::Instance(kind) = &corpus {
+        runner::build(&corpus_dir(&id), kind).await?;
+    }
     let region = config
         .region()
         .map_or_else(|| DEFAULT_REGION.to_owned(), ToString::to_string);
@@ -178,18 +291,23 @@ async fn live(corpus: bool) -> Result<()> {
     masker.cluster = created.identifier().to_owned();
     let run = Run {
         table: format!("{TAG}-{id}"),
+        bucket: format!("{TAG}-{}", masker.account),
         cluster: masker.cluster.clone(),
+        test_flags: test_flags(parallel),
         region,
         id,
     };
 
     // Ctrl-C ends the run early, but still deletes what it created.
     let outcome = tokio::select! {
-        outcome = exercise(&config, &aws, &run, &masker, corpus) => outcome,
+        outcome = exercise(&config, &aws, &run, &masker, &corpus) => outcome,
         _ = tokio::signal::ctrl_c() => Err("interrupted".into()),
     };
+    if remote {
+        println!("--- ending the runner instance and deleting the run's files");
+    }
     println!("--- deleting the cluster and the table");
-    let cleaned = cleanup(&aws, &run).await;
+    let cleaned = cleanup(&aws, &run, remote).await;
     outcome
         .and(cleaned)
         .map_err(|err| masker.mask(&err.to_string()).into())
@@ -201,7 +319,7 @@ async fn exercise(
     aws: &Aws,
     run: &Run,
     masker: &Masker,
-    corpus: bool,
+    corpus: &Corpus,
 ) -> Result<()> {
     aws.dynamodb
         .create_table()
@@ -251,13 +369,15 @@ async fn exercise(
 
     let credentials = session_credentials(config, aws).await?;
     let client = dagger_sdk::connect().await?;
-    let outcome = go_steps(&client.query(), &credentials, run, masker, corpus).await;
+    let more_schemas = *corpus != Corpus::Skip;
+    let outcome = go_steps(&client.query(), &credentials, run, masker, more_schemas).await;
     client.close().await?;
     outcome?;
-    if corpus {
-        functional_tests(run, masker).await?;
+    match corpus {
+        Corpus::Skip => Ok(()),
+        Corpus::Here => functional_tests(run, masker).await,
+        Corpus::Instance(kind) => runner::functional_tests(aws, run, masker, kind).await,
     }
-    Ok(())
 }
 
 /// Short-lived credentials for the Go code, so the profile's own keys stay on this machine.
@@ -432,9 +552,7 @@ async fn go_steps(
 /// clusters.jsonl with each test cluster created, and summary.txt.
 async fn functional_tests(run: &Run, masker: &Masker) -> Result<()> {
     let repo = std::fs::canonicalize(REPO)?;
-    let out = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target/corpus")
-        .join(&run.id);
+    let out = corpus_dir(&run.id);
     std::fs::create_dir_all(&out)?;
     let binary = out.join("functional.test");
 
@@ -454,9 +572,6 @@ async fn functional_tests(run: &Run, masker: &Masker) -> Result<()> {
         "--- running the functional tests, with their output in {}",
         out.display()
     );
-    let schemas: Vec<String> = std::iter::once("public".to_owned())
-        .chain(corpus_schemas())
-        .collect();
     let mut command = Command::new(&binary);
     // `dagger run` sets OpenTelemetry variables for its own traces, and the servers'
     // span exporters would read them.
@@ -465,28 +580,11 @@ async fn functional_tests(run: &Run, masker: &Masker) -> Result<()> {
             command.env_remove(name);
         }
     }
+    let clusters = out.join("clusters.jsonl");
     let mut tests = command
-        .args([
-            "-test.v=test2json",
-            "-test.count=1",
-            &format!("-test.timeout={CORPUS_TIMEOUT}"),
-            "-persistenceType=sql",
-            "-persistenceDriver=dsql",
-        ])
+        .args(&run.test_flags)
         .current_dir(repo.join("tests"))
-        .env("DSQL_TEST_ENDPOINT", endpoint(run))
-        .env("DSQL_TEST_SCHEMAS", schemas.join(","))
-        .env("AWS_REGION", &run.region)
-        // A pooled test cluster keeps its schema until the tests end. Three shared and two
-        // dedicated clusters, with a fresh cluster in each dedicated slot, hold at most
-        // seven of the nine schemas, leaving two for the suites that share one cluster.
-        .env("TEMPORAL_TEST_SHARED_CLUSTERS", "3")
-        .env("TEMPORAL_TEST_DEDICATED_CLUSTERS", "2")
-        .env("TEMPORAL_TEST_LOG_LEVEL", "warn")
-        .env(
-            "TEMPORAL_TEST_CLUSTER_EVENTS_FILE",
-            out.join("clusters.jsonl"),
-        )
+        .envs(test_env(run, &clusters.to_string_lossy()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -531,14 +629,46 @@ async fn functional_tests(run: &Run, masker: &Masker) -> Result<()> {
     test2json.wait().await?;
     errors.await??;
     std::fs::remove_file(&binary)?;
+    summarize(&out, &tally, status)
+}
 
-    let summary = tally.summary(status);
+/// The functional tests' environment, wherever they run, with the file in which they list
+/// each test cluster they create.
+fn test_env(run: &Run, clusters: &str) -> Vec<(&'static str, String)> {
+    let schemas: Vec<String> = std::iter::once("public".to_owned())
+        .chain(corpus_schemas())
+        .collect();
+    vec![
+        ("DSQL_TEST_ENDPOINT", endpoint(run)),
+        ("DSQL_TEST_SCHEMAS", schemas.join(",")),
+        ("AWS_REGION", run.region.clone()),
+        // A pooled test cluster keeps its schema until the tests end. Three shared and two
+        // dedicated clusters, with a fresh cluster in each dedicated slot, hold at most
+        // seven of the nine schemas, leaving two for the suites that share one cluster.
+        ("TEMPORAL_TEST_SHARED_CLUSTERS", "3".to_owned()),
+        ("TEMPORAL_TEST_DEDICATED_CLUSTERS", "2".to_owned()),
+        ("TEMPORAL_TEST_LOG_LEVEL", "warn".to_owned()),
+        ("TEMPORAL_TEST_CLUSTER_EVENTS_FILE", clusters.to_owned()),
+    ]
+}
+
+/// Prints the functional tests' summary and writes it to summary.txt, and fails the run
+/// when no test ran.
+fn summarize(out: &Path, tally: &Tally, exit: impl Display) -> Result<()> {
+    let summary = tally.summary(exit);
     println!("{summary}");
     std::fs::write(out.join("summary.txt"), &summary)?;
     if tally.passed + tally.failed + tally.skipped == 0 {
         return Err("no functional test ran".into());
     }
     Ok(())
+}
+
+/// Where a run writes the functional tests' output on this machine.
+fn corpus_dir(id: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/corpus")
+        .join(id)
 }
 
 /// Writes what a process prints, masked, to a file.
@@ -563,8 +693,9 @@ struct Tally {
     /// they ended, or their result line ran into a server's log output, which test2json
     /// then reads as output.
     unfinished: BTreeSet<String>,
-    /// Set when the test binary itself failed, such as on its timeout.
-    binary_failed: bool,
+    /// Set when test2json reports that the package failed, as it does when a test fails
+    /// and when the test binary itself fails, such as on its timeout.
+    package_failed: bool,
 }
 
 impl Tally {
@@ -573,7 +704,7 @@ impl Tally {
     fn add(&mut self, event: &str) -> Option<String> {
         let action = json_field(event, "Action")?;
         let Some(test) = json_field(event, "Test") else {
-            self.binary_failed |= action == "fail";
+            self.package_failed |= action == "fail";
             return None;
         };
         if test.contains('/') {
@@ -597,7 +728,7 @@ impl Tally {
         Some(format!("{action} {test} ({elapsed}s)"))
     }
 
-    fn summary(&self, status: ExitStatus) -> String {
+    fn summary(&self, status: impl Display) -> String {
         let unfinished = match self.unfinished.len() {
             0 => String::new(),
             n => format!(", {n} without a result"),
@@ -606,7 +737,8 @@ impl Tally {
             "--- functional tests: {} passed, {} failed, {} skipped{unfinished}; the test binary exited with {status}",
             self.passed, self.failed, self.skipped
         );
-        if self.binary_failed {
+        // Failed tests explain the package's failure unless the binary stopped early.
+        if self.package_failed && (self.failed == 0 || !self.unfinished.is_empty()) {
             summary.push_str(", reporting a failure of its own");
         }
         for test in &self.failures {
@@ -673,14 +805,18 @@ fn print_output(stderr: &str, stdout: &str, masker: &Masker) {
     }
 }
 
-/// Deletes CI-tagged clusters and CI tables that interrupted runs left behind.
-async fn sweep(aws: &Aws) -> Result<()> {
+/// Deletes CI-tagged clusters and CI tables that interrupted runs left behind. For a run
+/// with `--instance`, it also ends the runner instances that they left up.
+async fn sweep(aws: &Aws, remote: bool) -> Result<()> {
     let cutoff = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)?
             .saturating_sub(LEFTOVER_AGE)
             .as_secs(),
     )?;
+    if remote {
+        runner::sweep(aws, cutoff).await?;
+    }
     let mut clusters = aws.dsql.list_clusters().into_paginator().items().send();
     while let Some(summary) = clusters.next().await {
         let summary = summary.map_err(failed("list clusters"))?;
@@ -754,9 +890,13 @@ async fn sweep(aws: &Aws) -> Result<()> {
     Ok(())
 }
 
-/// Deletes the run's cluster and table, and reports every failure.
-async fn cleanup(aws: &Aws, run: &Run) -> Result<()> {
+/// Deletes the run's cluster and table. For a run with `--instance`, it also ends the
+/// runner instance and deletes the run's files. It reports every failure.
+async fn cleanup(aws: &Aws, run: &Run, remote: bool) -> Result<()> {
     let mut failures = Vec::new();
+    if remote && let Err(err) = runner::end(aws, run).await {
+        failures.push(err.to_string());
+    }
     if let Err(err) = aws
         .dsql
         .delete_cluster()
@@ -837,6 +977,7 @@ impl Masker {
 #[cfg(test)]
 mod tests {
     use std::os::unix::process::ExitStatusExt as _;
+    use std::process::ExitStatus;
 
     use super::*;
 
@@ -871,12 +1012,12 @@ mod tests {
         );
         assert_eq!(tally.add(&event("run", "TestD")), None);
         assert_eq!(tally.add(r#"{"Action":"output","Output":"ok\n"}"#), None);
-        assert!(!tally.binary_failed);
+        assert!(!tally.package_failed);
         assert_eq!(
             tally.add(r#"{"Action":"fail","Package":"p","Elapsed":9}"#),
             None
         );
-        assert!(tally.binary_failed);
+        assert!(tally.package_failed);
 
         let summary = tally.summary(ExitStatus::from_raw(256));
         assert!(summary.starts_with(
@@ -884,6 +1025,55 @@ mod tests {
         ));
         assert!(summary.contains("reporting a failure of its own"));
         assert!(summary.ends_with("\nfailed: TestB\nno result: TestD\n"));
+
+        tally.add(&event("pass", "TestD"));
+        let summary = tally.summary(ExitStatus::from_raw(256));
+        assert!(!summary.contains("of its own"), "{summary}");
+
+        let mut tally = Tally::default();
+        tally.add(&event("pass", "TestA"));
+        tally.add(r#"{"Action":"fail","Package":"p","Elapsed":9}"#);
+        assert!(
+            tally
+                .summary(ExitStatus::from_raw(256))
+                .contains("reporting a failure of its own")
+        );
+    }
+
+    #[test]
+    fn reads_the_arguments() {
+        let parse = |args: &[&str]| Args::parse(args.iter().map(|&arg| arg.to_owned()));
+        let args = |corpus, parallel| -> std::result::Result<Args, String> {
+            Ok(Args {
+                corpus,
+                parallel: NonZeroU16::new(parallel),
+            })
+        };
+        let graviton4 = || Corpus::Instance("c8g.4xlarge".to_owned());
+        assert_eq!(parse(&[]), args(Corpus::Skip, 0));
+        assert_eq!(parse(&["--corpus"]), args(Corpus::Here, 0));
+        assert_eq!(
+            parse(&["--corpus", "--instance", "c8g.4xlarge"]),
+            args(graviton4(), 0)
+        );
+        assert_eq!(
+            parse(&["--parallel", "10", "--corpus", "--instance", "c8g.4xlarge"]),
+            args(graviton4(), 10)
+        );
+        assert!(parse(&["--instance", "c8g.4xlarge"]).is_err());
+        assert!(parse(&["--corpus", "--instance"]).is_err());
+        assert!(parse(&["--corpus", "--instance", "c7i.4xlarge"]).is_err());
+        assert!(parse(&["--parallel", "10"]).is_err());
+        assert!(parse(&["--corpus", "--parallel"]).is_err());
+        assert!(parse(&["--corpus", "--parallel", "0"]).is_err());
+        assert!(parse(&["--corpus", "--parallel", "ten"]).is_err());
+        assert!(parse(&["--verbose"]).is_err());
+
+        assert_eq!(test_flags(None), TEST_FLAGS);
+        assert_eq!(
+            test_flags(NonZeroU16::new(10)).last().map(String::as_str),
+            Some("-test.parallel=10")
+        );
     }
 
     #[test]

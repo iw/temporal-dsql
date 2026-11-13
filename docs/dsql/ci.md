@@ -139,6 +139,134 @@ The profile belongs to an IAM user, `temporal-dsql-ci`, that can do only what a 
 
 The user can create clusters only with the CI tag, use and delete only clusters that carry it, and touch only tables named `temporal-dsql-ci-*`. Getting a session token from STS needs no permission. The account needs DSQL's service-linked role, which AWS creates with the account's first cluster.
 
+### Runner instances
+
+Running the functional tests [on a Graviton instance](#on-a-graviton-instance) needs a bucket, a role for the instances, a network and a second policy for the user. Set them up once, in eu-west-1:
+
+1. **Bucket.** Create `temporal-dsql-ci-<account-id>`, tagged `purpose=temporal-dsql-ci`. Keep S3's defaults for a new bucket, which block public access and turn off ACLs. Add a lifecycle rule that expires objects under `runs/` after a day and aborts incomplete multipart uploads after a day, and a bucket policy that denies requests without TLS (`aws:SecureTransport` false).
+2. **Runner role.** Create the role `temporal-dsql-ci-runner`, which EC2 can assume, with this inline policy, and an instance profile of the same name that holds the role:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Sid": "ConnectToCiClusters",
+         "Effect": "Allow",
+         "Action": "dsql:DbConnectAdmin",
+         "Resource": "arn:aws:dsql:eu-west-1:<account-id>:cluster/*",
+         "Condition": { "StringEquals": { "aws:ResourceTag/purpose": "temporal-dsql-ci" } }
+       },
+       {
+         "Sid": "RunFiles",
+         "Effect": "Allow",
+         "Action": ["s3:GetObject", "s3:PutObject"],
+         "Resource": "arn:aws:s3:::temporal-dsql-ci-<account-id>/runs/*"
+       }
+     ]
+   }
+   ```
+
+3. **Network.** Create a VPC, such as `10.42.0.0/16`, with an internet gateway, a route table whose default route goes to the gateway, and a subnet in each zone that gives instances a public IPv4 address. In the VPC, create the security group `temporal-dsql-ci-runner`, with no inbound rules and outbound TCP to ports 443 (S3) and 5432 (DSQL) only. Tag all of these `purpose=temporal-dsql-ci`. Nothing uses the VPC's default security group, so remove its rules.
+4. **User policy.** Create the managed policy `temporal-dsql-ci-runners`, and attach it to the user. It's a managed policy because an IAM user's inline policies share a limit of 2,048 characters:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Sid": "LaunchCiRunners",
+         "Effect": "Allow",
+         "Action": "ec2:RunInstances",
+         "Resource": "arn:aws:ec2:eu-west-1:<account-id>:instance/*",
+         "Condition": {
+           "StringEquals": {
+             "aws:RequestTag/purpose": "temporal-dsql-ci",
+             "ec2:MetadataHttpTokens": "required"
+           },
+           "StringLike": { "ec2:InstanceType": ["c8g.*", "c7g.*"] }
+         }
+       },
+       {
+         "Sid": "LaunchIntoTheCiNetwork",
+         "Effect": "Allow",
+         "Action": "ec2:RunInstances",
+         "Resource": [
+           "arn:aws:ec2:eu-west-1:<account-id>:subnet/*",
+           "arn:aws:ec2:eu-west-1:<account-id>:security-group/*"
+         ],
+         "Condition": { "StringEquals": { "aws:ResourceTag/purpose": "temporal-dsql-ci" } }
+       },
+       {
+         "Sid": "LaunchWithNewInterfacesAndVolumes",
+         "Effect": "Allow",
+         "Action": "ec2:RunInstances",
+         "Resource": [
+           "arn:aws:ec2:eu-west-1:<account-id>:network-interface/*",
+           "arn:aws:ec2:eu-west-1:<account-id>:volume/*"
+         ]
+       },
+       {
+         "Sid": "LaunchFromAmazonImages",
+         "Effect": "Allow",
+         "Action": "ec2:RunInstances",
+         "Resource": "arn:aws:ec2:eu-west-1::image/*",
+         "Condition": { "StringEquals": { "ec2:Owner": "amazon" } }
+       },
+       {
+         "Sid": "TagCiRunnersAtLaunch",
+         "Effect": "Allow",
+         "Action": "ec2:CreateTags",
+         "Resource": [
+           "arn:aws:ec2:eu-west-1:<account-id>:instance/*",
+           "arn:aws:ec2:eu-west-1:<account-id>:volume/*"
+         ],
+         "Condition": { "StringEquals": { "ec2:CreateAction": "RunInstances" } }
+       },
+       {
+         "Sid": "TerminateCiRunners",
+         "Effect": "Allow",
+         "Action": "ec2:TerminateInstances",
+         "Resource": "arn:aws:ec2:eu-west-1:<account-id>:instance/*",
+         "Condition": { "StringEquals": { "aws:ResourceTag/purpose": "temporal-dsql-ci" } }
+       },
+       {
+         "Sid": "FindTheCiNetworkAndRunners",
+         "Effect": "Allow",
+         "Action": ["ec2:DescribeInstances", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups"],
+         "Resource": "*"
+       },
+       {
+         "Sid": "PassTheRunnerRole",
+         "Effect": "Allow",
+         "Action": "iam:PassRole",
+         "Resource": "arn:aws:iam::<account-id>:role/temporal-dsql-ci-runner",
+         "Condition": { "StringEquals": { "iam:PassedToService": "ec2.amazonaws.com" } }
+       },
+       {
+         "Sid": "ResolveTheRunnerImage",
+         "Effect": "Allow",
+         "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+         "Resource": "arn:aws:ssm:eu-west-1:*:parameter/aws/service/ami-amazon-linux-latest/*"
+       },
+       {
+         "Sid": "ListRunFiles",
+         "Effect": "Allow",
+         "Action": "s3:ListBucket",
+         "Resource": "arn:aws:s3:::temporal-dsql-ci-<account-id>"
+       },
+       {
+         "Sid": "RunFiles",
+         "Effect": "Allow",
+         "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+         "Resource": "arn:aws:s3:::temporal-dsql-ci-<account-id>/runs/*"
+       }
+     ]
+   }
+   ```
+
+With this policy, the user can start only c8g and c7g instances. Each must require IMDSv2, carry the CI tag and use the runner role and an image that Amazon owns. It must also go into the tagged subnets and security group. The user can end only CI-tagged instances, and can use the bucket only under `runs/`. The runner role can connect only to CI-tagged clusters, and can read and write only run files. The network costs nothing while no instance runs. A running instance's public IPv4 address is billed by the hour.
+
 ## Functional tests on DSQL
 
 Temporal's functional tests in `tests/` start whole servers in the test process. With `-persistenceDriver=dsql` they run against an Aurora DSQL cluster, with the plugin as the persistence store and the DSQL visibility store:
@@ -190,9 +318,39 @@ The test clusters lease `public` and the eight schemas, with three shared and tw
 | `stderr.log` | The test process's standard error |
 | `summary.txt` | The top-level tallies, the tests that failed, and the tests without a result |
 
+The tests run as many tests at once as the machine has CPUs. To compare runs on machines of different sizes, `--parallel <count>` sets that number instead, as `-test.parallel`.
+
 A run from a developer's machine takes about two hours: 20 to 30 minutes to set up the schemas, then an hour and a half of tests. `TestVersioning3FunctionalSuite` shares one cluster between its tests, and runs alone for the last half hour. A test that waits on a channel without a deadline can hold the run until the 8-hour timeout. To end the run sooner, send SIGQUIT to the `functional.test` process. It exits with a goroutine dump in `stderr.log`, and the run still writes its summary and deletes the cluster. A test that's stopped this way has no result. Neither does a test whose result line ran into a server's log output, which test2json reads as output. The summary lists both kinds.
 
 The run covers `./tests`. The clusters in `tests/xdc` replicate namespaces between them, so their visibility rows would meet in the one visibility schema, and `tests/ndc` hasn't been run on DSQL yet.
+
+### On a Graviton instance
+
+With `--instance` as well, the tests run on an EC2 instance in the cluster's region rather than on your machine. It needs the one-time setup in [Runner instances](#runner-instances):
+
+```bash
+AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus --instance c8g.4xlarge
+```
+
+The type must be a Graviton2, 3 or 4 type, and the user's policy allows the c8g and c7g families. Before the run creates anything, it builds `functional.test` and `test2json` for linux/arm64 with `CGO_ENABLED=0`, `-trimpath` and `-ldflags=-s -w`. It sets `GOARM64` to the processor's architecture: `v9.0` for Graviton4's 8g families, `v8.4` for Graviton3's 7g families and `v8.2` for Graviton2's 6g families. After it sets up the schemas, the run:
+
+1. Uploads both binaries to `runs/<run>/bin/` in the CI bucket.
+2. Starts the instance in the first CI subnet whose zone has capacity for the type. The instance runs the latest Amazon Linux 2023 image for arm64 with the `temporal-dsql-ci-runner` instance profile, requires IMDSv2, and is tagged `purpose=temporal-dsql-ci` and `run=<run>`.
+3. Prints each top-level test's result as the instance reports it. The instance's boot script fetches the binaries, and runs the tests with the same flags and variables as a run on your machine, writing a CPU profile as well. Each minute, it uploads the top-level results so far.
+4. Fetches the tests' output once the instance has uploaded it, with their exit code. It masks the output into `.dagger/live/target/corpus/<run>`, with `cpu.pprof` beside the files above. The instance shuts down after its upload, which terminates it.
+5. Ends the instance, if it's still running, and deletes `runs/<run>/` in the bucket, however the run ends.
+
+On a c8g.4xlarge, a run takes about 52 minutes: 20 to build the binaries, create the cluster and set up its schemas, and 31 on the instance.
+
+The instance has no SSH key and no inbound rules, and gets its credentials from its role. It shuts down after nine hours, whatever happens, and each run with `--instance` ends CI instances that are more than twelve hours old.
+
+To stop a test that hangs, create the run's `stop` file. Within a minute, the instance sends the tests SIGQUIT, and they exit with a goroutine dump in `stderr.log`:
+
+```bash
+AWS_PROFILE=temporal-dsql-ci aws s3api put-object --bucket temporal-dsql-ci-<account-id> --key runs/<run>/stop
+```
+
+The CPU profile covers the whole test process, with its servers, clients and tests. On a c8g.4xlarge, the process used about 0.4 of a core on average: the tests mostly wait on DSQL, so the build's flags, or a build with `-pgo=cpu.pprof`, make little difference to how long a run takes.
 
 ## Buildkite on Namespace
 
