@@ -70,6 +70,12 @@ const CHECK_FAILURES: u32 = 15;
 const FETCH_FAILED: i32 = 125;
 /// What this machine builds for a runner instance.
 const BINARIES: &[&str] = &["functional.test", "test2json"];
+/// The repository's files that the tests read on a runner instance, under TEMPORAL_ROOT:
+/// the schema that SQLite's shared test clusters load into their database files.
+const REPO_FILES: &[&str] = &[
+    "schema/sqlite/v3/temporal/schema.sql",
+    "schema/sqlite/v3/visibility/schema.sql",
+];
 /// What a runner instance writes for each test process, and whether each file is text for
 /// the masker.
 const OUTPUT: &[(&str, bool)] = &[
@@ -79,16 +85,16 @@ const OUTPUT: &[(&str, bool)] = &[
     ("stderr.log", true),
     ("cpu.pprof", false),
 ];
-/// A runner instance's boot script, which runs as root. It fetches the tests, then starts
-/// a lane for each shard. A lane runs the shard's test process with its output in
-/// out/shard-<n>; the first lane then runs the tests in ALONE in a process of their own,
-/// in out/alone. Each lane then waits for this machine to name the shard's failed tests in
-/// plan/<n>, and runs them again in a process of their own, in out/shard-<n>-rerun. A test
-/// process uploads its output once it ends, then its exit code as out/<dir>.code. Each
-/// poll, the instance uploads each shard's top-level results so far, and if the run's
-/// `stop` file has appeared, it sends the test processes SIGQUIT, which ends them with
-/// their goroutines' stacks. Once every lane has ended, it uploads its own exit code, and
-/// shuts down.
+/// A runner instance's boot script, which runs as root. It fetches the tests and the
+/// repository files they read, then starts a lane for each shard. A lane runs the shard's
+/// test process with its output in out/shard-<n>; the first lane then runs the tests in
+/// ALONE in a process of their own, in out/alone. Each lane then waits for this machine to
+/// name the shard's failed tests in plan/<n>, and runs them again in a process of their
+/// own, in out/shard-<n>-rerun. A test process uploads its output once it ends, then its
+/// exit code as out/<dir>.code. Each poll, the instance uploads each shard's top-level
+/// results so far, and if the run's `stop` file has appeared, it sends the test processes
+/// SIGQUIT, which ends them with their goroutines' stacks. Once every lane has ended, it
+/// uploads its own exit code, and shuts down.
 const SCRIPT: &str = r#"#!/bin/bash
 shutdown -h +{minutes}
 export HOME=/root AWS_REGION={region} AWS_DEFAULT_REGION={region}
@@ -100,7 +106,7 @@ finish() {
   exit
 }
 aws s3 cp --quiet "$run/bin/functional.test" . && aws s3 cp --quiet "$run/bin/test2json" . &&
-  chmod +x functional.test test2json || finish {fetch_failed}
+  {fetch_files}chmod +x functional.test test2json || finish {fetch_failed}
 {exports}export TEMPORAL_ROOT=/var/tmp/ci
 attempt() {
   local dir=out/$1
@@ -301,6 +307,17 @@ pub(crate) async fn functional_tests(
             .await
             .map_err(failed("upload the tests"))?;
         std::fs::remove_file(path)?;
+    }
+    let repo = std::fs::canonicalize(REPO)?;
+    for file in REPO_FILES {
+        aws.s3
+            .put_object()
+            .bucket(&run.bucket)
+            .key(format!("{prefix}/repo/{file}"))
+            .body(ByteStream::from_path(repo.join(file)).await?)
+            .send()
+            .await
+            .map_err(failed("upload the tests' files"))?;
     }
     let (instance, zone) = launch(aws, run, runner).await?;
     println!(
@@ -551,8 +568,16 @@ fn script(run: &Run, runner: &Runner) -> String {
         }
         let _ = writeln!(lanes, "  rerun {shard}\n) &\nlanes=\"$lanes $!\"");
     }
+    let fetch_files: String = REPO_FILES
+        .iter()
+        .map(|file| {
+            let dir = file.rsplit_once('/').map_or(".", |(dir, _)| dir);
+            format!("mkdir -p {dir} && aws s3 cp --quiet \"$run/repo/{file}\" {file} &&\n  ")
+        })
+        .collect();
     let shards: Vec<String> = (1..=runner.shards).map(|shard| shard.to_string()).collect();
     SCRIPT
+        .replace("{fetch_files}", &fetch_files)
         .replace("{exports}", &exports)
         .replace("{lanes}", &lanes)
         .replace("{shards}", &shards.join(" "))
@@ -933,7 +958,9 @@ mod tests {
         assert!(script.contains("\n  rerun 2\n) &\nlanes=\"$lanes $!\"\nwhile sleep 60; do\n"));
         assert!(script.contains("\n  for shard in 1 2; do\n"));
         assert!(script.contains("  for _ in $(seq 15); do\n"));
-        assert!(script.contains("|| finish 125\n"));
+        assert!(script.contains(
+            "\n  mkdir -p schema/sqlite/v3/visibility && aws s3 cp --quiet \"$run/repo/schema/sqlite/v3/visibility/schema.sql\" schema/sqlite/v3/visibility/schema.sql &&\n  chmod +x functional.test test2json || finish 125\n"
+        ));
         assert!(script.contains("--key runs/1700000000000/stop "));
         assert!(script.ends_with("\nwait $lanes\nfinish 0\n"));
         assert_filled_in(&script);

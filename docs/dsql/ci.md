@@ -346,9 +346,9 @@ Each shard has a DSQL cluster of its own: the run creates one for each shard, se
 
 After it sets up the clusters, the run:
 
-1. Uploads both binaries to `runs/<run>/bin/` in the CI bucket.
+1. Uploads both binaries to `runs/<run>/bin/` in the CI bucket, and SQLite's schema files, which the tests read when they run on SQLite, to `runs/<run>/repo/`.
 2. Starts the instance in the first CI subnet whose zone has capacity for the type. The instance runs the latest Amazon Linux 2023 image for arm64 with the `temporal-dsql-ci-runner` instance profile, requires IMDSv2, and is tagged `purpose=temporal-dsql-ci` and `run=<run>`.
-3. Prints each top-level test's result as the instance reports it, with its shard. The instance's boot script fetches the binaries, and starts a lane for each shard, which runs the shard's test process, then, in the first lane, the tests that run alone, then the shard's failed tests again. Each minute, the instance uploads each shard's top-level results so far.
+3. Prints each top-level test's result as the instance reports it, with its shard. The instance's boot script fetches the binaries and the schema files, and starts a lane for each shard, which runs the shard's test process, then, in the first lane, the tests that run alone, then the shard's failed tests again. Each minute, the instance uploads each shard's top-level results so far.
 4. When a shard's first test process has ended, reads its failed tests, and writes the ones to run again to `runs/<run>/plan/<shard>`, for which the shard's lane waits up to 15 minutes.
 5. Fetches the tests' output once the instance has uploaded it all. It masks each test process's output into its own directory in `.dagger/live/target/corpus/<run>`, `shard-<n>`, `shard-<n>-rerun` or `alone`, with the files above and the process's CPU profile, `cpu.pprof`. The instance shuts down after its upload, which terminates it.
 6. Ends the instance, if it's still running, and deletes `runs/<run>/` in the bucket, however the run ends.
