@@ -39,10 +39,15 @@ func runsOnDSQL(cfg config.Persistence) bool {
 	return ok && store.SQL != nil && store.SQL.PluginName == dsqlPluginName
 }
 
+// UseDSQLPersistence reports whether the functional tests run on DSQL.
+func UseDSQLPersistence() bool {
+	return cliFlags.persistenceDriver == dsqlPluginName
+}
+
 // dsqlSuitePlaces holds a place for each suite-scoped cluster that may lease a DSQL test
 // schema at once. It is nil when the tests don't run on DSQL.
 var dsqlSuitePlaces = sync.OnceValues(func() (chan struct{}, error) {
-	if cliFlags.persistenceDriver != dsqlPluginName {
+	if !UseDSQLPersistence() {
 		return nil, nil
 	}
 	schemas, err := persistencetests.DSQLTestSchemaCount()
