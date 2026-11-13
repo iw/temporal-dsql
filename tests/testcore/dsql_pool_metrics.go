@@ -16,7 +16,8 @@ import (
 
 // dsqlPoolMetricsEnv names a file to which test clusters on DSQL append their connection
 // pools' metrics, one JSON object a line, so that a run shows how each service used its
-// pools. docs/dsql/ci.md describes it.
+// pools. The test process samples its own state into the same file. docs/dsql/ci.md
+// describes it.
 const dsqlPoolMetricsEnv = "DSQL_TEST_POOL_METRICS_FILE"
 
 // The DSQL plugin's pool metrics start with this prefix.
@@ -33,6 +34,7 @@ var dsqlPoolMetricsOutput = sync.OnceValue(func() *poolMetricsFile {
 		log.Printf("DSQL pool metrics disabled: %v", err)
 		return nil
 	}
+	go newProcessSampler(file, "/proc", processSamplePeriod).run()
 	return file
 })
 

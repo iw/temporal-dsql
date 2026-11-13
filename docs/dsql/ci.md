@@ -285,7 +285,7 @@ The other drivers give each test cluster a database of its own. DSQL has one dat
 | `DSQL_TEST_VISIBILITY_SCHEMA` | The visibility schema, set up with `dsql/visibility`; `temporal_visibility` by default |
 | `DSQL_TEST_USER` | The database role; `admin` by default |
 | `DSQL_TEST_REGION` | The cluster's region, when the endpoint doesn't name it |
-| `DSQL_TEST_POOL_METRICS_FILE` | A file to which the functional tests' clusters append their pools' metrics, one JSON object a line |
+| `DSQL_TEST_POOL_METRICS_FILE` | A file to which the functional tests' clusters append their pools' metrics, and the test process its own samples, one JSON object a line |
 
 Test clusters in the shared and dedicated pools keep their schemas until the test process ends. A test that needs a fresh cluster leases another schema while it holds a dedicated slot, and so does each suite that shares one cluster between its tests. A test waits for a free schema as long as it takes, and logs a warning each minute. A suite keeps its schema while its tests wait for a dedicated slot, so the suites' clusters share what the shared and pooled clusters leave, less one schema that a fresh cluster can always lease. With nine schemas, `TEMPORAL_TEST_SHARED_CLUSTERS` of 3 and `TEMPORAL_TEST_DEDICATED_CLUSTERS` of 2 leave three for the suites, and a fourth suite waits for one of them to end. Without that bound, suites could hold every schema while the dedicated slots' holders waited for one. So have at least the shared and dedicated clusters plus two schemas; the tests fail otherwise. Run one test package at a time, as `make functional-test` does.
 
@@ -316,7 +316,7 @@ The test clusters lease `public` and the eight schemas, with three shared and tw
 |---|---|
 | `results.jsonl` | The tests' events from `go tool test2json` |
 | `clusters.jsonl` | A line for each test cluster created |
-| `pools.jsonl` | The test clusters' pool metrics: each pool's gauges and counters every 15 seconds, and each connection's handshake time or failure. A line names the cluster's schema, the test that created the cluster, the service and `db_kind` |
+| `pools.jsonl` | The test clusters' pool metrics: each pool's gauges and counters every 15 seconds, and each connection's handshake time or failure. A line names the cluster's schema, the test that created the cluster, the service and `db_kind`. The test process adds its own samples every 5 seconds, which name no cluster or test: `process_` metrics for how late the sample ran, the Go scheduler's latencies, stop-the-world pauses, CPU, memory, goroutines and lock waits, and, on Linux, `host_` metrics for the host's pressure stall times and the TCP segments it sent and retransmitted. Counters and histograms are their change since the process's previous sample |
 | `stderr.log` | The test process's standard error |
 | `summary.txt` | The top-level tallies, the tests that failed, and the tests without a result |
 
