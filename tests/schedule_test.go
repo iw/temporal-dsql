@@ -4505,14 +4505,18 @@ func testBackfillReprocessesCompletedAction(
 	await.RequireTruef(t, func() bool { return runs.Load() == expectedRuns }, neverWindow, pollInterval,
 		"backfill should reprocess the completed action exactly once")
 
-	desc, err := s.FrontendClient().DescribeSchedule(ctx, &workflowservice.DescribeScheduleRequest{
-		Namespace:  s.Namespace().String(),
-		ScheduleId: sid,
-	})
-	require.NoError(t, err)
-	require.Equal(t, int64(expectedRuns), desc.GetInfo().GetActionCount())
-	require.Empty(t, desc.GetInfo().GetRunningWorkflows())
-	require.Equal(t, paused, desc.GetSchedule().GetState().GetPaused())
+	// The counting workflow counts in its first workflow task, before it completes, and the
+	// schedule lists it as running until its completion callback arrives.
+	await.Requiref(t.Context(), t, func(t *await.T) {
+		desc, err := s.FrontendClient().DescribeSchedule(ctx, &workflowservice.DescribeScheduleRequest{
+			Namespace:  s.Namespace().String(),
+			ScheduleId: sid,
+		})
+		require.NoError(t, err)
+		require.Equal(t, int64(expectedRuns), desc.GetInfo().GetActionCount())
+		require.Empty(t, desc.GetInfo().GetRunningWorkflows())
+		require.Equal(t, paused, desc.GetSchedule().GetState().GetPaused())
+	}, awaitTimeout, pollInterval, "the schedule should record the backfilled actions, none still running")
 }
 
 // testBackfillWithBufferOneOverlap pins the expected behavior of BUFFER_ONE
