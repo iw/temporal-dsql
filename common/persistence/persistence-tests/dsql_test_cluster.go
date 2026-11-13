@@ -189,6 +189,13 @@ func newDSQLTestCluster(options *TestBaseOptions, logger log.Logger) (*dsqlTestC
 	return c, nil
 }
 
+// DSQLTestSchemaCount returns how many schemas DSQL_TEST_SCHEMAS gives test clusters, so
+// that the functional tests' cluster router can share them out.
+func DSQLTestSchemaCount() (int, error) {
+	schemas, err := parseDSQLTestSchemas(os.Getenv(dsqlSchemasEnv))
+	return len(schemas), err
+}
+
 func parseDSQLTestSchemas(value string) ([]string, error) {
 	var schemas []string
 	for name := range strings.SplitSeq(value, ",") {

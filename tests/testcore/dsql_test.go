@@ -16,6 +16,7 @@ import (
 	"go.temporal.io/server/common/metrics/metricstest"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin/sqlite"
 	"go.temporal.io/server/common/primitives"
+	"go.temporal.io/server/common/testing/await"
 )
 
 func persistenceOn(plugin string) config.Persistence {
@@ -96,4 +97,46 @@ func TestWithDSQLPoolMetricsNeedsFile(t *testing.T) {
 	require.Equal(t, handler, withDSQLPoolMetrics(handler, persistenceOn(dsqlPluginName), "TestPools"))
 	require.False(t, runsOnDSQL(persistenceOn(sqlite.PluginName)))
 	require.True(t, runsOnDSQL(persistenceOn(dsqlPluginName)))
+}
+
+func TestDSQLSuitePlaceCount(t *testing.T) {
+	places, err := dsqlSuitePlaceCount(9, 3, 2)
+	require.NoError(t, err)
+	require.Equal(t, 3, places)
+
+	places, err = dsqlSuitePlaceCount(7, 3, 2)
+	require.NoError(t, err)
+	require.Equal(t, 1, places)
+
+	_, err = dsqlSuitePlaceCount(6, 3, 2)
+	require.ErrorContains(t, err, "lists 6 schemas, but 3 shared and 2 dedicated test clusters need at least 7")
+}
+
+func TestTakeDSQLSuitePlace(t *testing.T) {
+	takeDSQLSuitePlace(t, nil)()
+
+	places := make(chan struct{}, 1)
+	first := takeDSQLSuitePlace(t, places)
+	taken := make(chan func(), 1)
+	go func() { taken <- takeDSQLSuitePlace(t, places) }()
+	select {
+	case <-taken:
+		t.Fatal("took a place while none was free")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	first()
+	first()
+	var second func()
+	await.RequireTrue(t, func() bool {
+		select {
+		case second = <-taken:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+	require.Len(t, places, 1)
+	second()
+	require.Empty(t, places)
 }
