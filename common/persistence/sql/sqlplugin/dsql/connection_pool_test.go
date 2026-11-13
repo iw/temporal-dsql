@@ -324,12 +324,12 @@ func TestPoolWarnings(t *testing.T) {
 func TestPoolMetrics(t *testing.T) {
 	c := testPoolConfig(t, &plugin{}, &config.SQL{PoolSizeHint: "ephemeral"})
 	c.BeforeConnect = func(context.Context, *pgx.ConnConfig) error { return errors.New("test connect failure") }
-	sqlDB, connector, err := openPoolDB(c, nil)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, sqlDB.Close()) }()
 	handler := metricstest.NewCaptureHandler()
 	capture := handler.StartCapture()
 	defer handler.StopCapture(capture)
+	sqlDB, connector, err := openPoolDB(c, handler)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sqlDB.Close()) }()
 	m := NewDSQLMetrics(handler).(*dsqlMetricsImpl)
 	for range 2 {
 		require.Error(t, sqlDB.PingContext(t.Context()))
@@ -347,6 +347,9 @@ func TestPoolMetrics(t *testing.T) {
 	}
 	require.Len(t, snapshot["dsql_pool_canceled_acquires_total"], 1)
 	require.Equal(t, int64(1), snapshot["dsql_pool_canceled_acquires_total"][0].Value)
+	require.Len(t, snapshot[connectFailuresMetric], 2)
+	require.Empty(t, snapshot[connectLatencyMetric])
+	require.Empty(t, snapshot["dsql_pool_acquires_total"])
 	require.InDelta(t, 5, snapshot["dsql_pool_max_open"][0].Value, 0.001)
 	require.InDelta(t, 0, snapshot["dsql_pool_open"][0].Value, 0.001)
 	require.InDelta(t, 0, snapshot["dsql_pool_constructing"][0].Value, 0.001)
@@ -584,4 +587,97 @@ func TestPoolMetricsHandlerLabelsStore(t *testing.T) {
 		kinds = append(kinds, recording.Tags[metrics.PersistenceDBKindTagName])
 	}
 	require.Equal(t, []string{"main", "visibility"}, kinds)
+}
+
+func TestWaitForPool(t *testing.T) {
+	logger := log.NewNoopLogger()
+	var calls atomic.Int32
+	require.True(t, waitForPool(func() (int32, int32) { return calls.Add(1), 3 }, time.Minute, logger))
+	require.Equal(t, int32(3), calls.Load())
+	require.False(t, waitForPool(func() (int32, int32) { return 1, 3 }, 2*poolWarmupPoll, logger))
+	require.True(t, waitForPool(func() (int32, int32) { return 0, 0 }, time.Nanosecond, logger))
+}
+
+func TestPoolWarmsUp(t *testing.T) {
+	server := newCancelTestServer(t)
+	p := &plugin{rateLimiter: poolTestLimiter(func(context.Context) error { return nil })}
+	c := testPoolConfig(t, p, &config.SQL{MaxConns: 4, ConnectAttributes: map[string]string{"sslmode": "disable"}})
+	c.ConnConfig.DialFunc = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", server.addr)
+	}
+	sqlDB, connector, err := openPoolDB(c, metrics.NoopMetricsHandler)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sqlDB.Close()) }()
+
+	require.True(t, waitForPool(poolFill(connector.pool), 5*time.Second, log.NewNoopLogger()))
+	require.Equal(t, int32(4), server.startups.Load())
+}
+
+func TestPoolWaitMetrics(t *testing.T) {
+	server := newCancelTestServer(t)
+	p := &plugin{rateLimiter: poolTestLimiter(func(context.Context) error { return nil })}
+	c := testPoolConfig(t, p, &config.SQL{MaxConns: 1, ConnectAttributes: map[string]string{"sslmode": "disable"}})
+	c.ConnConfig.DialFunc = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", server.addr)
+	}
+	handler := metricstest.NewCaptureHandler()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+	sqlDB, connector, err := openPoolDB(c, handler)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sqlDB.Close()) }()
+	require.True(t, waitForPool(poolFill(connector.pool), 5*time.Second, log.NewNoopLogger()))
+	m := NewDSQLMetrics(handler).(*dsqlMetricsImpl)
+	m.recordPoolStats(connector.pool.Stat())
+	baseline := capture.Snapshot()
+	require.Empty(t, baseline["dsql_pool_wait_total"])
+	require.Len(t, baseline[connectLatencyMetric], 1)
+	require.Empty(t, baseline[connectFailuresMetric])
+
+	// The second acquire waits for the pool's one connection.
+	held, err := connector.pool.Acquire(t.Context())
+	require.NoError(t, err)
+	acquiring := make(chan struct{})
+	acquired := make(chan error, 1)
+	go func() {
+		close(acquiring)
+		conn, err := connector.pool.Acquire(t.Context())
+		if err == nil {
+			conn.Release()
+		}
+		acquired <- err
+	}()
+	<-acquiring
+	<-time.After(50 * time.Millisecond)
+	held.Release()
+	require.NoError(t, <-acquired)
+
+	m.recordPoolStats(connector.pool.Stat())
+	snapshot := capture.Snapshot()
+	require.Len(t, snapshot["dsql_pool_acquires_total"], 1)
+	require.Equal(t, int64(2), snapshot["dsql_pool_acquires_total"][0].Value)
+	require.Len(t, snapshot["dsql_pool_wait_total"], 1)
+	require.Equal(t, int64(1), snapshot["dsql_pool_wait_total"][0].Value)
+	require.Len(t, snapshot["dsql_pool_wait_milliseconds_total"], 1)
+	require.GreaterOrEqual(t, snapshot["dsql_pool_wait_milliseconds_total"][0].Value, int64(10))
+}
+
+func TestConnectTracer(t *testing.T) {
+	handler := metricstest.NewCaptureHandler()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+	tracer := &connectTracer{latency: handler.Timer(connectLatencyMetric), failures: handler.Counter(connectFailuresMetric)}
+
+	ctx := tracer.TraceConnectStart(t.Context(), pgx.TraceConnectStartData{})
+	tracer.TraceConnectEnd(ctx, pgx.TraceConnectEndData{})
+	tracer.TraceConnectEnd(ctx, pgx.TraceConnectEndData{Err: errors.New("refused")})
+	tracer.TraceConnectEnd(ctx, pgx.TraceConnectEndData{Err: fmt.Errorf("connect: %w", context.Canceled)})
+	tracer.failed(fmt.Errorf("%w: %w", errConnectThrottled, context.Canceled))
+	tracer.failed(fmt.Errorf("%w: %w", errConnectThrottled, context.DeadlineExceeded))
+
+	snapshot := capture.Snapshot()
+	require.Len(t, snapshot[connectLatencyMetric], 1)
+	require.Len(t, snapshot[connectFailuresMetric], 2)
 }
