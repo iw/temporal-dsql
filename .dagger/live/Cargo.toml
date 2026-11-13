@@ -11,6 +11,9 @@ aws-config = "1.13.0"
 aws-credential-types = "1"
 aws-sdk-dsql = "1.78.0"
 aws-sdk-dynamodb = "1.135.0"
+aws-sdk-ec2 = "1.279.0"
+aws-sdk-s3 = "1.159.0"
 aws-sdk-sts = "1.123.0"
+aws-smithy-types = "1"
 dagger-sdk = { package = "tokeira-dagger-sdk", version = "=0.3.1" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "time"] }

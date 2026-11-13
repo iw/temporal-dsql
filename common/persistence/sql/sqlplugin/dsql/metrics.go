@@ -53,7 +53,9 @@ type dsqlMetricsImpl struct {
 	poolOpen             metrics.GaugeIface
 	poolInUse            metrics.GaugeIface
 	poolIdle             metrics.GaugeIface
+	poolAcquires         metrics.CounterIface
 	poolWaitCount        metrics.CounterIface
+	poolWaitMillis       metrics.CounterIface
 	poolConstructing     metrics.GaugeIface
 	poolNewConns         metrics.CounterIface
 	poolLifetimeDestroys metrics.CounterIface
@@ -63,7 +65,7 @@ type dsqlMetricsImpl struct {
 	poolCollectorMu     sync.Mutex
 	poolCollectorCancel context.CancelFunc
 	poolCollectorDone   chan struct{}
-	lastPoolCounters    [4]int64
+	lastPoolCounters    [6]int64
 }
 
 // NewDSQLMetrics creates a new DSQLMetrics implementation.
@@ -86,7 +88,9 @@ func NewDSQLMetrics(metricsHandler metrics.Handler) DSQLMetrics {
 		poolOpen:             metricsHandler.Gauge("dsql_pool_open"),
 		poolInUse:            metricsHandler.Gauge("dsql_pool_in_use"),
 		poolIdle:             metricsHandler.Gauge("dsql_pool_idle"),
+		poolAcquires:         metricsHandler.Counter("dsql_pool_acquires_total"),
 		poolWaitCount:        metricsHandler.Counter("dsql_pool_wait_total"),
+		poolWaitMillis:       metricsHandler.Counter("dsql_pool_wait_milliseconds_total"),
 		poolConstructing:     metricsHandler.Gauge("dsql_pool_constructing"),
 		poolNewConns:         metricsHandler.Counter("dsql_pool_new_connections_total"),
 		poolLifetimeDestroys: metricsHandler.Counter("dsql_pool_lifetime_destroys_total"),
@@ -145,7 +149,7 @@ func (m *dsqlMetricsImpl) StartPoolCollector(pool *pgxpool.Pool, interval time.D
 	ctx, cancel := context.WithCancel(context.Background())
 	m.poolCollectorCancel = cancel
 	m.poolCollectorDone = make(chan struct{})
-	m.lastPoolCounters = [4]int64{}
+	m.lastPoolCounters = [6]int64{}
 	go func() {
 		defer close(m.poolCollectorDone)
 		ticker := time.NewTicker(interval)
@@ -153,6 +157,9 @@ func (m *dsqlMetricsImpl) StartPoolCollector(pool *pgxpool.Pool, interval time.D
 		for {
 			select {
 			case <-ctx.Done():
+				// A last sample keeps the counts since the previous one, which a pool that
+				// closes between samples would otherwise lose.
+				m.recordPoolStats(pool.Stat())
 				return
 			case <-ticker.C:
 				m.recordPoolStats(pool.Stat())
@@ -178,8 +185,16 @@ func (m *dsqlMetricsImpl) recordPoolStats(stats *pgxpool.Stat) {
 	m.poolInUse.Record(float64(stats.AcquiredConns()))
 	m.poolIdle.Record(float64(stats.IdleConns()))
 	m.poolConstructing.Record(float64(stats.ConstructingConns()))
-	values := [4]int64{stats.EmptyAcquireCount(), stats.NewConnsCount(), stats.MaxLifetimeDestroyCount(), stats.CanceledAcquireCount()}
-	counters := [4]metrics.CounterIface{m.poolWaitCount, m.poolNewConns, m.poolLifetimeDestroys, m.poolCanceledAcquires}
+	// The wait time is exact: pgxpool sums each acquire's wait for a connection, which
+	// leaves out the ping of a connection idle for over a second.
+	values := [6]int64{
+		stats.AcquireCount(), stats.EmptyAcquireCount(), stats.EmptyAcquireWaitTime().Milliseconds(),
+		stats.NewConnsCount(), stats.MaxLifetimeDestroyCount(), stats.CanceledAcquireCount(),
+	}
+	counters := [6]metrics.CounterIface{
+		m.poolAcquires, m.poolWaitCount, m.poolWaitMillis,
+		m.poolNewConns, m.poolLifetimeDestroys, m.poolCanceledAcquires,
+	}
 	for i, value := range values {
 		if delta := value - m.lastPoolCounters[i]; delta > 0 {
 			counters[i].Record(delta)

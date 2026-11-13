@@ -429,6 +429,9 @@ func (s *WorkflowCompletionPaginationTestSuite) TestBufferLimits() {
 	})
 	// both sufficiently large
 	s.Run("both limits sufficiently large", func(s *WorkflowCompletionPaginationTestSuite) {
+		if testcore.UseDSQLPersistence() {
+			s.T().Skip("the final page writes both 512 KiB markers in one history batch, more than the 1 MiB DSQL holds in a column value")
+		}
 		s.runBufferLimitCase(markerPayloadSize*100, 1.0, false)
 	})
 }

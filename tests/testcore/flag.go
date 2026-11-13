@@ -24,7 +24,7 @@ func init() {
 
 func UseSQLVisibility() bool {
 	switch cliFlags.persistenceDriver {
-	case mysql.PluginName, postgresql.PluginName, postgresql.PluginNamePGX, sqlite.PluginName:
+	case mysql.PluginName, postgresql.PluginName, postgresql.PluginNamePGX, sqlite.PluginName, dsqlPluginName:
 		return true
 	// If the main storage is Cassandra, Elasticsearch is used for visibility.
 	default:

@@ -100,6 +100,18 @@ func (s *contextSuite) TestAwaitUsesSuiteContext() {
 	}, 100*time.Millisecond, time.Millisecond)
 }
 
+type handOffSuite struct{ Suite[*handOffSuite] }
+
+// TestDeadlinePassesInSubtest's deadline passes while its parallel subtest runs, which
+// doesn't fail it.
+func (s *handOffSuite) TestDeadlinePassesInSubtest() {
+	ctx := testcontext.For(s.T(), testcontext.WithTimeout(200*time.Millisecond))
+	s.Run("subtest", func(s *handOffSuite) {
+		<-ctx.Done()
+		s.ErrorIs(ctx.Err(), context.DeadlineExceeded)
+	})
+}
+
 type sealAfterRunSuite struct{ Suite[*sealAfterRunSuite] }
 
 func (s *sealAfterRunSuite) TestAssertionAfterRun() {
@@ -132,6 +144,9 @@ func TestRun_AcceptsSuite(t *testing.T) {
 	})
 	t.Run("context", func(t *testing.T) {
 		require.NotPanics(t, func() { Run(t, &contextSuite{}) })
+	})
+	t.Run("deadline passes after hand-off", func(t *testing.T) {
+		require.NotPanics(t, func() { Run(t, &handOffSuite{}) })
 	})
 }
 

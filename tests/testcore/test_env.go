@@ -622,6 +622,9 @@ func canBeNamespaceScoped(p dynamicconfig.Precedence) bool {
 	}
 }
 
+// testsInShard holds the tests that checkTestShard let run in this test process.
+var testsInShard sync.Map
+
 // checkTestShard supports test sharding based on environment variables.
 // This distributes tests across multiple CI shards for parallel execution.
 func checkTestShard(t *testing.T) {
@@ -639,12 +642,39 @@ func checkTestShard(t *testing.T) {
 		t.Fatal("Couldn't convert TEST_SHARD_INDEX")
 	}
 
-	nameToHash := t.Name() + strings.TrimSpace(shardSalt)
-	testIndex := int(farm.Fingerprint32([]byte(nameToHash))) % total
+	testIndex, enclosing := testShard(&testsInShard, t.Name(), total, index)
 	if testIndex != index {
 		t.Skipf("Skipping %s in test shard %d/%d (it runs in %d)", t.Name(), index+1, total, testIndex+1)
 	}
+	if enclosing != "" {
+		t.Logf("Running %s in test shard %d/%d, with %s", t.Name(), index+1, total, enclosing)
+		return
+	}
 	t.Logf("Running %s in test shard %d/%d", t.Name(), index+1, total)
+}
+
+// testShard returns the shard that runs the named test, counting from 0, and adds the test
+// to inShard, the tests that run in this shard, if it's one of them. A test inside one that
+// runs in this shard runs here too, and testShard returns the enclosing test's name as well:
+// the enclosing test runs only in this shard, so a test inside it whose own name hashed to
+// another shard would run in none.
+func testShard(inShard *sync.Map, name string, total, index int) (int, string) {
+	for enclosing := name; strings.Contains(enclosing, "/"); {
+		enclosing = enclosing[:strings.LastIndexByte(enclosing, '/')]
+		if _, ok := inShard.Load(enclosing); ok {
+			return index, enclosing
+		}
+	}
+	shard := shardOf(name, total)
+	if shard == index {
+		inShard.Store(name, struct{}{})
+	}
+	return shard, ""
+}
+
+// shardOf returns the shard that a test's name hashes to, counting from 0.
+func shardOf(name string, total int) int {
+	return int(farm.Fingerprint32([]byte(name+strings.TrimSpace(shardSalt)))) % total
 }
 
 type dedicatedClusterGuard struct {

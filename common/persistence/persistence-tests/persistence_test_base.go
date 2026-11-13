@@ -150,6 +150,9 @@ func NewTestBaseWithSQL(options *TestBaseOptions) *TestBase {
 	if logger == nil {
 		logger = log.NewTestLogger()
 	}
+	if options.SQLDBPluginName == dsqlPluginName {
+		return newDSQLTestBase(options, logger)
+	}
 
 	if options.DBPort == 0 {
 		switch options.SQLDBPluginName {

@@ -166,6 +166,9 @@ func (p *plugin) createDSQLConnectionWithAuth(
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping DSQL: %w", err)
 	}
+	if resolved.PoolWarmupTimeout > 0 {
+		waitForPool(poolFill(connector.pool), resolved.PoolWarmupTimeout, logger)
+	}
 	connector.reportAcquireFacts(facts)
 	return db, nil
 }

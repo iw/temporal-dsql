@@ -148,7 +148,7 @@ func newTemporal(t *testing.T, params *temporalParams) *temporalImpl {
 		temporal.WithAudienceGetter(func(*config.Config) authorization.JWTAudienceMapper { return nil }),
 		temporal.WithSearchAttributesMapper(nil),
 		temporal.WithPersistenceServiceResolver(resolver.NewNoopResolver()),
-		temporal.WithCustomMetricsHandler(impl.GetMetricsHandler()),
+		temporal.WithCustomMetricsHandler(withDSQLPoolMetrics(impl.GetMetricsHandler(), params.Config.Persistence, t.Name())),
 	}
 	if params.TLSConfigProvider != nil {
 		baseServerOptions = append(baseServerOptions, temporal.WithTLSConfigFactory(params.TLSConfigProvider))
@@ -200,7 +200,7 @@ func newTemporal(t *testing.T, params *temporalParams) *temporalImpl {
 	impl.replicationStreamRecorder.SetOutputFile(outputFile)
 
 	// Global defaults: applied without cleanup so they persist across cluster reuse.
-	for k, v := range defaultDynamicConfigOverrides {
+	for k, v := range clusterDynamicConfigOverrides(params.Config.Persistence) {
 		impl.overrideDynamicConfigForClusterLifetime(k, v)
 	}
 

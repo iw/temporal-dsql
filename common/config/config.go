@@ -452,6 +452,9 @@ type (
 		ConnectAttributes map[string]string `yaml:"connectAttributes"`
 		// MaxConns the max number of connections to this datastore
 		MaxConns int `yaml:"maxConns"`
+		// MaxConnsByService sets MaxConns for the pools of the services it names, such as
+		// history or matching, where one process runs several services from this config.
+		MaxConnsByService map[string]int `yaml:"maxConnsByService"`
 		// MaxIdleConns is the max number of idle connections to this datastore
 		MaxIdleConns int `yaml:"maxIdleConns"`
 		// MaxConnLifetime is the maximum time a connection can be alive
