@@ -156,6 +156,7 @@ Put plugin settings under `persistence.datastores.<store>.sql.connectAttributes`
 | `token_duration` | `15m` | Requested token lifetime, from `15s` through `15m` inclusive |
 | `connection_rate_limit` | `10` | Local connections/sec, including distributed-mode outage fallback |
 | `connection_burst_limit` | `100` | Local burst capacity, including outage fallback |
+| `pool_warmup_timeout` | None | How long opening a service pool waits for it to fill, such as `90s`. Unset, the pool fills in the background |
 | `rate_limiter` | `local` | `local` or `dynamodb_token_bucket` |
 | `rate_limiter_table` | None | Required DynamoDB table for token bucket mode |
 | `token_bucket_rate` | `100` | Token bucket connections/sec |
@@ -225,7 +226,7 @@ The [development dynamic config](../../config/dynamicconfig/development-dsql.yam
 
 ## 4. Connection Pool
 
-pgxpool is always used. Startup performs a single bounded ping and returns while the service pool fills in the background. A process-wide semaphore permits eight concurrent limiter/token calls across all pools and releases before handshakes. The existing limiter paces startup and replacement connections.
+pgxpool is always used. Startup performs a single bounded ping and returns while the service pool fills in the background. With `connectAttributes.pool_warmup_timeout`, it then waits up to that long for the pool to fill, and logs a warning and goes on if the pool isn't full in time. A service then starts later by the time its pools take to fill: at the default 10 connections a second after a burst of 100, a 300-connection pool takes about 20 seconds. pgxpool fills the rest of a pool at its next health check, a minute later, after a failed connection, so a timeout over a minute lets a pool get over one. A process-wide semaphore permits eight concurrent limiter/token calls across all pools and releases before handshakes. The existing limiter paces startup and replacement connections.
 
 IAM settings are `connectAttributes.region`, `cluster_endpoint` (defaulting to the host in `connectAddr`) and `token_duration` (default 15 minutes). The region is inferred from a DSQL endpoint when no attribute is set; see [datastore settings](#datastore-settings). The cache derives expiry from the signed token, reserving 10% of its signed lifetime (at least five seconds) for opening a connection. Background checks refresh at 80% of the signed lifetime. A newly generated token inside the margin can be used while still unexpired, with a warning at most once a minute. Credentials refresh four to five minutes before expiry. Token duration does not determine established connection lifetime.
 
@@ -312,6 +313,18 @@ Merge this datastore with the visibility configuration from section 2, and count
 
 Each service pool opens its full `maxConns` allocation at startup and keeps it. A process can own several pools, so `maxConns × replicas` alone can undercount. Sum all pools across all processes, and reserve capacity for overlapping replicas during a deployment. Do not exceed the cluster connection limit (10,000 by default). Ephemeral pools add at most five connections each while startup work runs.
 
+Services use their pools differently: history writes every workflow's state, and worker writes the least. Where one config serves several services, `maxConnsByService` sets `maxConns` for each service it names, and the others use `maxConns`:
+
+```yaml
+        maxConns: 20
+        maxConnsByService:
+          history: 100
+          matching: 60
+          frontend: 40
+```
+
+The names are `frontend`, `internal-frontend`, `history`, `matching` and `worker`. Another name, or a size that isn't positive, fails startup. Size each pool from its service's waits and use; see [metrics](metrics.md#monitoring-and-alerts).
+
 ### ECS Task Definition
 
 Package a complete Temporal configuration file based on the YAML above into the image at `/etc/temporal/config/dsql.yaml`, or mount it at that path. Set DSQL settings in its datastore's `sql.connectAttributes`. The task role supplies AWS credentials. For example, these fields in the container definition select that config:
@@ -380,6 +393,8 @@ Key metrics to watch in production:
 | `rate(dsql_pool_canceled_acquires_total[5m])` | Low | Sustained increase |
 | `dsql_tx_conflict_total` | Low, stable | Sustained spike |
 | `dsql_pool_in_use / dsql_pool_max_open` | < 0.8 | > 0.9 for 5 min |
+| `rate(dsql_pool_wait_total[5m]) / rate(dsql_pool_acquires_total[5m])` | Near 0 | Sustained rise |
+| `rate(dsql_pool_connect_failures_total[5m])` | 0 | Sustained failures |
 
 See [Metrics Reference](metrics.md) for the complete list and alerting recommendations.
 
