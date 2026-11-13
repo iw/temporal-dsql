@@ -243,7 +243,7 @@ history.taskSchedulerRateController:
 - **The count.** The task scheduler's limiter records each task its coupled buckets hold back, refused or made to wait, while their rate is below the static rate. It records them in the persistence health signals, beside the task attempts, with the `Headroom` it coupled at. At the static rate, the task rate's ceiling, a higher persistence rate wouldn't let more tasks through, and the scheduler's own limit's refusals aren't the coupling's, so neither counts.
 - **The law.** The controller counts the refusals as its limit binding while the calls offered, made and rejected, reach `CoupledBindingShare` of the calls the scheduler lets through: `Headroom` times the controller's rate. Calls offered well below that say that something other than the rate held the tasks back, such as a mix of calls the task rate hasn't caught up with yet. The store's facts and latency still cut as before.
 - **Replay.** Each decision's detail carries the refusals, their `Headroom`, the rejected calls and the share, so a trace replays the step, and a replay can set the share on a trace recorded with it at 0.
-- **Off by default.** At 0, its default, the controller ignores the refusals, so enabling both controllers keeps the behaviour above until it's set. It applies in shadow mode too, so a shadow run shows the probes.
+- **On by default.** It's 0.9 by default since the [rerun](adaptive-appreciation.md#rerun-of-the-coupled-slow-store-11-november) on DSQL. Only the task scheduler rate's refusals count, so it changes nothing while that controller isn't enabled. It applies in shadow mode too, so a shadow run shows the probes. At 0 the controller ignores the refusals, as before:
 
 ```yaml
 history.persistenceDynamicRateLimitingParams:
@@ -251,10 +251,10 @@ history.persistenceDynamicRateLimitingParams:
       Enabled: true
       Capacity:
         Mode: enabled
-        CoupledBindingShare: 0.9
+        CoupledBindingShare: 0
 ```
 
-In `tools/adaptivesim`, at 0.9, the slow store's capacity probes from about 100 a second to about 200 within 35 s of the store recovering, 1,513 tasks are waiting when the load ends, and all but 20 of the 19,200 complete by the end of the drain. The task rate still follows each cut while the store is slow. After the recovery, the queued share cuts the rate three times during the load as the rescheduler's retries release the waiting tasks in batches. Through a surge, capacity probes to about half of its ceiling. Where the task rate's step limit lags a surge of tasks while the calls stay far below capacity's rate, the calls offered don't reach the share, and capacity stays at its static rate. [The simulator's README](../../tools/adaptivesim/README.md#what-the-runs-show) has the runs.
+In `tools/adaptivesim`, at 0.9 with `CoupledRetry` at 0, the slow store's capacity probes from about 100 a second to about 200 within 35 s of the store recovering, 1,513 tasks are waiting when the load ends, and all but 20 of the 19,200 complete by the end of the drain. The task rate still follows each cut while the store is slow. After the recovery, the queued share cuts the rate three times during the load as the rescheduler's retries release the waiting tasks in batches. Through a surge, capacity probes to about half of its ceiling. Where the task rate's step limit lags a surge of tasks while the calls stay far below capacity's rate, the calls offered don't reach the share, and capacity stays at its static rate. [The simulator's README](../../tools/adaptivesim/README.md#what-the-runs-show) has the runs.
 
 On DSQL, the system appreciation's [follow-up runs](adaptive-appreciation.md#follow-up-runs-9-november) ran a slow store with 10 connections a host and a static rate of 300, so the cuts bound. Without either setting, capacity held 38–44 calls a second after the store recovered, and 991 workflows were still running after the drain. With the share and `CoupledRetry`, it probed back to 124–143 and every workflow completed. At those rates, though, most of the task rate's steps saw fewer than `MinSamples` calls, and its `no-data` hold kept its rate while capacity's rose. That paused the probes for 20–51 s, and with every controller enabled, held them for the rest of the run.
 
@@ -262,13 +262,13 @@ Following capacity on those steps with the last mix measured wouldn't have been 
 
 On DSQL, the appreciation's [rerun](adaptive-appreciation.md#rerun-of-the-coupled-slow-store-11-november) bore this out with both settings: with every controller enabled, capacity probed back and every workflow completed, where 847 were still running after the drain on 9 November, and with capacity and the task rate, the longest pause on the host with 11 shards fell from 51 s to 14 s and 6 s. One pause of 36 s remained, on the other host, where the task rate sat at its floor of 6 tasks a second and history's calls stayed under the share. Without either setting, capacity still held its cut on DSQL, and 555 workflows were still running after the drain, though the simulator's model completes them.
 
-**Retry the coupling's refusals sooner.** History's rescheduler waits 2 s ± 1 s after the scheduler refuses a task, which suits a busy scheduler. The coupled buckets hold 2 s of their rate, so after a coupled refusal that wait leaves them to fill and then release tasks in batches. On this branch, `CoupledRetry` sets how soon the rescheduler retries after the coupled buckets refuse a task below the static rate, jittered by half either way. The scheduler's other refusals, a full task channel or its own limit, keep the 2 s. Each retry the buckets refuse costs a `TrySubmit`, a throttle metric and a counted refusal, so it's off by default, at 0:
+**Retry the coupling's refusals sooner.** History's rescheduler waits 2 s ± 1 s after the scheduler refuses a task, which suits a busy scheduler. The coupled buckets hold 2 s of their rate, so after a coupled refusal that wait leaves them to fill and then release tasks in batches. On this branch, `CoupledRetry` sets how soon the rescheduler retries after the coupled buckets refuse a task below the static rate, jittered by half either way. The scheduler's other refusals, a full task channel or its own limit, keep the 2 s. Each retry the buckets refuse costs a `TrySubmit`, a throttle metric and a counted refusal. It's 200ms by default since the [rerun](adaptive-appreciation.md#rerun-of-the-coupled-slow-store-11-november) on DSQL, and it changes nothing until the task scheduler rate is enabled. At 0 the rescheduler waits its 2 s:
 
 ```yaml
 history.taskSchedulerRateController:
   - value:
       Mode: enabled
-      CoupledRetry: 200ms
+      CoupledRetry: 0s
 ```
 
 In `tools/adaptivesim`'s slow store, with `CoupledBindingShare` at 0.9, a `CoupledRetry` of 200ms leaves 16 tasks waiting when the load ends, against 1,513 with the share alone, and every task completes. In the other scenarios, the outcomes stay as without it. On DSQL, beside the share, the task scheduler's throttled submissions rose to about 320 a second across two hosts, from about 60 without either setting.
@@ -540,7 +540,7 @@ The timeline shows three failure modes. Static admits past capacity, every queue
 |---|---|---|
 | Baseline drift | A slowly degrading database raises the learned minimum and the target with it | Absolute latency ceiling in the envelope; on this branch, a warning and a `baseline-up` or `baseline-down` decision when the baseline moves by `BaselineAlert` |
 | Over-cut on a step drop | Successful throughput collapses during a timeout storm, so the cut overshoots | Cooldown at least 2× signal span; on this branch, a BBR-style max-filter returns the rate to 90% of what the store delivered after the cut |
-| A coupled limit binds instead | The task scheduler rate keeps persistence's calls under the capacity controller's rate, so after a cut the persistence limit stops binding and the cut stays | On this branch, `CoupledBindingShare`, off by default, counts the scheduler's refusals as the limit binding while the calls offered come close to what it lets through |
+| A coupled limit binds instead | The task scheduler rate keeps persistence's calls under the capacity controller's rate, so after a cut the persistence limit stops binding and the cut stays | On this branch, `CoupledBindingShare`, 0.9 by default, counts the scheduler's refusals as the limit binding while the calls offered come close to what it lets through |
 | Controllers fighting | Worker, persistence and partition loops act on overlapping resources | Timescale separation; workers back off when persistence does. The [system appreciation](adaptive-appreciation.md#loops-and-timescales) saw no two loops chase each other |
 | Open-loop shadow | Shadow proposals never feel their own effect | Treat shadow as a direction check; canary small cohorts in enabled mode |
 | Hidden state | Learned values are not in YAML, so incidents need a new way to see them | Decision reasons as metrics; a describe API for current controller state |

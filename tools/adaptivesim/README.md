@@ -32,14 +32,14 @@ go run ./cmd/tools/adaptivereplay /tmp/adaptivesim/*.jsonl
   the same result.
 - `-capacity mode` runs the capacity controller `disabled`, in `shadow` or `enabled`,
   `-queued-grace duration` sets its `QueuedGrace`, and `-coupled-binding-share share` its
-  `CoupledBindingShare`, 0 and off in every scenario. At 0.9 it counts the task scheduler's
-  coupled refusals as its limit binding. `-coupled-retry duration` sets the task scheduler
-  rate's `CoupledRetry`, also 0 and off in every scenario. At 200ms the rescheduler retries
-  the coupled limit's refusals that soon. `-task-rate mode`, `-workers mode`,
-  `-memory mode`, `-partitions mode` and `-fair-share mode` do the same for the task
-  scheduler rate, the worker counts, the memory budget, the partition scaler and fair
-  share. The partition scaler needs a scenario whose workflows run through matching, and
-  fair share one with frontends.
+  `CoupledBindingShare`, 0.9 by default, as on the server. At 0.9 it counts the task
+  scheduler's coupled refusals as its limit binding, and at 0 it doesn't.
+  `-coupled-retry duration` sets the task scheduler rate's `CoupledRetry`, 200ms by
+  default. At 200ms the rescheduler retries the coupled limit's refusals that soon, and at
+  0 it waits 1–3 s. `-task-rate mode`, `-workers mode`, `-memory mode`, `-partitions mode`
+  and `-fair-share mode` do the same for the task scheduler rate, the worker counts, the
+  memory budget, the partition scaler and fair share. The partition scaler needs a
+  scenario whose workflows run through matching, and fair share one with frontends.
 - `-trace dir` writes each host's signal plane trace to the directory, in the signal
   plane's format and with its file names, such as `history-history-1-1.jsonl`,
   `matching-matching-1-2.jsonl` and `frontend-frontend-1-4.jsonl`, for
@@ -81,7 +81,7 @@ seconds, with no AWS.
 | `partitions` | `partitions`, `pollers`, `shadow` | A workflow task queue whose add rate passes the 50 tasks/s the partition scaler's trials need, which the appreciation never reached: one host of 128 shards in the local rig starts 80 workflows/s for 360 s, each a single workflow task, through matching's 4 partitions. In `partitions`, each partition dispatches at most 15 tasks/s and 32 pollers wait; in `pollers`, the partitions have no limit and 14 pollers wait. The scaler is enabled, or in shadow in `shadow`, which is `partitions`' host |
 | `uneven-frontends` | `fair`, `shadow`, `all` | The appreciation's uneven frontends, on its rig: two history hosts of 16 shards, matching with 32 workflow and 32 activity pollers, and two frontends that take 80% and 20% of 5 workflows/s, each one activity and a 1 s timer. From 30 s to 270 s, a second namespace whose limit across the cluster is 60/s gets 72 requests/s through the first frontend and 18 through the second. `fair` enables fair share with the other controllers in shadow; `shadow` runs every controller in shadow, and `all` enables every one |
 | `ramp` | `off`, `shadow`, `cap`, `tsr`, `wrk`, `mem`, `par`, `fair`, `all` | The appreciation's ramp, on the same rig: 5, 10, 20 and 30 workflows/s, 75 s each, then 180 s to drain. `off` disables every controller and turns the signal plane off, as today's defaults have it; `shadow` runs every controller in shadow; `cap`, `tsr`, `wrk`, `mem`, `par` and `fair` each enable one, with the others in shadow; `all` enables every one |
-| `coupled-slow-store` | `cap-tsr`, `shadow`, `cap`, `all` | The appreciation's [follow-up runs'](../../docs/dsql/adaptive-appreciation.md#follow-up-runs-9-november) coupled slow store, on the same rig with 10 connections a history host and a static persistence rate of 300/s: 5 workflows/s for 390 s, then 180 s to drain, and the store's replies come 40 ms later from 90 s to 240 s. `cap-tsr` enables the capacity controller and the task scheduler rate, with the others in shadow; `shadow` runs every controller in shadow; `cap` enables the capacity controller alone, and `all` enables every one. The follow-up runs' coupled settings come from `-coupled-binding-share` and `-coupled-retry` |
+| `coupled-slow-store` | `cap-tsr`, `shadow`, `cap`, `all` | The appreciation's [follow-up runs'](../../docs/dsql/adaptive-appreciation.md#follow-up-runs-9-november) coupled slow store, on the same rig with 10 connections a history host and a static persistence rate of 300/s: 5 workflows/s for 390 s, then 180 s to drain, and the store's replies come 40 ms later from 90 s to 240 s. `cap-tsr` enables the capacity controller and the task scheduler rate, with the others in shadow; `shadow` runs every controller in shadow; `cap` enables the capacity controller alone, and `all` enables every one. The follow-up runs' coupled settings are the defaults, and `-coupled-binding-share 0 -coupled-retry 0` turns them off |
 | `memory-pressure` | `mem`, `shadow` | The appreciation's 512 MiB `GOMEMLIMIT`, with history's cache at its 1000 MiB default and each shard's queues limited to 10,000 pending tasks, on one host in the cluster's region: 5 workflows/s and 20 tasks/s for 600 s, and from 120 s, 224 MiB more heap for 120 s while 60,000 tasks reload, with the memory budget enabled or in shadow |
 
 The short pool's variants are the rig's: `base` is the plugin's path before the gate, with
@@ -376,59 +376,60 @@ config is a static collection of the scenario's controller settings.
 
 - **Through a surge, the task scheduler rate keeps the tasks in the scheduler.** In
   `surge`, with the rate enabled, the persistence rate limiter refused 21 calls, the
-  workflows' p99 was 983 ms, and the tasks made 16,217 attempts. In shadow, it refused
+  workflows' p99 was 982 ms, and the tasks made 16,217 attempts. In shadow, it refused
   7,234, the workflows' p99 was 1m42s, and the tasks made 22,094 attempts. The backlog
   cleared in both.
-- **The task scheduler rate follows each capacity cut, and with both enabled the cut
-  stays.** In `slow-store`, the capacity controller cuts from 300/s to about 80/s while the
-  store is slow, and the task scheduler rate follows within a few seconds. With the task rate in
-  shadow (`cap`), tasks fail on the persistence limit until the store recovers, the limit
-  binds, and capacity probes back up: every task completes. With both enabled
-  (`cap-tsr`), the task scheduler rate keeps persistence's calls at its `Headroom`, 90% of
-  capacity's rate, so the persistence limit doesn't bind once the store recovers. Capacity
-  holds its cut as `idle` for the rest of the load, the task rate stays at about 38/s
-  against 80 tasks arriving a second, and 7,224 tasks are still waiting when the load
-  ends. A rate that isn't binding says nothing about the store, which is why `idle` holds;
-  here the task rate is what keeps it from binding. In the appreciation, the task rate
-  stayed far above the tasks' rate except in the short pool, so this didn't show there.
-  `CoupledBindingShare` lets the task scheduler's refusals bind for capacity, as the next
-  finding shows.
+- **The task scheduler rate follows each capacity cut, and with both enabled but neither
+  coupled setting, the cut stays.** In `slow-store`, the capacity controller cuts from
+  300/s to about 80/s while the store is slow, and the task scheduler rate follows within
+  a few seconds. With the task rate in shadow (`cap`), tasks fail on the persistence limit
+  until the store recovers, the limit binds, and capacity probes back up: every task
+  completes. With both enabled (`cap-tsr`) and
+  `-coupled-binding-share 0 -coupled-retry 0`, the task scheduler rate keeps persistence's
+  calls at its `Headroom`, 90% of capacity's rate, so the persistence limit doesn't bind
+  once the store recovers. Capacity holds its cut as `idle` for the rest of the load, the
+  task rate stays at about 38/s against 80 tasks arriving a second, and 7,224 tasks are
+  still waiting when the load ends. A rate that isn't binding says nothing about the
+  store, which is why `idle` holds; here the task rate is what keeps it from binding. In
+  the appreciation, the task rate stayed far above the tasks' rate except in the short
+  pool, so this didn't show there. `CoupledBindingShare` lets the task scheduler's
+  refusals bind for capacity, as the next finding shows.
 - **With `CoupledBindingShare` at 0.9, the task scheduler's refusals bind, and the cut
   doesn't stay.** Capacity counts the tasks the task scheduler's coupled limit refuses,
   while its rate is below the static rate, as its own limit binding, as long as the calls
-  offered reach 0.9 of what the scheduler lets through. In `slow-store`'s `cap-tsr`, with
-  `-coupled-binding-share 0.9`, capacity cuts to 80.5 a second at 1:08 as before, and the
-  task rate follows each cut. While the store is slow, the refusals let capacity recover
-  and probe, and the queued share cuts it back. Once the store recovers at 2:30, capacity
-  probes from 100 a second to 197 by 3:04. The queued share then cuts it to about 130 a
-  second three times by the load's end, as the rescheduler's retries release the waiting
-  tasks in batches, and three times in the drain. 1,513 tasks are waiting when the load
-  ends, against 7,224 with the share at 0, and all but 20 of the 19,200 complete by the end
-  of the drain; their p99 is 2m14s, against 3m0s. With seeds 1 to 3, 975–1,513 tasks are
-  waiting when the load ends, where 880–1,660 were before the task rate's deadband. In
-  `surge`'s `cap-tsr`, capacity probes to 148 a second, against 110 with the share at 0,
-  below its ceiling of 300, and the scheduler refuses 1,279 submissions, against 2,219.
-  Only the coupled limit's refusals below the static rate count, so the
-  scheduler's own limit doesn't take capacity to its ceiling. In `mixed-surge`, the task
-  rate's 25% step limit lags the surge, so the scheduler refuses 809 submissions while the
-  calls stay far below capacity's 1,000 a second. The calls offered don't reach the share,
-  so capacity stays at 1,000; with the share at 0.01 it rises to 2,183.
-- **With `CoupledRetry` at 200ms too, the slow store's backlog clears.** The rescheduler
-  retries a task the coupled limit refused after 100–300 ms rather than 1–3 s, so the
-  buckets release the waiting tasks as they refill rather than in batches. In
-  `slow-store`'s `cap-tsr`, with `-coupled-binding-share 0.9 -coupled-retry 200ms`,
-  capacity probes from 100 a second at 2:31 to 240 by 3:03, and the queued share cuts it
-  to about 175 twice. 16 tasks are waiting when the load ends, against 1,513 with the share
-  alone, every task completes, and their p99 is 1m37s. `all` does the same. In `surge` and
-  `mixed-surge`, the outcomes stay as without it, and the scheduler counts more refusals,
-  3,597 against 2,718 in `surge`'s `tsr`, since each retry the coupled limit refuses
-  counts again.
+  offered reach 0.9 of what the scheduler lets through. These runs set `-coupled-retry 0`,
+  so the share acts alone. In `slow-store`'s `cap-tsr`, capacity cuts to 80.5 a second at
+  1:08 as before, and the task rate follows each cut. While the store is slow, the
+  refusals let capacity recover and probe, and the queued share cuts it back. Once the
+  store recovers at 2:30, capacity probes from 100 a second to 197 by 3:04. The queued
+  share then cuts it to about 130 a second three times by the load's end, as the
+  rescheduler's retries release the waiting tasks in batches, and three times in the
+  drain. 1,513 tasks are waiting when the load ends, against 7,224 with both settings at
+  0, and all but 20 of the 19,200 complete by the end of the drain; their p99 is 2m14s,
+  against 3m0s. With seeds 1 to 3, 975–1,513 tasks are waiting when the load ends, where
+  880–1,660 were before the task rate's deadband. In `surge`'s `cap-tsr`, capacity probes
+  to 148 a second, against 110 with both settings at 0, below its ceiling of 300, and the
+  scheduler refuses 1,279 submissions, against 2,219. Only the coupled limit's refusals
+  below the static rate count, so the scheduler's own limit doesn't take capacity to its
+  ceiling. In `mixed-surge`, the task rate's 25% step limit lags the surge, so the
+  scheduler refuses 809 submissions while the calls stay far below capacity's 1,000 a
+  second. The calls offered don't reach the share, so capacity stays at 1,000; with the
+  share at 0.01 it rises to 2,183.
+- **With `CoupledRetry` at 200ms too, as both are by default, the slow store's backlog
+  clears.** The rescheduler retries a task the coupled limit refused after 100–300 ms
+  rather than 1–3 s, so the buckets release the waiting tasks as they refill rather than
+  in batches. In `slow-store`'s `cap-tsr`, capacity probes from 100 a second at 2:31 to
+  240 by 3:03, and the queued share cuts it to about 175 twice. 16 tasks are waiting when
+  the load ends, against 1,513 with the share alone, every task completes, and their p99
+  is 1m37s. `all` does the same. In `surge` and `mixed-surge`, the outcomes stay as
+  without it, and the scheduler counts more refusals, 3,597 against 2,718 in `surge`'s
+  `tsr`, since each retry the coupled limit refuses counts again.
 - **At low rates, the task scheduler rate moves on few calls.** `coupled-slow-store` models
   the coupled slow store of the appreciation's follow-up runs. Its history makes about a
   third of the calls a workflow made on DSQL, so before the store slows, each step of a
   host's task rate sees about 50 calls, under its `MinSamples` of 100. It measures its first
   mix only at 3:14 and 3:28, while the store is slow. With
-  `-coupled-binding-share 0.9 -coupled-retry 200ms`, both task rates then follow capacity's
+  both coupled settings, as by default, both task rates then follow capacity's
   cut to their floor of 6 tasks a second. After the store recovers at 4:00, 145 and 146 of
   the hosts' 150 steps each to the load's end see fewer than 100 calls. Each moves the mix
   by its calls' share of `MinSamples`, with the reason `partial`, or holds it within the
@@ -437,7 +438,7 @@ config is a static collection of the scenario's controller settings.
   3m28s on the two hosts, and the last task attempt is 22 s into the drain. When those
   steps held the rate, both task rates stayed at their floor and capacity no higher than
   32–36 calls a second until the load ended, and 1,329 of the 1,950 workflows completed.
-  `all` runs as `cap-tsr` does. Without either setting, every workflow completes too, with
+  `all` runs as `cap-tsr` does. With both settings at 0, every workflow completes too, with
   a p99 of 5m16s and 4m37s, where 1,394 completed before, though on DSQL the appreciation's
   [rerun](../../docs/dsql/adaptive-appreciation.md#rerun-of-the-coupled-slow-store-11-november)
   held capacity's cut without them. In shadow the p99 is 2m28s: as on
@@ -531,12 +532,13 @@ config is a static collection of the scenario's controller settings.
   workflow's workflow tasks waits through the backlog. A write holds its shard about 216 ms
   here, and a workflow makes 10, so the 32 shards carry at most about 15 workflows a
   second; the appreciation measured 155 ms and about 9 writes, and about 22 a second.
-- **#110's slow store holds its cut with every controller enabled.** `slow-store`'s `all`
-  enables the capacity controller, the task scheduler rate and the worker counts, every
-  controller its host runs, and its tasks, workflows, capacity decisions and task rate
-  decisions are `cap-tsr`'s: capacity holds its cut of 80.5 a second as `idle` from 1m18s
-  to the load's end, the task rate stays at about 38 a second, and 7,224 tasks are still
-  waiting when the load ends. The worker counts back off after each cut and shrink to 361,
-  which changes nothing else. With `-coupled-binding-share 0.9`, `all`'s tasks and
-  capacity decisions are again `cap-tsr`'s. In the ramp's and the uneven frontends' `all`,
-  capacity never cuts, so there's no cut for the task rate to hold.
+- **Without the coupled settings, #110's slow store holds its cut with every controller
+  enabled.** `slow-store`'s `all` enables the capacity controller, the task scheduler rate
+  and the worker counts, every controller its host runs. With both coupled settings at 0,
+  its tasks, workflows, capacity decisions and task rate decisions are `cap-tsr`'s:
+  capacity holds its cut of 80.5 a second as `idle` from 1m18s to the load's end, the task
+  rate stays at about 38 a second, and 7,224 tasks are still waiting when the load ends.
+  The worker counts back off after each cut and shrink to 361, which changes nothing else.
+  With the share alone, or with both settings as by default, `all`'s tasks and capacity
+  decisions are again `cap-tsr`'s. In the ramp's and the uneven frontends' `all`, capacity
+  never cuts, so there's no cut for the task rate to hold.
