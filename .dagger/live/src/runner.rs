@@ -15,8 +15,8 @@ use aws_sdk_s3::primitives::ByteStream;
 use tokio::process::Command;
 
 use crate::{
-    Aws, GO_TEST_TAGS, Masker, REPO, Result, Run, TAG, TEST_FLAGS, Tally, corpus_dir, describe,
-    failed, summarize, test_env, write_masked,
+    Aws, GO_TEST_TAGS, Masker, REPO, Result, Run, TAG, Tally, corpus_dir, describe, failed,
+    summarize, test_env, write_masked,
 };
 
 /// The runner instances' image: the latest Amazon Linux 2023 for arm64, which comes with
@@ -333,7 +333,7 @@ fn script(run: &Run) -> String {
         .collect();
     SCRIPT
         .replace("{exports}", &exports)
-        .replace("{flags}", &TEST_FLAGS.join(" "))
+        .replace("{flags}", &run.test_flags.join(" "))
         .replace("{minutes}", &LIFETIME_MINUTES.to_string())
         .replace("{poll}", &POLL.as_secs().to_string())
         .replace("{fetch_failed}", &FETCH_FAILED.to_string())
@@ -576,6 +576,7 @@ mod tests {
             cluster: "abcdefghijklmnopqrstuvwxyz".to_owned(),
             table: "temporal-dsql-ci-1700000000000".to_owned(),
             bucket: "temporal-dsql-ci-bucket".to_owned(),
+            test_flags: crate::test_flags(std::num::NonZeroU16::new(10)),
         };
         let script = script(&run);
         assert!(script.starts_with("#!/bin/bash\nshutdown -h +540\n"));
@@ -588,7 +589,7 @@ mod tests {
             "\nexport TEMPORAL_TEST_CLUSTER_EVENTS_FILE='/var/tmp/ci/out/clusters.jsonl'\n"
         ));
         assert!(script.contains(
-            "\n./functional.test -test.v=test2json -test.count=1 -test.timeout=8h -persistenceType=sql -persistenceDriver=dsql -test.cpuprofile=out/cpu.pprof "
+            "\n./functional.test -test.v=test2json -test.count=1 -test.timeout=8h -persistenceType=sql -persistenceDriver=dsql -test.parallel=10 -test.cpuprofile=out/cpu.pprof "
         ));
         assert!(script.contains("|| finish 125\n"));
         assert!(script.contains("\nwhile sleep 60; do\n"));

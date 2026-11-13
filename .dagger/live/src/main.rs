@@ -29,11 +29,15 @@
 //! ```text
 //! AWS_PROFILE=temporal-dsql-ci dagger run cargo run --locked -- --corpus --instance c8g.4xlarge
 //! ```
+//!
+//! `--parallel <count>` sets how many functional tests run at once, which is otherwise
+//! the CPU count of the machine they run on.
 
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt::Display;
 use std::io::Write as _;
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -110,7 +114,7 @@ struct Aws {
     sts: aws_sdk_sts::Client,
 }
 
-/// One run's names.
+/// One run's names and settings.
 struct Run {
     id: String,
     region: String,
@@ -118,6 +122,8 @@ struct Run {
     table: String,
     /// The CI bucket, which holds a runner instance's files under runs/<id>.
     bucket: String,
+    /// The functional tests' flags.
+    test_flags: Vec<String>,
 }
 
 /// What a run does after the live tests.
@@ -131,10 +137,19 @@ enum Corpus {
     Instance(String),
 }
 
-impl Corpus {
-    fn from_args(args: impl IntoIterator<Item = String>) -> std::result::Result<Self, String> {
+/// The run's arguments.
+#[derive(Debug, PartialEq)]
+struct Args {
+    corpus: Corpus,
+    /// The functional tests' -test.parallel, which otherwise defaults to the CPU count.
+    parallel: Option<NonZeroU16>,
+}
+
+impl Args {
+    fn parse(args: impl IntoIterator<Item = String>) -> std::result::Result<Self, String> {
         let mut corpus = false;
         let mut instance = None;
+        let mut parallel = None;
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -146,22 +161,43 @@ impl Corpus {
                     runner::goarm64(&kind)?;
                     instance = Some(kind);
                 }
+                "--parallel" => {
+                    let count = args.next().and_then(|count| count.parse().ok()).ok_or(
+                        "--parallel takes how many tests run at once, a whole number such as 10",
+                    )?;
+                    parallel = Some(count);
+                }
                 _ => {
                     return Err(format!(
-                        "unknown argument {arg}; the run takes --corpus and --instance <type>"
+                        "unknown argument {arg}; the run takes --corpus, --instance <type> and --parallel <count>"
                     ));
                 }
             }
         }
-        match (corpus, instance) {
-            (false, None) => Ok(Self::Skip),
-            (true, None) => Ok(Self::Here),
-            (true, Some(kind)) => Ok(Self::Instance(kind)),
+        let corpus = match (corpus, instance) {
+            (false, None) => Corpus::Skip,
+            (true, None) => Corpus::Here,
+            (true, Some(kind)) => Corpus::Instance(kind),
             (false, Some(_)) => {
-                Err("--instance runs the functional tests, so it needs --corpus".to_owned())
+                return Err("--instance runs the functional tests, so it needs --corpus".to_owned());
             }
+        };
+        if corpus == Corpus::Skip && parallel.is_some() {
+            return Err(
+                "--parallel applies to the functional tests, so it needs --corpus".to_owned(),
+            );
         }
+        Ok(Self { corpus, parallel })
     }
+}
+
+/// The functional tests' flags, with -test.parallel when the run sets it.
+fn test_flags(parallel: Option<NonZeroU16>) -> Vec<String> {
+    TEST_FLAGS
+        .iter()
+        .map(|&flag| flag.to_owned())
+        .chain(parallel.map(|count| format!("-test.parallel={count}")))
+        .collect()
 }
 
 struct SessionCredentials {
@@ -173,20 +209,20 @@ struct SessionCredentials {
 #[tokio::main]
 async fn main() -> ExitCode {
     let started = Instant::now();
-    let corpus = match Corpus::from_args(std::env::args().skip(1)) {
-        Ok(corpus) => corpus,
+    let args = match Args::parse(std::env::args().skip(1)) {
+        Ok(args) => args,
         Err(err) => {
             eprintln!("{err}");
             return ExitCode::FAILURE;
         }
     };
     // The functional tests' failures are in their summary, and don't fail the run.
-    let ended = if corpus == Corpus::Skip {
+    let ended = if args.corpus == Corpus::Skip {
         "passed"
     } else {
         "finished"
     };
-    match live(corpus).await {
+    match live(args).await {
         Ok(()) => {
             println!("--- {ended} in {}s", started.elapsed().as_secs());
             ExitCode::SUCCESS
@@ -198,7 +234,8 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn live(corpus: Corpus) -> Result<()> {
+async fn live(args: Args) -> Result<()> {
+    let Args { corpus, parallel } = args;
     let region = RegionProviderChain::default_provider().or_else(Region::new(DEFAULT_REGION));
     let config = aws_config::defaults(BehaviorVersion::latest())
         .region(region)
@@ -256,6 +293,7 @@ async fn live(corpus: Corpus) -> Result<()> {
         table: format!("{TAG}-{id}"),
         bucket: format!("{TAG}-{}", masker.account),
         cluster: masker.cluster.clone(),
+        test_flags: test_flags(parallel),
         region,
         id,
     };
@@ -544,7 +582,7 @@ async fn functional_tests(run: &Run, masker: &Masker) -> Result<()> {
     }
     let clusters = out.join("clusters.jsonl");
     let mut tests = command
-        .args(TEST_FLAGS)
+        .args(&run.test_flags)
         .current_dir(repo.join("tests"))
         .envs(test_env(run, &clusters.to_string_lossy()))
         .stdout(Stdio::piped())
@@ -1004,18 +1042,38 @@ mod tests {
 
     #[test]
     fn reads_the_arguments() {
-        let parse = |args: &[&str]| Corpus::from_args(args.iter().map(|&arg| arg.to_owned()));
-        let graviton4 = Corpus::Instance("c8g.4xlarge".to_owned());
-        assert_eq!(parse(&[]), Ok(Corpus::Skip));
-        assert_eq!(parse(&["--corpus"]), Ok(Corpus::Here));
+        let parse = |args: &[&str]| Args::parse(args.iter().map(|&arg| arg.to_owned()));
+        let args = |corpus, parallel| -> std::result::Result<Args, String> {
+            Ok(Args {
+                corpus,
+                parallel: NonZeroU16::new(parallel),
+            })
+        };
+        let graviton4 = || Corpus::Instance("c8g.4xlarge".to_owned());
+        assert_eq!(parse(&[]), args(Corpus::Skip, 0));
+        assert_eq!(parse(&["--corpus"]), args(Corpus::Here, 0));
         assert_eq!(
             parse(&["--corpus", "--instance", "c8g.4xlarge"]),
-            Ok(graviton4)
+            args(graviton4(), 0)
+        );
+        assert_eq!(
+            parse(&["--parallel", "10", "--corpus", "--instance", "c8g.4xlarge"]),
+            args(graviton4(), 10)
         );
         assert!(parse(&["--instance", "c8g.4xlarge"]).is_err());
         assert!(parse(&["--corpus", "--instance"]).is_err());
         assert!(parse(&["--corpus", "--instance", "c7i.4xlarge"]).is_err());
+        assert!(parse(&["--parallel", "10"]).is_err());
+        assert!(parse(&["--corpus", "--parallel"]).is_err());
+        assert!(parse(&["--corpus", "--parallel", "0"]).is_err());
+        assert!(parse(&["--corpus", "--parallel", "ten"]).is_err());
         assert!(parse(&["--verbose"]).is_err());
+
+        assert_eq!(test_flags(None), TEST_FLAGS);
+        assert_eq!(
+            test_flags(NonZeroU16::new(10)).last().map(String::as_str),
+            Some("-test.parallel=10")
+        );
     }
 
     #[test]
