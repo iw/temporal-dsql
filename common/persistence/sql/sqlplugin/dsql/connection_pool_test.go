@@ -614,6 +614,28 @@ func TestPoolWarmsUp(t *testing.T) {
 	require.Equal(t, int32(4), server.startups.Load())
 }
 
+func TestPoolCollectorSamplesAsItStops(t *testing.T) {
+	c := testPoolConfig(t, &plugin{}, &config.SQL{PoolSizeHint: "ephemeral"})
+	c.BeforeConnect = func(context.Context, *pgx.ConnConfig) error { return errors.New("test connect failure") }
+	handler := metricstest.NewCaptureHandler()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+	sqlDB, connector, err := openPoolDB(c, handler)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sqlDB.Close()) }()
+
+	m := NewDSQLMetrics(handler).(*dsqlMetricsImpl)
+	m.StartPoolCollector(connector.pool, time.Hour)
+	require.Error(t, sqlDB.PingContext(t.Context()))
+	require.Empty(t, capture.Snapshot()["dsql_pool_new_connections_total"])
+	m.StopPoolCollector()
+
+	snapshot := capture.Snapshot()
+	require.Len(t, snapshot["dsql_pool_new_connections_total"], 1)
+	require.Equal(t, int64(1), snapshot["dsql_pool_new_connections_total"][0].Value)
+	require.Len(t, snapshot["dsql_pool_max_open"], 1)
+}
+
 func TestPoolWaitMetrics(t *testing.T) {
 	server := newCancelTestServer(t)
 	p := &plugin{rateLimiter: poolTestLimiter(func(context.Context) error { return nil })}

@@ -16,7 +16,7 @@ The policy retries only SQLSTATE 40001, so `error_class` is always `retryable`. 
 
 ## Connection Pool Metrics
 
-The connector samples `pgxpool.Stat()` every 15 seconds. Gauges are snapshots; counters record increases since the last sample, including the first sample from zero. Collection stops and is joined when the DB closes.
+The connector samples `pgxpool.Stat()` every 15 seconds. Gauges are snapshots; counters record increases since the last sample, including the first sample from zero. Collection stops and is joined when the DB closes, after one last sample, so a pool that closes between samples still reports its counts.
 
 Every metric a pool records carries `db_kind`: `main` for the persistence store and `visibility` for the visibility store, so a host's two pools report apart. That includes the cancel and connection counters below. With the `service_name` a service's metrics carry, `db_kind` names each pool in a process that runs several services.
 

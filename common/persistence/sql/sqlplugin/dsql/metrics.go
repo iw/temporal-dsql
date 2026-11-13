@@ -157,6 +157,9 @@ func (m *dsqlMetricsImpl) StartPoolCollector(pool *pgxpool.Pool, interval time.D
 		for {
 			select {
 			case <-ctx.Done():
+				// A last sample keeps the counts since the previous one, which a pool that
+				// closes between samples would otherwise lose.
+				m.recordPoolStats(pool.Stat())
 				return
 			case <-ticker.C:
 				m.recordPoolStats(pool.Stat())
