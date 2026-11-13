@@ -2,6 +2,7 @@ package testcontext
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -161,5 +162,81 @@ func TestEnvTimeout(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, start.Add(time.Second), deadline)
 		})
+	})
+}
+
+// recordingTB keeps the cleanups and errors a test context registers, so that a test
+// can run the cleanups itself and check what they report.
+type recordingTB struct {
+	testing.TB
+	cleanups []func()
+	errs     []string
+}
+
+func (r *recordingTB) Helper() {}
+
+func (r *recordingTB) Cleanup(f func()) {
+	r.cleanups = append(r.cleanups, f)
+}
+
+func (r *recordingTB) Errorf(format string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+func (r *recordingTB) runCleanups() {
+	for i := len(r.cleanups) - 1; i >= 0; i-- {
+		r.cleanups[i]()
+	}
+}
+
+func TestHandOffToSubtests(t *testing.T) {
+	t.Parallel()
+
+	t.Run("deadline passes without a hand-off", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			tb := &recordingTB{TB: t}
+			ctx := For(tb, WithTimeout(time.Second))
+			<-ctx.Done()
+			tb.runCleanups()
+			require.Len(t, tb.errs, 1)
+			require.Contains(t, tb.errs[0], "test exceeded timeout")
+		})
+	})
+
+	t.Run("deadline passes after the hand-off", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			tb := &recordingTB{TB: t}
+			ctx := For(tb, WithTimeout(time.Second))
+			HandOffToSubtests(tb)
+			<-ctx.Done()
+			tb.runCleanups()
+			require.Empty(t, tb.errs)
+		})
+	})
+
+	t.Run("deadline passes before the hand-off", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			tb := &recordingTB{TB: t}
+			ctx := For(tb, WithTimeout(time.Second))
+			<-ctx.Done()
+			HandOffToSubtests(tb)
+			tb.runCleanups()
+			require.Len(t, tb.errs, 1)
+			require.Contains(t, tb.errs[0], "test exceeded timeout")
+		})
+	})
+
+	t.Run("no context", func(t *testing.T) {
+		t.Parallel()
+
+		tb := &recordingTB{TB: t}
+		HandOffToSubtests(tb)
+		require.Empty(t, tb.cleanups)
 	})
 }
