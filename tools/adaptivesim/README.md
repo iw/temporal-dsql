@@ -438,7 +438,9 @@ config is a static collection of the scenario's controller settings.
   steps held the rate, both task rates stayed at their floor and capacity no higher than
   32–36 calls a second until the load ended, and 1,329 of the 1,950 workflows completed.
   `all` runs as `cap-tsr` does. Without either setting, every workflow completes too, with
-  a p99 of 5m16s and 4m37s, where 1,394 completed before. In shadow the p99 is 2m28s: as on
+  a p99 of 5m16s and 4m37s, where 1,394 completed before, though on DSQL the appreciation's
+  [rerun](../../docs/dsql/adaptive-appreciation.md#rerun-of-the-coupled-slow-store-11-november)
+  held capacity's cut without them. In shadow the p99 is 2m28s: as on
   DSQL, no enabled config clears the backlog as quickly. Capacity's own steps here often see
   fewer than its `MinSamples`, 50, calls, and hold as `no-data`.
 - **A busy queue's worker count grows, then shrinks.** In `busy-queue`, the transfer
