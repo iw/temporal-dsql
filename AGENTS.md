@@ -87,7 +87,7 @@
 - Connections use the configured `user` role (default `admin`); passwords are ignored and TLS defaults to `verify-full`
 
 #### Connection Management
-- **pgxpool** behind `database/sql` — service pools keep `MinConns == MaxConns` (configured `maxConns`, default 100); ephemeral pools use max 5/min 0. A closing connector owns pool and metrics shutdown. Connection failures do not rebuild pools.
+- **pgxpool** behind `database/sql` — service pools keep `MinConns == MaxConns` (configured `maxConns`, default 100); ephemeral pools use max 5/min 0. `maxConnsByService` sizes each service's pools where one config serves several services. An opt-in `pool_warmup_timeout` waits for a service pool to fill before its service starts. A closing connector owns pool and metrics shutdown. Connection failures do not rebuild pools.
 - Lifetime is capped at 50 minutes, with 4 minutes of jitter and 1-minute health checks. `maxIdleConns` is ignored. There are no acquire/release hooks. See the expiry and shutdown limitations in `docs/dsql/connection-pool.md`.
 - A process-wide semaphore of 8 bounds limiter/token calls before each handshake. Background fill uses the same rate limiter as on-demand connections.
 - A gate admits callers to each pool, one slot per connection, writes before reads. It refuses a caller it can't admit before the caller's deadline with `ResourceExhausted`, without reaching DSQL.
@@ -96,7 +96,8 @@
 
 #### Observability
 - DSQL-specific transaction conflict, retry, backoff and exhaustion metrics
-- pgxpool gauges and counters (constructing, waits, new connections, lifetime destroys, canceled acquires), labelled by `db_kind`
+- pgxpool gauges and counters (constructing, acquires, waits and their time, new connections, lifetime destroys, canceled acquires), labelled by `db_kind`
+- Connection handshake latency and failed connection attempts (`dsql_pool_connect_latency`, `dsql_pool_connect_failures_total`)
 - Connection pool metrics (open, idle, in-use)
 - Skipped cancel requests (`dsql_cancel_requests_skipped_total`)
 
@@ -132,7 +133,7 @@
 
 ### Recommended Configuration
 
-**Service pool sizing:** set `maxConns` per pool and `maxConnLifetime: 50m` (or shorter). Every service pool opens its full size in the background and keeps it. The sum across all pools in all Temporal processes must fit the cluster limit (10,000 by default), allowing for rolling deployments and ephemeral pools. `maxIdleConns` is ignored. See `docs/dsql/connection-pool.md` for lifecycle limitations.
+**Service pool sizing:** set `maxConns` per pool, or `maxConnsByService` per service, and `maxConnLifetime: 50m` (or shorter). Every service pool opens its full size in the background and keeps it. The sum across all pools in all Temporal processes must fit the cluster limit (10,000 by default), allowing for rolling deployments and ephemeral pools. `maxIdleConns` is ignored. See `docs/dsql/connection-pool.md` for lifecycle limitations.
 
 **Distributed Rate Limiting with Token Bucket** (opt-in; see `docs/dsql/connection-pool.md` for sizing and outage behavior):
 ```yaml

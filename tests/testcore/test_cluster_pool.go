@@ -188,6 +188,7 @@ type clusterRouter struct {
 type suiteScopedCluster struct {
 	once    sync.Once
 	cluster *FunctionalTestBase
+	release func() // gives back the cluster's place on DSQL
 }
 
 // UseSuiteScopedCluster makes NewEnv use one cluster for all tests under `t`.
@@ -211,6 +212,9 @@ func UseSuiteScopedCluster(t *testing.T) {
 				if err := suiteCluster.cluster.tearDownTestCluster(); err != nil {
 					t.Logf("Failed to tear down suite-scoped cluster: %v", err)
 				}
+			}
+			if suiteCluster.release != nil {
+				suiteCluster.release()
 			}
 		}
 		testClusterRouter.suiteScoped.Delete(rootName)
@@ -325,7 +329,9 @@ func (p *clusterRouter) getSuiteScoped(t *testing.T) *FunctionalTestBase {
 
 	suiteClusterAny, _ := p.suiteScoped.LoadOrStore(rootName, &suiteScopedCluster{})
 	suiteCluster := suiteClusterAny.(*suiteScopedCluster)
+	places := dsqlSuitePlacesFor(t)
 	suiteCluster.once.Do(func() {
+		suiteCluster.release = takeDSQLSuitePlace(t, places)
 		// TODO(stephan, #10580): remove this workaround once the proper cluster-pool fix lands.
 		// Enable the worker service on suite-scoped clusters. The only current user (Versioning3) needs the system
 		// worker for worker-deployment APIs.

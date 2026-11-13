@@ -41,6 +41,7 @@ func TestResolveSettingsAttributes(t *testing.T) {
 		get                        func(settings) string
 	}{
 		{"token_duration", "15m0s", "10m0s", func(s settings) string { return s.TokenDuration.String() }},
+		{"pool_warmup_timeout", "0s", "1m0s", func(s settings) string { return s.PoolWarmupTimeout.String() }},
 		{"connection_rate_limit", "10", "12", func(s settings) string { return strconv.Itoa(s.Limiter.ConnectionRate) }},
 		{"connection_burst_limit", "100", "120", func(s settings) string { return strconv.Itoa(s.Limiter.ConnectionBurst) }},
 		{"rate_limiter_table", "", "test-table", func(s settings) string { return s.Limiter.Table }},
@@ -107,6 +108,8 @@ func TestResolveSettingsValidation(t *testing.T) {
 			invalid = []string{"", "invalid", "0s", "-1s", "14s", "15m1s"}
 		case "token_bucket_max_wait":
 			invalid = []string{"", "invalid", "0s", "-1s", strings.Repeat("9", 24) + "h"}
+		case "pool_warmup_timeout":
+			invalid = []string{"", "invalid", "0s", "-1s"}
 		default:
 			continue
 		}
@@ -224,6 +227,7 @@ func TestSettingsLimiterFirstPoolWins(t *testing.T) {
 	// Token lifetime, another local endpoint and unused mode settings do not affect pacing.
 	unused := s
 	unused.TokenDuration, unused.ClusterEndpoint, unused.Region = time.Minute, "another.example.invalid", "us-west-2"
+	unused.PoolWarmupTimeout = time.Minute
 	unused.Limiter.TokenBucketRate++
 	p.initRateLimiter(unused, logger, nil)
 	require.Zero(t, logs.Len())

@@ -42,8 +42,11 @@ const (
 	poolPingTimeout      = 30 * time.Second
 	poolMetricsInterval  = 15 * time.Second
 	acquireFactsInterval = time.Second
+	poolWarmupPoll       = 50 * time.Millisecond
 
 	cancelRequestsSkippedMetric = "dsql_cancel_requests_skipped_total"
+	connectLatencyMetric        = "dsql_pool_connect_latency"
+	connectFailuresMetric       = "dsql_pool_connect_failures_total"
 )
 
 var (
@@ -222,10 +225,13 @@ func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, 
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg = cfg.Copy()
 	beforeConnect := cfg.BeforeConnect
-	cancelsSkipped := metrics.NoopMetricsHandler.Counter(cancelRequestsSkippedMetric)
-	if metricsHandler != nil {
-		cancelsSkipped = metricsHandler.Counter(cancelRequestsSkippedMetric)
+	handler := metricsHandler
+	if handler == nil {
+		handler = metrics.NoopMetricsHandler
 	}
+	cancelsSkipped := handler.Counter(cancelRequestsSkippedMetric)
+	tracer := &connectTracer{latency: handler.Timer(connectLatencyMetric), failures: handler.Counter(connectFailuresMetric)}
+	cfg.ConnConfig.Tracer = tracer
 	// Health-check refills use a background context in pgxpool. Cancel their
 	// limiter/token waits too when the owning database is closed.
 	cfg.BeforeConnect = func(connectCtx context.Context, connConfig *pgx.ConnConfig) error {
@@ -237,6 +243,7 @@ func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, 
 			hookCancel()
 		}
 		if err := beforeConnect(hookCtx, connConfig); err != nil {
+			tracer.failed(err)
 			return err
 		}
 		skipCancelRequests(connConfig, cancelsSkipped)
@@ -262,6 +269,83 @@ func openPoolDB(cfg *pgxpool.Config, metricsHandler metrics.Handler) (*sqlx.DB, 
 	db.MapperFunc(strcase.ToSnake)
 	collector.StartPoolCollector(pool, poolMetricsInterval)
 	return db, connector, nil
+}
+
+// connectTracer times each connection's handshake and counts failed connection
+// attempts. pgxpool counts attempts but not their outcomes, and its background fill drops
+// their errors. pgx reads connect tracers from the query tracer, whose calls are left as
+// they are.
+type connectTracer struct {
+	latency  metrics.TimerIface
+	failures metrics.CounterIface
+}
+
+type connectStartKey struct{}
+
+var _ pgx.ConnectTracer = (*connectTracer)(nil)
+
+func (t *connectTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+
+func (t *connectTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (t *connectTracer) TraceConnectStart(ctx context.Context, _ pgx.TraceConnectStartData) context.Context {
+	return context.WithValue(ctx, connectStartKey{}, time.Now())
+}
+
+func (t *connectTracer) TraceConnectEnd(ctx context.Context, data pgx.TraceConnectEndData) {
+	if data.Err != nil {
+		t.failed(data.Err)
+		return
+	}
+	if start, ok := ctx.Value(connectStartKey{}).(time.Time); ok {
+		t.latency.Record(time.Since(start))
+	}
+}
+
+// failed counts a failed connection attempt. pgxpool cancels the rest of its fill after
+// one fails, and closing a pool cancels its connects; neither is a failure of its own.
+func (t *connectTracer) failed(err error) {
+	if !errors.Is(err, context.Canceled) {
+		t.failures.Record(1)
+	}
+}
+
+// poolFill reports how many connections a pool has open and how many it keeps.
+func poolFill(pool *pgxpool.Pool) func() (open, target int32) {
+	target := pool.Config().MinConns
+	return func() (int32, int32) {
+		stat := pool.Stat()
+		return stat.TotalConns() - stat.ConstructingConns(), target
+	}
+}
+
+// waitForPool waits until a pool has opened the connections it keeps, or until the
+// timeout, so that a server starts with full pools rather than opening connections under
+// load. It reports whether the pool filled.
+func waitForPool(fill func() (open, target int32), timeout time.Duration, logger log.Logger) bool {
+	open, target := fill()
+	if open >= target {
+		return true
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	poll := time.NewTicker(poolWarmupPoll)
+	defer poll.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			open, target = fill()
+			logger.Warn("DSQL pool did not fill within its warm-up timeout",
+				tag.NewInt32("open", open), tag.NewInt32("target", target), tag.NewDurationTag("timeout", timeout))
+			return false
+		case <-poll.C:
+			if open, target = fill(); open >= target {
+				return true
+			}
+		}
+	}
 }
 
 // skipCancelRequests refuses the dials pgx makes once a connection is up. pgx makes them to

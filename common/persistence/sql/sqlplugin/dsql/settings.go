@@ -23,7 +23,10 @@ type settings struct {
 	Region          string
 	ClusterEndpoint string
 	TokenDuration   time.Duration
-	Limiter         limiterSettings
+	// PoolWarmupTimeout is how long opening a service pool waits for the pool to fill.
+	// Zero opens the pool without waiting.
+	PoolWarmupTimeout time.Duration
+	Limiter           limiterSettings
 }
 
 type limiterSettings struct {
@@ -38,7 +41,7 @@ type limiterSettings struct {
 
 // settingAttributes is shared by resolution and DSN filtering.
 var settingAttributes = []string{
-	"region", "cluster_endpoint", "token_duration",
+	"region", "cluster_endpoint", "token_duration", "pool_warmup_timeout",
 	"connection_rate_limit", "connection_burst_limit", "rate_limiter",
 	"rate_limiter_table", "token_bucket_rate", "token_bucket_capacity", "token_bucket_max_wait",
 }
@@ -108,6 +111,11 @@ func resolveSettings(cfg *config.SQL, logger log.Logger) (settings, error) {
 		}
 		*key.target = parsed
 	}
+	if value, set := attrs["pool_warmup_timeout"]; set {
+		if s.PoolWarmupTimeout, err = parseSettingDuration("pool_warmup_timeout", value); err != nil {
+			return s, err
+		}
+	}
 	s.warnUnusedSettings(sources, logger)
 	return s, nil
 }
@@ -138,7 +146,7 @@ func isPluginAttribute(key string) bool {
 
 // Only effective settings participate in the process-wide limiter comparison.
 func (s settings) effectiveLimiterSettings() settings {
-	s.TokenDuration = 0
+	s.TokenDuration, s.PoolWarmupTimeout = 0, 0
 	if s.Limiter.Mode == localMode {
 		s.Region, s.ClusterEndpoint, s.Limiter.Table = "", "", ""
 	} else {
