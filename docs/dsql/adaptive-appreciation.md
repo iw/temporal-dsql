@@ -13,6 +13,7 @@
 - It found seven things to follow up. A pool still opening its connections reads as a queue, so the capacity controller cut at most host starts. The latency law, in shadow, would have cut in every scenario but the short pool, though the store was never short of capacity. And a rate limit can't help a pool too short for its load.
 - [Follow-up runs on 9 November](#follow-up-runs-9-november) confirmed on DSQL the fixes for the start-up cuts and fair share's overshoot, #107 and #106. In a slow store that makes capacity's cuts bind, `CoupledBindingShare` and `CoupledRetry` let capacity probe back once the store recovered, but at low rates the task rate's `no-data` hold can pause the probes, or stop them.
 - A [rerun on 11 November](#rerun-of-the-coupled-slow-store-11-november), with the task rate moving its mix on steps with few calls (#119), let the probes through: with every controller enabled, capacity probed back and every workflow completed. Without the coupled settings, capacity still held its cut.
+- A [rerun on 14 November](#rerun-at-the-task-rates-floor-14-november), with the coupled limit refusing without a reservation (#130), confirmed the cause of the one pause left: at its floor, the scheduler admitted its whole rate on both hosts, and capacity's probes paused for no more than 9 s.
 
 ## How it ran
 
@@ -447,10 +448,47 @@ The task rate's steps from 240 s to 390 s, both hosts together, 300 steps a run:
 
 1. **Moving the mix on few calls lets the coupled probes through on DSQL.** With every controller enabled, capacity probed back and every workflow completed, where 847 were still running after the drain on 9 November. With capacity and the task rate, the longest pause on the host with 11 shards fell from 51 s to 14 s and 6 s.
 2. **The coupled settings are still needed.** Without them, capacity held its cut after the store recovered, and 555 workflows were still running after the drain, though the simulator's `coupled-slow-store` completes without them.
-3. **A task rate at its floor can still pause the probes**, for 36 s in one of the two `ctc` runs. At its floor, the task rate doesn't follow capacity's probes, and there history's calls stayed under `CoupledBindingShare` of capacity's rate until a step's calls passed it. The traces later showed why: at its floor, the scheduler admitted 71% of its rate on that host, because its refusals cost its buckets tokens ([Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller)).
+3. **A task rate at its floor can still pause the probes**, for 36 s in one of the two `ctc` runs. At its floor, the task rate doesn't follow capacity's probes, and there history's calls stayed under `CoupledBindingShare` of capacity's rate until a step's calls passed it. The traces later showed why: at its floor, the scheduler admitted 71% of its rate on that host, because its refusals cost its buckets tokens ([Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller)). [The 14 November rerun](#rerun-at-the-task-rates-floor-14-november) confirmed it.
 4. **Once capacity has probed back, its queued cuts set the drain's pace.** `ctc` and `ctc2` took about as long to drain as 9 November's `ctc`, with about the same p99.
 
 ### What it doesn't cover
 
 - **Two runs of `ctc`, and one of each other config.** The floor's pause came in one of the two `ctc` runs.
 - **Other rates and loads.** The floor's pause depends on the task rate's floor, 2% of the static rate, and on the mix. This rig's static rate of 300 and its workflows put the floor close to the rate capacity's probes needed.
+
+## Rerun at the task rate's floor, 14 November
+
+*Run on 14 November 2026 on the branch as of #130, which refuses a task whose coupled bucket has no token without reserving one. It reruns `ctc` from the [11 November rerun](#rerun-of-the-coupled-slow-store-11-november), whose third finding traced the floor's pause to the scheduler admitting only part of its rate.*
+
+**How it ran.** As on 11 November, on a new throwaway cluster, deleted after the last run, with a fresh schema for each run. There were two runs of `ctc`, with capacity and the task rate enabled, `CoupledBindingShare` at 0.9 and `CoupledRetry` at 200 ms, as both now are by default. In both runs, the shards split 11 and 21 between the two hosts again. Replaying the 12 traces reproduced all 16,735 of the controllers' decisions.
+
+On the host with 11 shards, then the one with 21, beside the 11 November runs. At the floor means while the task rate was 6–7 tasks a second. A snapshot counts the task attempts that started in it, some of them admitted earlier, so a share can pass 100%:
+
+| Run | Share of the task rate admitted at the floor | Coupled refusals a second at the floor | Seconds from 240 s to 100 calls a second | Capacity's longest pause | Capacity's binding steps from 240 s to 390 s | Task rate at 390 s |
+|---|---|---|---|---|---|---|
+| `ctc`, 11 November | 91% / 71% | 160 / 342 | 67 / 89 | 14 / 36 s | 8 / 0 | 47 / 28 |
+| `ctc2`, 11 November | 90% / 76% | 177 / 354 | 42 / 79 | 6 / 9 s | 0 / 6 | 61 / 37 |
+| `ctc` | 105% / 101% | 136 / 345 | 43 / 46 | 4 / 5 s | 3 / 33 | 47 / 55 |
+| `ctc2` | 107% / 101% | 165 / 350 | 50 / 39 | 4 / 9 s | 8 / 31 | 66 / 33 |
+
+| Run | Completed | Closed a second from 240 s to 390 s | Every workflow closed | End-to-end p50 / p99 | Calls capacity's limit refused |
+|---|---|---|---|---|---|
+| `ctc`, 11 November | 1,945 of 1,945 | 3.7 | 154 s into the drain | 119 / 419 s | 467 |
+| `ctc2`, 11 November | 1,947 of 1,947 | 4.0 | 136 s into the drain | 109 / 403 s | 549 |
+| `ctc` | 1,948 of 1,948 | 5.0 | 107 s into the drain | 89 / 367 s | 1,210 |
+| `ctc2` | 1,946 of 1,946 | 5.9 | 93 s into the drain | 75 / 355 s | 862 |
+
+- **At its floor, the scheduler admitted its rate.** On the host with 21 shards, it admitted 101% in both runs, against 71% and 76% on 11 November, while its coupled buckets held back 345–350 tasks a second, as before. From 240 s to 280 s, where `ctc` paused on 11 November, the task rate there rose from its floor, and the scheduler admitted 95–110% of it at every rate, against 65–83%. On the host with 11 shards, the task rate spent fewer snapshots at its floor, and the scheduler admitted 105% and 107% there, against 90% and 91%.
+- **Capacity's probes paused for no more than 9 s.** Capacity reached 100 calls a second 39–50 s after the store recovered, against 42–89 s. On the host with 21 shards, it counted the scheduler's refusals as binding on 31–33 of its steps from 240 s to 390 s, against 0 and 6.
+- **The workflows closed sooner.** From 240 s to 390 s, 5.0 and 5.9 closed a second, against 3.7 and 4.0. Every workflow completed, 107 s and 93 s into the drain, against 154 s and 136 s, with a p99 of 367 s and 355 s, against 419 s and 403 s.
+- **Capacity's limit refused more calls**, 1,210 and 862, against 467 and 549, as it bound more often. The pool gate refused 59–87, against 74–84, and the task scheduler's throttled submissions fell by about a tenth, to 143,394 and 140,983.
+
+### What it found
+
+1. **The floor's pause came from the scheduler's refusals.** Refusing without a reservation, the scheduler admitted its whole rate at its floor, where it had admitted 71–76% on the host with 21 shards, and capacity's probes went through on both hosts with no pause longer than 9 s.
+2. **With its whole rate admitted, that host's capacity reached 100 calls a second sooner**, in 39 s and 46 s against 79 s and 89 s, and the workflows' p99 fell by about 50 s.
+
+### What it doesn't cover
+
+- **Two runs, of `ctc` only.** `shadow`, `ct` and `allc` weren't rerun.
+- **Other rates and loads**, as on 11 November.
