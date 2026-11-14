@@ -76,8 +76,8 @@ type (
 		refusals RefusalRecorder
 		heldAt   atomic.Int64 // when the buckets last held a task back below the static rate, in Unix ns
 
-		mu      sync.Mutex // guards the buckets' updates
-		buckets []*quotas.RateLimiterImpl
+		mu      sync.Mutex                      // guards the buckets' updates
+		buckets map[int]*quotas.RateLimiterImpl // each task priority's bucket
 	}
 
 	// heldBack is the buckets' priority cascade, which calls held for each task it holds
@@ -155,10 +155,11 @@ func newSchedulerLimiter(
 	refusals RefusalRecorder,
 ) *schedulerLimiter {
 	l := &schedulerLimiter{original: limiter, driven: driven, static: static, settings: settings, refusals: refusals}
+	l.buckets = make(map[int]*quotas.RateLimiterImpl, len(tasks.PriorityName))
 	rateLimiters := make(map[int]quotas.RequestRateLimiter, len(tasks.PriorityName))
 	for priority := range tasks.PriorityName {
 		bucket := quotas.NewRateLimiter(1, 1)
-		l.buckets = append(l.buckets, bucket)
+		l.buckets[int(priority)] = bucket
 		rateLimiters[int(priority)] = quotas.NewRequestRateLimiterAdapter(bucket)
 	}
 	l.coupled = quotas.NewMultiRequestRateLimiter(
@@ -177,22 +178,34 @@ func requestPriority(req quotas.Request) int {
 	return int(tasks.PriorityPreemptable)
 }
 
+// Allow refuses a task whose bucket has no token without reserving one. The coupled
+// limiter allows by reserving and canceling, and canceling a reservation that others
+// were made behind returns none of its tokens, so the shards' concurrent refusals
+// would cost the buckets tokens, and the scheduler would admit less than the rate.
 func (l *schedulerLimiter) Allow(now time.Time, request quotas.Request) bool {
-	return l.limiter().Allow(now, request)
+	limiter, coupled := l.limiter()
+	if coupled && l.buckets[requestPriority(request)].TokensAt(now) < 1 {
+		l.held(now)
+		return false
+	}
+	return limiter.Allow(now, request)
 }
 
 func (l *schedulerLimiter) Reserve(now time.Time, request quotas.Request) quotas.Reservation {
-	return l.limiter().Reserve(now, request)
+	limiter, _ := l.limiter()
+	return limiter.Reserve(now, request)
 }
 
 func (l *schedulerLimiter) Wait(ctx context.Context, request quotas.Request) error {
-	return l.limiter().Wait(ctx, request)
+	limiter, _ := l.limiter()
+	return limiter.Wait(ctx, request)
 }
 
-func (l *schedulerLimiter) limiter() quotas.RequestRateLimiter {
+// limiter is the limiter in force, and whether it's the coupled one.
+func (l *schedulerLimiter) limiter() (quotas.RequestRateLimiter, bool) {
 	rate, on := l.driven.Applying()
 	if !on || rate <= 0 {
-		return l.original
+		return l.original, false
 	}
 	if bits := math.Float64bits(rate); l.rate.Load() != bits {
 		l.mu.Lock()
@@ -202,7 +215,7 @@ func (l *schedulerLimiter) limiter() quotas.RequestRateLimiter {
 		l.rate.Store(bits)
 		l.mu.Unlock()
 	}
-	return l.coupled
+	return l.coupled, true
 }
 
 // held records a task the buckets held back, while their rate is below the static rate.

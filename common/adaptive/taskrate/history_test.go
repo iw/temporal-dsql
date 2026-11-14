@@ -223,6 +223,38 @@ func TestSchedulerLimiterRecordsTheTasksItsBucketsHoldBack(t *testing.T) {
 	require.Len(t, refusals.headrooms, 20)
 }
 
+// reservingRefusals reserves for another task the first time it records a refusal, as
+// another shard's submitter might while the refusal is made.
+type reservingRefusals struct {
+	l     *schedulerLimiter
+	now   time.Time
+	delay time.Duration
+	done  bool
+}
+
+func (r *reservingRefusals) RecordCoupledRefusal(float64) {
+	if r.done {
+		return
+	}
+	r.done = true
+	r.delay = r.l.Reserve(r.now, taskRequest(tasks.PriorityLow)).DelayFrom(r.now)
+}
+
+// A refused task reserves nothing, so a task that reserves meanwhile waits only for its
+// own token. Had the refusal reserved and then canceled, its token would have stayed
+// spent, and the other task would wait for both.
+func TestSchedulerLimiterRefusesWithoutReserving(t *testing.T) {
+	now := time.Now()
+	refusals := &reservingRefusals{now: now}
+	l := newSchedulerLimiter(newCountingLimiter(), &fixedRate{rate: 10, on: true}, staticRate(100), defaultSettings, refusals)
+	refusals.l = l
+
+	require.True(t, l.Allow(now, taskRequest(tasks.PriorityLow)))
+	require.False(t, l.Allow(now, taskRequest(tasks.PriorityLow)))
+	require.True(t, refusals.done)
+	require.Equal(t, 100*time.Millisecond, refusals.delay, "the next token, at 10 a second")
+}
+
 func TestSchedulerLimiterRecordsOnlyItsBucketsRefusalsBelowTheStaticRate(t *testing.T) {
 	now := time.Now()
 	refuse := func(l *schedulerLimiter) {

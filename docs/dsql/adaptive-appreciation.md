@@ -447,7 +447,7 @@ The task rate's steps from 240 s to 390 s, both hosts together, 300 steps a run:
 
 1. **Moving the mix on few calls lets the coupled probes through on DSQL.** With every controller enabled, capacity probed back and every workflow completed, where 847 were still running after the drain on 9 November. With capacity and the task rate, the longest pause on the host with 11 shards fell from 51 s to 14 s and 6 s.
 2. **The coupled settings are still needed.** Without them, capacity held its cut after the store recovered, and 555 workflows were still running after the drain, though the simulator's `coupled-slow-store` completes without them.
-3. **A task rate at its floor can still pause the probes**, for 36 s in one of the two `ctc` runs. At its floor, the task rate doesn't follow capacity's probes, and there history's calls stayed under `CoupledBindingShare` of capacity's rate until a step's calls passed it.
+3. **A task rate at its floor can still pause the probes**, for 36 s in one of the two `ctc` runs. At its floor, the task rate doesn't follow capacity's probes, and there history's calls stayed under `CoupledBindingShare` of capacity's rate until a step's calls passed it. The traces later showed why: at its floor, the scheduler admitted 71% of its rate on that host, because its refusals cost its buckets tokens ([Proposal 3](adaptive-behaviour.md#proposal-3-one-persistence-capacity-controller)).
 4. **Once capacity has probed back, its queued cuts set the drain's pace.** `ctc` and `ctc2` took about as long to drain as 9 November's `ctc`, with about the same p99.
 
 ### What it doesn't cover
